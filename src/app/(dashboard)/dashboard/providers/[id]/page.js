@@ -31,6 +31,15 @@ const AUTO_PING_SETTINGS_KEYS = {
   codex: "codexAutoPing",
 };
 
+// Providers whose real catalog lives in the connected account (Qoder publishes
+// per-plan models, Trae Enterprise per tenant), so the registry list is only a
+// fallback and one click imports the live catalog.
+const LIVE_CATALOG_IMPORT_PROVIDERS = {
+  qoder: "Fetch Qoder Models",
+  "qoder-cn": "Fetch Qoder Models",
+  "trae-enterprise": "Fetch Trae Enterprise Models",
+};
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -83,7 +92,7 @@ export default function ProviderDetailPage() {
   const [oneByOneResults, setOneByOneResults] = useState({});
   const [oneByOneSummary, setOneByOneSummary] = useState(null);
   const stopOneByOneRef = useRef(false);
-  const [importingQoderModels, setImportingQoderModels] = useState(false);
+  const [importingLiveModels, setImportingLiveModels] = useState(false);
   const [importingClineModels, setImportingClineModels] = useState(false);
   const { copied, copy } = useCopyToClipboard();
 
@@ -584,16 +593,16 @@ export default function ProviderDetailPage() {
     }
   };
 
-  // Fetch Qoder model list and automatically add to available models
-  const handleImportQoderModels = async () => {
-    if (importingQoderModels) return;
+  // Fetch the connected account's model list and add every model not yet present.
+  const handleImportLiveModels = async () => {
+    if (importingLiveModels) return;
     const activeConnection = connections.find((conn) => conn.isActive !== false);
     if (!activeConnection) {
-      alert(translate("Please add an active Qoder connection first"));
+      alert(translate("Please add an active connection first"));
       return;
     }
 
-    setImportingQoderModels(true);
+    setImportingLiveModels(true);
     try {
       const res = await fetch(`/api/providers/${activeConnection.id}/models`);
       const data = await res.json();
@@ -611,10 +620,11 @@ export default function ProviderDetailPage() {
       for (const model of models) {
         const modelId = model.id || model.name;
         if (!modelId) continue;
-        
-        // Qoder model ID format may be "qoder/auto", "qoder-cn/auto" or "auto",
-        // need to remove the provider prefix before storing.
-        const cleanModelId = modelId.replace(/^(qoder-cn|qoder)\//, "");
+
+        // Qoder publishes "<providerId>/<key>" so the dashboard shows the same
+        // identifier the chat router expects; the local alias supplies the prefix.
+        const prefix = `${providerId}/`;
+        const cleanModelId = modelId.startsWith(prefix) ? modelId.slice(prefix.length) : modelId;
         const alreadyExists = customModels.some(
           (entry) => entry.providerAlias === providerStorageAlias && entry.id === cleanModelId && (entry.kind || entry.type || "llm") === "llm"
         ) || Object.values(modelAliases).includes(`${providerStorageAlias}/${cleanModelId}`);
@@ -625,17 +635,17 @@ export default function ProviderDetailPage() {
         await handleAddCustomModel(cleanModelId, "llm", providerStorageAlias);
         importedCount += 1;
       }
-      
+
       if (importedCount === 0) {
         alert(translate("All models already exist, no new models added"));
       } else {
         alert(translate("Successfully added") + ` ${importedCount} ` + translate("models"));
       }
     } catch (error) {
-      console.log("Error importing Qoder models:", error);
+      console.log("Error importing live models:", error);
       alert(translate("Error fetching models") + ": " + error.message);
     } finally {
-      setImportingQoderModels(false);
+      setImportingLiveModels(false);
     }
   };
   // Fetch the live Cline /models catalog and add every model not yet present.
@@ -1246,17 +1256,17 @@ export default function ProviderDetailPage() {
           Add Model
         </button>
 
-        {/* Import Qoder models button — only show for qoder/qoder-cn provider */}
-        {(providerId === "qoder" || providerId === "qoder-cn") && connections.some((conn) => conn.isActive !== false) && (
+        {/* Import the account's live model catalog — Qoder / Qoder CN / Trae Enterprise */}
+        {LIVE_CATALOG_IMPORT_PROVIDERS[providerId] && connections.some((conn) => conn.isActive !== false) && (
           <button
-            onClick={handleImportQoderModels}
-            disabled={importingQoderModels}
+            onClick={handleImportLiveModels}
+            disabled={importingLiveModels}
             className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-blue-500/40 px-3 py-2 text-xs text-blue-600 dark:text-blue-400 transition-colors hover:border-blue-500 hover:bg-blue-500/5 sm:w-auto disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            <span className="material-symbols-outlined text-sm" style={importingQoderModels ? { animation: "spin 1s linear infinite" } : undefined}>
-              {importingQoderModels ? "progress_activity" : "download"}
+            <span className="material-symbols-outlined text-sm" style={importingLiveModels ? { animation: "spin 1s linear infinite" } : undefined}>
+              {importingLiveModels ? "progress_activity" : "download"}
             </span>
-            {importingQoderModels ? translate("Fetching...") : translate("Fetch Qoder Models")}
+            {importingLiveModels ? translate("Fetching...") : translate(LIVE_CATALOG_IMPORT_PROVIDERS[providerId])}
           </button>
         )}
 

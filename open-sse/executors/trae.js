@@ -19,6 +19,19 @@ const TRAE_UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36";
 
+// Cloud-IDE-JWT payload claims we can reuse for common_params when the
+// connection has no providerSpecificData (e.g. a pasted login token).
+function readJwtClaims(token) {
+  const parts = String(token || "").split(".");
+  if (parts.length !== 3) return {};
+  try {
+    const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString());
+    return payload?.data || {};
+  } catch {
+    return {};
+  }
+}
+
 function flattenQuery(messages) {
   const parts = [];
   for (const m of messages) {
@@ -42,55 +55,63 @@ function flattenQuery(messages) {
 }
 
 export default class TraeExecutor extends BaseExecutor {
-  constructor() {
-    super("trae", PROVIDERS.trae);
+  constructor(provider = "trae") {
+    super(provider, PROVIDERS[provider]);
+    this.isEnterprise = provider === "trae-enterprise";
   }
 
   base() {
-    return (this.config.baseUrl || "https://core-normal.trae.ai/api/remote/v1").replace(/\/$/, "");
+    const url = this.config?.baseUrl;
+    if (!url) throw new Error(`Trae provider "${this.provider}" has no transport baseUrl`);
+    return url.replace(/\/$/, "");
   }
 
   buildHeaders(credentials, stream = true) {
-    const token = credentials?.accessToken || "";
     const psd = credentials?.providerSpecificData || {};
     return {
-      Authorization: `Cloud-IDE-JWT ${token}`,
+      ...(this.config?.headers || {}),
+      Authorization: `Cloud-IDE-JWT ${credentials?.accessToken || ""}`,
       "Content-Type": "application/json",
-      "X-Trae-Client-Type": "web",
       "X-Preferenced-Language": psd.appLanguage || "en",
       "x-user-region": psd.userRegion || "US",
-      Referer: "https://solo.trae.ai/",
       "User-Agent": TRAE_UA,
       Accept: stream ? "text/event-stream" : "application/json",
     };
   }
 
   // SOLO session modes: "code" (model picker) vs "work" (fast auto lane).
+  // Enterprise has no "work" lane — sending it as a model_name 504s upstream,
+  // so the alias degrades to the server-picked auto lane.
   resolveMode(model) {
     const m = (model || "").trim().toLowerCase();
-    if (m === "work" || m === "auto-work" || m === "solo-work") {
+    const isWork = m === "work" || m === "auto-work" || m === "solo-work";
+    if (isWork && !this.isEnterprise) {
       return { mode: "work", strategy: "auto", modelName: "" };
     }
-    const auto = !m || m === "auto";
+    const auto = !m || m === "auto" || isWork;
     return { mode: "code", strategy: auto ? "auto" : "manual", modelName: auto ? "" : model };
   }
 
   // common_params is a JSON-encoded string embedded inside initial_message.
-  commonParams(psd, mode, sessionId) {
+  // Values come from the connection's providerSpecificData, fall back to the
+  // identity claims carried in the Cloud-IDE-JWT, then to per-site defaults.
+  commonParams(psd, mode, sessionId, accessToken) {
+    const claims = readJwtClaims(accessToken);
+    const ent = this.isEnterprise;
     const cp = {
       language: "en-us",
       app_language: psd.appLanguage || "en",
       quality: "stable",
-      app_version: psd.appVersion || "1.0.0.1229",
+      app_version: psd.appVersion || (ent ? "3.5.54" : "1.0.0.1229"),
       web_id: psd.webId || "",
-      user_identity: psd.userIdentity || "Free",
+      user_identity: psd.userIdentity || (ent ? "member" : "Free"),
       is_freshman: "0",
       biz_user_id: psd.bizUserId || "",
-      user_unique_id: psd.userUniqueId || "",
-      scope: psd.scope || "marscode-us",
-      tenant: psd.tenant || "marscode",
-      region: psd.region || "US-East",
-      aiRegion: psd.aiRegion || psd.region || "US-East",
+      user_unique_id: psd.userUniqueId || claims.user_id || "",
+      scope: psd.scope || (ent ? claims.scope || "saas" : "marscode-us"),
+      tenant: psd.tenant || (ent ? claims.tenant_id || "tob_online" : "marscode"),
+      region: psd.region || (ent ? "cn-beijing" : "US-East"),
+      aiRegion: psd.aiRegion || psd.region || (ent ? "cn-beijing" : "US-East"),
       is_privacy_mode: 0,
       privacy_mode: "off",
       solo_chat_mode: mode,
@@ -100,7 +121,7 @@ export default class TraeExecutor extends BaseExecutor {
   }
 
   // POST /chat_sessions — creates a session and submits the first turn.
-  async createSession(headers, query, model, psd, signal) {
+  async createSession(headers, query, model, psd, signal, accessToken, proxyOptions) {
     const { mode, strategy, modelName } = this.resolveMode(model);
     const body = {
       mode,
@@ -112,7 +133,7 @@ export default class TraeExecutor extends BaseExecutor {
         model_name: modelName,
         agent_type: "solo_agent_remote",
         model_selection_strategy: strategy,
-        common_params: this.commonParams(psd, mode),
+        common_params: this.commonParams(psd, mode, null, accessToken),
       },
       env: "remote",
       auto_create_project: false,
@@ -123,7 +144,7 @@ export default class TraeExecutor extends BaseExecutor {
       headers,
       body: JSON.stringify(body),
       signal,
-    }, null);
+    }, proxyOptions || null);
     const text = await res.text();
     if (!res.ok) throw new Error(`[${res.status}] ${text}`);
     const json = JSON.parse(text);
@@ -133,7 +154,7 @@ export default class TraeExecutor extends BaseExecutor {
 
   // GET /events SSE → invoke onEvent(eventType, dataObj) per frame.
   // Resolves when `done`/`error` arrives, the stream ends, or timeout fires.
-  async streamEvents(headers, sessionId, replyTo, onEvent, signal) {
+  async streamEvents(headers, sessionId, replyTo, onEvent, signal, proxyOptions) {
     const url = `${this.base()}/chat_sessions/${sessionId}/events?reply_to_message_id=${encodeURIComponent(replyTo)}`;
     const ctrl = new AbortController();
     if (signal?.aborted) ctrl.abort();
@@ -141,7 +162,7 @@ export default class TraeExecutor extends BaseExecutor {
     const onAbort = () => ctrl.abort();
     if (signal) signal.addEventListener("abort", onAbort, { once: true });
     try {
-      const res = await proxyAwareFetch(url, { method: "GET", headers, signal: ctrl.signal }, null);
+      const res = await proxyAwareFetch(url, { method: "GET", headers, signal: ctrl.signal }, proxyOptions || null);
       if (!res.ok || !res.body) throw new Error(`[${res.status}] events stream failed`);
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
@@ -174,10 +195,10 @@ export default class TraeExecutor extends BaseExecutor {
   }
 
   async execute({ model, body, stream, credentials, signal }) {
-    const headers = this.buildHeaders(credentials, stream !== false);
     const psd = credentials?.providerSpecificData || {};
+    const proxyOptions = credentials?.proxyOptions || null;
     const query = flattenQuery(body?.messages || []);
-    const responseId = `chatcmpl-trae-${Date.now()}`;
+    const responseId = `chatcmpl-${this.provider}-${Date.now()}`;
     const created = Math.floor(Date.now() / 1000);
 
     const errResponse = (status, message) => new Response(
@@ -185,9 +206,18 @@ export default class TraeExecutor extends BaseExecutor {
       { status, headers: { "Content-Type": "application/json" } }
     );
 
+    // Both Trae sites carry the SOLO bearer in credentials.accessToken; the
+    // OAuth refresh path re-mints it via ExchangeToken (services/tokenRefresh).
+    const accessToken = credentials?.accessToken || "";
+    if (!accessToken) {
+      return { response: errResponse(401, `${this.provider}: no Cloud-IDE-JWT — reconnect this provider`), url: this.base(), headers: {}, transformedBody: body };
+    }
+
+    const headers = this.buildHeaders({ ...credentials, accessToken }, stream !== false);
+
     let session;
     try {
-      session = await this.createSession(headers, query, model, psd, signal);
+      session = await this.createSession(headers, query, model, psd, signal, accessToken, proxyOptions);
     } catch (err) {
       return { response: errResponse(502, err?.message ? String(err.message) : String(err)), url: this.base(), headers, transformedBody: body };
     }
@@ -198,7 +228,11 @@ export default class TraeExecutor extends BaseExecutor {
     let sent = 0;
     let usage = null;
     let errorEvent = null;
+    let finishSummary = "";
     const renderNewText = (data) => {
+      if (data.tool_call_info?.name === "finish") {
+        finishSummary = data.tool_call_info?.params?.summary || finishSummary;
+      }
       const pid = data.id;
       if (!pid) return "";
       if (!(pid in thoughts)) order.push(pid);
@@ -208,6 +242,14 @@ export default class TraeExecutor extends BaseExecutor {
       const piece = full.slice(sent);
       sent = full.length;
       return piece;
+    };
+    // SOLO truncates the streamed `thought` on some turns and delivers the rest
+    // only in the finish tool call, so top the stream up when it is a prefix.
+    const missingTail = () => {
+      const acc = order.map((i) => thoughts[i]).join("");
+      return finishSummary.startsWith(acc) && finishSummary.length > acc.length
+        ? finishSummary.slice(acc.length)
+        : "";
     };
 
     if (stream !== false) {
@@ -239,7 +281,7 @@ export default class TraeExecutor extends BaseExecutor {
                 }
               }
               return ev === "done";
-            }, signal);
+            }, signal, proxyOptions);
             if (errorEvent) {
               emit({
                 id: responseId,
@@ -247,16 +289,22 @@ export default class TraeExecutor extends BaseExecutor {
                 created,
                 model,
                 choices: [],
-                error: { message: `trae ${errorEvent.code || ""}: ${errorEvent.message || ""}`, type: "api_error" },
+                error: { message: `${this.provider} ${errorEvent.code || ""}: ${errorEvent.message || ""}`, type: "api_error" },
               });
             } else {
-              emit({
-                id: responseId,
-                object: "chat.completion.chunk",
-                created,
-                model,
-                choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
-              });
+              const tail = missingTail();
+              if (tail) {
+                emit({
+                  id: responseId,
+                  object: "chat.completion.chunk",
+                  created,
+                  model,
+                  choices: [{ index: 0, delta: { content: tail }, finish_reason: null }],
+                });
+              }
+              // Usage before the finish chunk: the stream normalizer stamps the
+              // usage it has seen so far onto the finish chunk, and an unseen
+              // one makes it substitute a char-count estimate.
               if (usage) {
                 emit({
                   id: responseId,
@@ -271,6 +319,13 @@ export default class TraeExecutor extends BaseExecutor {
                   },
                 });
               }
+              emit({
+                id: responseId,
+                object: "chat.completion.chunk",
+                created,
+                model,
+                choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+              });
             }
             controller.enqueue(enc.encode("data: [DONE]\n\n"));
             controller.close();
@@ -301,14 +356,14 @@ export default class TraeExecutor extends BaseExecutor {
         if (ev === "token_usage") usage = data;
         if (ev === "plan_item") renderNewText(data);
         return ev === "done";
-      }, signal);
+      }, signal, proxyOptions);
     } catch (err) {
       return { response: errResponse(502, err?.message ? String(err.message) : String(err)), url: this.base(), headers, transformedBody: body };
     }
     if (errorEvent) {
-      return { response: errResponse(502, `trae ${errorEvent.code || ""}: ${errorEvent.message || ""}`), url: this.base(), headers, transformedBody: body };
+      return { response: errResponse(502, `${this.provider} ${errorEvent.code || ""}: ${errorEvent.message || ""}`), url: this.base(), headers, transformedBody: body };
     }
-    const content = order.map((i) => thoughts[i]).join("");
+    const content = order.map((i) => thoughts[i]).join("") + missingTail();
     const out = {
       id: responseId,
       object: "chat.completion",

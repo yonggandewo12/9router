@@ -58,6 +58,7 @@ const executors = {
   "codebuddy-cn": new CodeBuddyExecutor(),
   "codebuddy-intl": new CodeBuddyIntlExecutor(),
   trae: new TraeExecutor(),
+  "trae-enterprise": new TraeExecutor("trae-enterprise"),
   zed: new ZedExecutor(),
   windsurf: new WindsurfExecutor(),
   "devin-cli": new DevinCliExecutor(),

@@ -3,6 +3,7 @@ import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { testProxyUrl } from "@/lib/network/proxyTest";
 import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider } from "@/shared/constants/providers";
 import { getDefaultModel } from "open-sse/config/providerModels.js";
+import { traeEnterpriseConfig } from "open-sse/shared/trae/enterprise.js";
 import { resolveOllamaLocalHost, PROVIDERS } from "open-sse/config/providers.js";
 import { CODEX_CLI_VERSION } from "open-sse/config/appConstants.js";
 import {
@@ -81,6 +82,16 @@ const OAUTH_TEST_CONFIG = {
     authHeader: "Authorization",
     authPrefix: "Bearer ",
     refreshable: false,
+  },
+  "trae-enterprise": {
+    // Cheapest authenticated read: the per-tenant model catalog proves the
+    // Cloud-IDE-JWT without spending agent quota.
+    url: traeEnterpriseConfig().modelsUrl,
+    method: "GET",
+    authHeader: "Authorization",
+    authPrefix: "Cloud-IDE-JWT ",
+    extraHeaders: { Accept: "application/json" },
+    refreshable: true,
   },
   kimi: { checkExpiry: true, refreshable: true },
   "kimi-coding": { checkExpiry: true, refreshable: true },

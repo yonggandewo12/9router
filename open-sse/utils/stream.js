@@ -137,7 +137,12 @@ export function createSSEStream(options = {}) {
           let injectedUsage = false;
           let responsesTerminal = false;
 
-          if (trimmed.startsWith("data:") && trimmed.slice(5).trim() !== "[DONE]") {
+          // The upstream sentinel is forwarded verbatim below; without recording it
+          // here flush() appends a second one and clients see duplicate [DONE].
+          const isDoneSentinel = trimmed.startsWith("data:") && trimmed.slice(5).trim() === "[DONE]";
+          if (isDoneSentinel) streamDoneSent = true;
+
+          if (trimmed.startsWith("data:") && !isDoneSentinel) {
             try {
               const parsed = JSON.parse(trimmed.slice(5).trim());
 
@@ -203,11 +208,20 @@ export function createSSEStream(options = {}) {
 
               const isFinishChunk = parsed.choices?.[0]?.finish_reason;
               if (isFinishChunk && !hasValidUsage(parsed.usage)) {
-                const estimated = estimateUsage(body, totalContentLength, FORMATS.OPENAI);
-                parsed.usage = filterUsageForFormat(estimated, FORMATS.OPENAI);
-                output = `data: ${JSON.stringify(parsed)}\n`;
-                usage = estimated;
-                injectedUsage = true;
+                // A usage frame can arrive before the finish chunk (Trae SOLO and
+                // others). Those real counts beat a char-count estimate, and
+                // overwriting `usage` here would also bill the estimate.
+                if (hasValidUsage(usage)) {
+                  parsed.usage = filterUsageForFormat(addBufferToUsage(usage), FORMATS.OPENAI);
+                  output = `data: ${JSON.stringify(parsed)}\n`;
+                  injectedUsage = true;
+                } else {
+                  const estimated = estimateUsage(body, totalContentLength, FORMATS.OPENAI);
+                  parsed.usage = filterUsageForFormat(estimated, FORMATS.OPENAI);
+                  output = `data: ${JSON.stringify(parsed)}\n`;
+                  usage = estimated;
+                  injectedUsage = true;
+                }
               } else if (isFinishChunk && usage) {
                 const buffered = addBufferToUsage(usage);
                 parsed.usage = filterUsageForFormat(buffered, FORMATS.OPENAI);

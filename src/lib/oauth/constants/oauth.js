@@ -179,6 +179,22 @@ export const TRAE_CONFIG = {
   oauthTimeoutMs: 600_000,
 };
 
+// Trae Enterprise (console.enterprise.trae.cn) — same device flow against the
+// tenant's console host. Endpoints/identity come from the registry entry
+// (single source); the device context and token lifetime match consumer Trae.
+export const TRAE_ENTERPRISE_CONFIG = {
+  ...PROVIDER_OAUTH["trae-enterprise"],
+  minAppVersion: TRAE_CONFIG.minAppVersion,
+  defaultAppVersion: TRAE_CONFIG.defaultAppVersion,
+  defaultAppType: TRAE_CONFIG.defaultAppType,
+  defaultPluginVersion: TRAE_CONFIG.defaultPluginVersion,
+  defaultDeviceId: TRAE_CONFIG.defaultDeviceId,
+  userAgent: TRAE_CONFIG.userAgent,
+  authScheme: TRAE_CONFIG.authScheme,
+  tokenLifetimeDays: TRAE_CONFIG.tokenLifetimeDays,
+  oauthTimeoutMs: TRAE_CONFIG.oauthTimeoutMs,
+};
+
 // Windsurf / Devin CLI OAuth — authorization_code (implicit) flow with local callback.
 //   1) Browser opens windsurf.com/windsurf/signin?response_type=token&client_id=...&redirect_uri=${cb}
 //   2) Redirect → ${cb}?access_token=${firebaseJWT}&state=...

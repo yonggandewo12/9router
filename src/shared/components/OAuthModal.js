@@ -7,7 +7,7 @@ import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 
 // Providers using the dynamic-port local callback proxy.
 // Browser OAuth: popup → auto callback → auto exchange → poll-status.
-const PROXY_OAUTH_PROVIDERS = new Set(["trae", "windsurf", "zed"]);
+const PROXY_OAUTH_PROVIDERS = new Set(["trae", "trae-enterprise", "windsurf", "zed"]);
 
 // Providers offering a paste-token fallback (import-token flow).
 // UX warns if the IDE (which issues the token) is not installed.
@@ -750,12 +750,15 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
       ? `${placeholderUrl.replace("code=...", "token=...")} or copied token`
       : placeholderUrl;
 
+  const pasteCfg = PASTE_TOKEN_PROVIDERS[provider];
+
   return (
     <Modal isOpen={isOpen} title={modalTitle} onClose={handleClose} size="lg">
       <div className="flex flex-col gap-4">
         {/* Trae/Windsurf: browser OAuth (proxy) + paste-token fallback */}
         {PROXY_OAUTH_PROVIDERS.has(provider) && (step === "waiting" || step === "input" || step === "error") && (
           <>
+            {pasteCfg && (
             <div className="flex gap-2">
               <button
                 type="button"
@@ -772,6 +775,7 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
                 🔑 Paste token
               </button>
             </div>
+            )}
 
             {authMode === "browser" && (
               <>
@@ -801,21 +805,21 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
               </>
             )}
 
-            {authMode === "paste-token" && (
+            {authMode === "paste-token" && pasteCfg && (
               <div className="space-y-3">
                 {ideStatus && !ideStatus.installed && (
-                  <div className={`px-3 py-2 rounded-lg text-sm ${PASTE_TOKEN_PROVIDERS[provider].ideOptional ? "bg-blue-500/10 text-blue-700 dark:text-blue-300" : "bg-yellow-500/10 text-yellow-700 dark:text-yellow-300"}`}>
-                    {PASTE_TOKEN_PROVIDERS[provider].ideName} IDE not detected.
-                    {PASTE_TOKEN_PROVIDERS[provider].ideOptional
+                  <div className={`px-3 py-2 rounded-lg text-sm ${pasteCfg.ideOptional ? "bg-blue-500/10 text-blue-700 dark:text-blue-300" : "bg-yellow-500/10 text-yellow-700 dark:text-yellow-300"}`}>
+                    {pasteCfg.ideName} IDE not detected.
+                    {pasteCfg.ideOptional
                       ? " You can still grab the token from DevTools."
-                      : ` Install ${PASTE_TOKEN_PROVIDERS[provider].ideName} IDE to get the token, or use "Sign in with browser".`}
+                      : ` Install ${pasteCfg.ideName} IDE to get the token, or use "Sign in with browser".`}
                   </div>
                 )}
-                <p className="text-sm text-text-muted">{PASTE_TOKEN_PROVIDERS[provider].instructions}</p>
+                <p className="text-sm text-text-muted">{pasteCfg.instructions}</p>
                 <Input
                   value={pasteToken}
                   onChange={(e) => setPasteToken(e.target.value)}
-                  placeholder={PASTE_TOKEN_PROVIDERS[provider].placeholder}
+                  placeholder={pasteCfg.placeholder}
                   className="font-mono text-xs"
                 />
                 <div className="flex gap-2">

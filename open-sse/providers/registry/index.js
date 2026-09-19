@@ -77,6 +77,7 @@ import p73 from "./perplexity-agent.js";
 import p74 from "./playht.js";
 import p75 from "./qoder.js";
 import p124 from "./qoder-cn.js";
+import p125 from "./trae-enterprise.js";
 import p77 from "./recraft.js";
 import p78 from "./runwayml.js";
 import p79 from "./sdwebui.js";
@@ -227,6 +228,7 @@ export default [
   p98,
   p99,
   p100,
+  p125,
   // p102, // trae — hidden, no tool calling
   p103,
   p105,

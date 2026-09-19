@@ -88,6 +88,11 @@ async function completeXaiManualCode(code, state) {
  * Handles: authorize, exchange, device-code, poll
  */
 
+// Trae and Trae Enterprise share the dynamic-port callback proxy (one session each).
+function isTraeProxyProvider(provider) {
+  return provider === "trae" || provider === "trae-enterprise";
+}
+
 // GET /api/oauth/[provider]/authorize - Generate auth URL
 // GET /api/oauth/[provider]/device-code - Request device code (for device_code flow)
 export async function GET(request, { params }) {
@@ -139,8 +144,8 @@ export async function GET(request, { params }) {
     if (action === "start-proxy") {
       // Trae/Windsurf/Zed use a dynamic-port local callback server (singleton session,
       // state is registered separately via /register-session after /authorize).
-      if (provider === "trae") {
-        const result = await startTraeProxy();
+      if (isTraeProxyProvider(provider)) {
+        const result = await startTraeProxy(provider);
         return NextResponse.json(result);
       }
       if (provider === "windsurf") {
@@ -185,7 +190,7 @@ export async function GET(request, { params }) {
         return NextResponse.json({ error: "Missing state" }, { status: 400 });
       }
       let session;
-      if (provider === "trae") session = getTraeSessionStatus(state);
+      if (isTraeProxyProvider(provider)) session = getTraeSessionStatus(state, provider);
       else if (provider === "windsurf") session = getWindsurfSessionStatus(state);
       else if (provider === "zed") session = getZedSessionStatus(state);
       else if (provider === "xai") session = getXaiSessionStatus(state);
@@ -205,7 +210,7 @@ export async function GET(request, { params }) {
           }
           return NextResponse.json(payload);
         }
-        if (provider === "trae") clearTraeSession(state);
+        if (isTraeProxyProvider(provider)) clearTraeSession(state, provider);
         else if (provider === "windsurf") clearWindsurfSession(state);
         else if (provider === "zed") clearZedSession(state);
         else if (provider === "xai") clearXaiSession(state);
@@ -216,7 +221,7 @@ export async function GET(request, { params }) {
     }
 
     if (action === "stop-proxy") {
-      if (provider === "trae") stopTraeProxy();
+      if (isTraeProxyProvider(provider)) stopTraeProxy(provider);
       else if (provider === "windsurf") stopWindsurfProxy();
       else if (provider === "zed") stopZedProxy();
       else if (provider === "xai") stopXaiProxy();
@@ -308,7 +313,7 @@ export async function POST(request, { params }) {
       const state = searchParams.get("state") || body?.state;
       if (!state) return NextResponse.json({ error: "Missing state" }, { status: 400 });
       let ok = false;
-      if (provider === "trae") ok = registerTraeSession({ state });
+      if (isTraeProxyProvider(provider)) ok = registerTraeSession({ state, provider });
       else if (provider === "windsurf") ok = registerWindsurfSession({ state });
       else if (provider === "zed") ok = registerZedSession({ state, codeVerifier: body?.codeVerifier, systemId: body?.systemId });
       else return NextResponse.json({ error: "register-session only supported for trae/windsurf/zed" }, { status: 400 });
@@ -382,7 +387,7 @@ export async function POST(request, { params }) {
 
       // Trae/Windsurf: code is either a raw callback URL or a pasted token.
       // exchangeTokens() handles both paths; no PKCE, skip codex JWT extraction.
-      if (provider === "trae" || provider === "windsurf") {
+      if (isTraeProxyProvider(provider) || provider === "windsurf") {
         const token = typeof code === "string" ? code.trim() : "";
         if (!token) {
           return NextResponse.json({ error: "Missing token or callback URL" }, { status: 400 });

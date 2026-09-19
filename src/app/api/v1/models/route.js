@@ -15,6 +15,7 @@ import { resolveClinepassModels, resolveClineModels } from "open-sse/services/cl
 import { resolveGrokCliModels } from "open-sse/services/grokCliModels.js";
 import { resolveCursorModels } from "open-sse/services/cursorModels.js";
 import { resolveZedModels } from "open-sse/shared/zedAuth.js";
+import { resolveTraeEnterpriseModels } from "open-sse/shared/trae/enterprise.js";
 import { updateProviderCredentials } from "@/sse/services/tokenRefresh";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { capabilitiesFromServiceKind, getCapabilitiesForModel } from "open-sse/providers/capabilities.js";
@@ -138,6 +139,12 @@ const LIVE_MODEL_RESOLVERS = {
           capabilities: m.supportsTools ? { tools: true } : undefined,
         })),
     };
+  },
+  // Trae Enterprise admins add models per tenant, so the account catalog is the
+  // truth; the static registry list is only the fallback when this fetch fails.
+  "trae-enterprise": async (conn) => {
+    const result = await resolveTraeEnterpriseModels({ accessToken: conn.accessToken });
+    return result?.models?.length ? { models: result.models.map((m) => ({ id: m.id, name: m.name })) } : null;
   },
 };
 

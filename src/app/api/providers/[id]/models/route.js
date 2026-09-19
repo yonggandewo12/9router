@@ -12,6 +12,7 @@ import { resolveGrokCliModels } from "open-sse/services/grokCliModels.js";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { resolveCursorModels } from "open-sse/services/cursorModels.js";
 import { resolveZedModels } from "open-sse/shared/zedAuth.js";
+import { resolveTraeEnterpriseModels } from "open-sse/shared/trae/enterprise.js";
 import { resolveClineModels, resolveClinepassModels } from "open-sse/services/clinepassModels.js";
 
 const GEMINI_CLI_MODELS_URL = "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
@@ -448,6 +449,20 @@ const PROVIDER_MODELS_CONFIG = {
   },
   qoder: buildQoderModelsResolver("qoder"),
   "qoder-cn": buildQoderModelsResolver("qoder-cn"),
+  // Trae Enterprise publishes a per-tenant catalog (admins add their own
+  // models), so the static registry list is only a fallback.
+  "trae-enterprise": {
+    customResolver: async (connection) => {
+      // Explicit dashboard refresh: bypass the catalog cache so a model an admin
+      // just published shows up in this click.
+      const result = await resolveTraeEnterpriseModels({ accessToken: connection.accessToken }, { forceRefresh: true });
+      if (result?.models?.length) return { models: result.models };
+      return {
+        models: getStaticProviderModels("trae-enterprise"),
+        warning: "Trae Enterprise returned no live models; falling back to static catalog.",
+      };
+    },
+  },
   "gemini-cli": {
     customResolver: buildOAuthResolver({
       refreshFn: (conn) => refreshGoogleToken(conn.refreshToken, GEMINI_CONFIG.clientId, GEMINI_CONFIG.clientSecret),

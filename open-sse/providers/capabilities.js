@@ -538,6 +538,10 @@ function isCommandCodeTextOnly(model) {
   }
   return false;
 }
+
+// Providers whose chat wire is the Trae SOLO remote-agent API.
+const TRAE_SOLO_PROVIDERS = new Set(["trae", "trae-enterprise"]);
+
 export function getCapabilitiesForModel(provider, model) {
   if (!model) return { ...DEFAULT_CAPABILITIES };
 
@@ -559,6 +563,15 @@ export function getCapabilitiesForModel(provider, model) {
       contextWindow: 1000000,
       maxOutput: 384000,
     };
+  }
+
+  // Trae's SOLO remote-agent wire (consumer + enterprise) posts a plain-text
+  // query and answers with prose: image blocks never leave 9router and the
+  // `finish` tool call has no OpenAI tool_calls equivalent, so vision and tool
+  // calling are forced off on top of the catalog limits — refine() alone is
+  // additive and would flip vision back on for names like glm-5v-turbo.
+  if (TRAE_SOLO_PROVIDERS.has(provider)) {
+    return { ...refine(null, provider, model), vision: false, tools: false, reasoning: true, thinkingCanDisable: false };
   }
 
   // 1. Provider-specific override

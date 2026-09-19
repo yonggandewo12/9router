@@ -962,6 +962,23 @@
     "format": "openai",
     "tokenUrl": "https://www.codebuddy.ai/v2/plugin/auth/token"
   },
+  "trae-enterprise": {
+    "baseUrl": "https://console.enterprise.trae.cn/api/remote/v1",
+    "format": "openai",
+    "headers": {
+      "X-Trae-Client-Type": "web",
+      "X-Preferenced-Language": "en",
+      "Referer": "https://console.enterprise.trae.cn/"
+    },
+    "auth": {
+      "combined": true,
+      "header": "Authorization",
+      "scheme": "Cloud-IDE-JWT"
+    },
+    "clientId": "ono9krqynydwx5",
+    "clientSecret": "-",
+    "tokenUrl": "https://console.enterprise.trae.cn/cloudide/api/v3/trae/oauth/ExchangeToken"
+  },
   "zed": {
     "baseUrl": "https://cloud.zed.dev/completions",
     "format": "openai",
