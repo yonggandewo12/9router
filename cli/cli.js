@@ -80,6 +80,19 @@ if (args[0] === "xai" && args[1] === "video") {
   return;
 }
 
+// Headless daemon verbs: manage the background server without the interactive
+// launcher (which always kill-and-starts on launch).
+if (args[0] === "start" || args[0] === "stop" || args[0] === "status") {
+  const { runDaemon } = require("./src/cli/commands/daemon");
+  runDaemon(args[0], args.slice(1))
+    .then((code) => process.exit(code))
+    .catch((err) => {
+      console.error(`❌ ${err?.message || err}`);
+      process.exit(1);
+    });
+  return;
+}
+
 // Self-heal SQLite runtime deps (sql.js + better-sqlite3) into ~/.9router/runtime
 // so the server can resolve them via NODE_PATH. Best-effort — sql.js is required,
 // better-sqlite3 is optional. Logs to stderr only on failure.
@@ -154,6 +167,9 @@ Options:
   -v, --version       Show version
 
 Commands:
+  start               Start the server in the background (headless)
+  stop                Stop the background server
+  status              Show background server status
   xai video --prompt "..." --output video.mp4
                       Generate a Grok Imagine video via the running gateway
                       (see: ${APP_NAME} xai video --help)

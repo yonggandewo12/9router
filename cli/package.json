@@ -1,9 +1,9 @@
 {
-  "name": "9router",
+  "name": "9router-proxy",
   "version": "0.5.81",
   "description": "9Router CLI - Start and manage 9Router server",
   "bin": {
-    "9router": "./cli.js"
+    "9router-proxy": "./cli.js"
   },
   "files": [
     "cli.js",
@@ -17,9 +17,9 @@
     "dev": "nodemon -I --watch cli.js --watch src --watch hooks --ext js,json cli.js",
     "build": "node scripts/build-cli.js",
     "pack:cli": "npm run build && npm pack --pack-destination ..",
-    "publish:cli": "npm run build && npm publish",
+    "publish:cli": "npm publish",
     "postinstall": "node hooks/postinstall.js",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm --prefix ../tests run test && npm run build"
   },
   "dependencies": {
     "enquirer": "^2.4.1",
@@ -35,12 +35,16 @@
   },
   "keywords": [
     "9router",
+    "9router-proxy",
     "cli",
     "proxy",
     "ai",
     "api"
   ],
   "license": "MIT",
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org"
+  },
   "devDependencies": {
     "esbuild": "^0.25.12",
     "nodemon": "^3.1.14"

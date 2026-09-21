@@ -4,8 +4,8 @@
 
 **Connect All AI Code Tools (Claude Code, Cursor, Antigravity, Copilot, Codex, Gemini, OpenCode, Cline, OpenClaw...) to 40+ AI Providers & 100+ Models.**
 
-[![npm](https://img.shields.io/npm/v/9router.svg)](https://www.npmjs.com/package/9router)
-[![Downloads](https://img.shields.io/npm/dm/9router.svg)](https://www.npmjs.com/package/9router)
+[![npm](https://img.shields.io/npm/v/9router-proxy.svg)](https://www.npmjs.com/package/9router-proxy)
+[![Downloads](https://img.shields.io/npm/dm/9router-proxy.svg)](https://www.npmjs.com/package/9router-proxy)
 [![Docker Pulls](https://img.shields.io/docker/pulls/decolua/9router.svg?logo=docker&label=Docker%20pulls)](https://hub.docker.com/r/decolua/9router)
 [![GHCR](https://img.shields.io/badge/GHCR-decolua%2F9router-blue?logo=github)](https://github.com/decolua/9router/pkgs/container/9router)
 [![License](https://img.shields.io/npm/l/9router.svg)](https://github.com/decolua/9router/blob/main/LICENSE)
@@ -40,11 +40,11 @@
 **Option 1 — npm (recommended for desktop):**
 
 ```bash
-npm install -g 9router
-9router
+npm install -g 9router-proxy
+9router-proxy
 
 # Or run directly with npx
-npx 9router
+npx 9router-proxy
 ```
 
 **Option 2 — Docker (server/VPS):**
@@ -79,11 +79,14 @@ That's it! Start coding with FREE AI models.
 ## 🚀 CLI Options
 
 ```bash
-9router                    # Start with default settings
-9router --port 8080        # Custom port
-9router --no-browser       # Don't open browser
-9router --skip-update      # Skip auto-update check
-9router --help             # Show all options
+9router-proxy              # Start with default settings (interactive)
+9router-proxy start        # Start headless background server (log: ~/.9router/server.log)
+9router-proxy status       # Show background server status
+9router-proxy stop         # Stop background server
+9router-proxy --port 8080        # Custom port
+9router-proxy --no-browser       # Don't open browser
+9router-proxy --skip-update      # Skip auto-update check
+9router-proxy --help             # Show all options
 ```
 
 **Dashboard**: `http://localhost:20128/dashboard`
