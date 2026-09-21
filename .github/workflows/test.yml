@@ -14,7 +14,9 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          # node 22's bundled npm 10.x crashes (arborist "edgesOut" null) on
+          # the nested tests/ install; npm >=11 handles it.
+          node-version: 24
 
       - name: Install dependencies
         # Lockfiles are gitignored in this repo, so npm ci is not possible here.
