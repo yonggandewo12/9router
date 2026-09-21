@@ -20,13 +20,16 @@ const waitMaxMs = parseInt(process.env.UPDATER_WAIT_MAX_MS || "15000", 10);
 const waitCheckMs = parseInt(process.env.UPDATER_WAIT_CHECK_MS || "500", 10);
 const appPort = parseInt(process.env.UPDATER_APP_PORT || "20128", 10);
 
-// Data directory (match mitm/paths.js logic)
+// Kept self-contained: copied verbatim into DATA_DIR/runtime/updater and run as a
+// standalone process, so it must not import ../dataDir. Mirror it when it changes.
 function getDataDir() {
-  if (process.env.DATA_DIR) return process.env.DATA_DIR;
-  if (process.platform === "win32") {
-    return path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "9router");
+  const configured = process.env.DATA_DIR;
+  if (!configured) {
+    if (process.platform === "win32") return path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "9router");
+    return path.join(os.homedir(), ".9router");
   }
-  return path.join(os.homedir(), ".9router");
+  if (process.platform === "win32" && /^\//.test(configured)) return path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "9router");
+  return configured;
 }
 const updateDir = path.join(getDataDir(), "update");
 try { fs.mkdirSync(updateDir, { recursive: true }); } catch { /* best effort */ }

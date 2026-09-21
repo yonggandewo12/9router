@@ -1,7 +1,7 @@
 import { spawn, execSync } from "child_process";
 import path from "path";
 import fs from "fs";
-import os from "os";
+import { DATA_DIR } from "@/lib/dataDir";
 import { UPDATER_CONFIG } from "@/shared/constants/config";
 
 const KILL_TIMEOUT_MS = 5000;
@@ -10,13 +10,7 @@ const PROCESS_WAIT_MS = 1500;
 // Kill MITM server by PID file (MITM may run as admin/sudo)
 function killMitmByPidFile() {
   try {
-    const mitmPidFile = path.join(
-      process.platform === "win32"
-        ? path.join(process.env.APPDATA || "", "9router")
-        : path.join(os.homedir(), ".9router"),
-      "mitm",
-      ".mitm.pid"
-    );
+    const mitmPidFile = path.join(DATA_DIR, "mitm", ".mitm.pid");
     if (!fs.existsSync(mitmPidFile)) return;
     const pid = parseInt(fs.readFileSync(mitmPidFile, "utf8").trim(), 10);
     if (!pid) return;
@@ -95,15 +89,6 @@ function collectAppPids() {
   return pids;
 }
 
-// Copy updater.js into DATA_DIR so npm -g can overwrite node_modules safely
-function getDataDir() {
-  if (process.env.DATA_DIR) return process.env.DATA_DIR;
-  if (process.platform === "win32") {
-    return path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "9router");
-  }
-  return path.join(os.homedir(), ".9router");
-}
-
 function resolveBundledUpdaterPath() {
   if (process.env.UPDATER_SCRIPT_PATH && fs.existsSync(process.env.UPDATER_SCRIPT_PATH)) {
     return process.env.UPDATER_SCRIPT_PATH;
@@ -117,10 +102,11 @@ function resolveBundledUpdaterPath() {
   return fromCwd;
 }
 
+// Copy updater.js into DATA_DIR so npm -g can overwrite node_modules safely
 function ensureRuntimeUpdater(bundledPath) {
   try {
     if (!bundledPath || !fs.existsSync(bundledPath)) return bundledPath;
-    const runtimeDir = path.join(getDataDir(), "runtime", "updater");
+    const runtimeDir = path.join(DATA_DIR, "runtime", "updater");
     const runtimePath = path.join(runtimeDir, "updater.js");
     if (fs.existsSync(runtimePath)) {
       try {

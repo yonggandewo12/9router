@@ -4,8 +4,8 @@
 const path = require("path");
 const fs = require("fs");
 const net = require("net");
-const os = require("os");
 const { spawn, execSync } = require("child_process");
+const { getDataDir } = require("../utils/dataDir");
 const pkg = require("../../../package.json");
 
 const DEFAULT_PORT = 20128;
@@ -15,14 +15,9 @@ const standaloneDir = path.join(cliRoot, "app");
 const customServerPath = path.join(standaloneDir, "custom-server.js");
 const serverPath = fs.existsSync(customServerPath) ? customServerPath : path.join(standaloneDir, "server.js");
 
-function getAppDataDir() {
-  return process.platform === "win32"
-    ? path.join(process.env.APPDATA || "", "9router")
-    : path.join(os.homedir(), ".9router");
-}
-
-const pidFile = path.join(getAppDataDir(), "server.pid");
-const logFile = path.join(getAppDataDir(), "server.log");
+const APP_DATA_DIR = getDataDir();
+const pidFile = path.join(APP_DATA_DIR, "server.pid");
+const logFile = path.join(APP_DATA_DIR, "server.log");
 
 function parseOpts(argv) {
   const opts = { port: DEFAULT_PORT, host: DEFAULT_HOST, help: false };
@@ -53,15 +48,29 @@ function isAlive(pid) {
 }
 
 // Guard against PID reuse: the recorded PID must look like our server process.
+// Windows has no `ps`; CIM is the only way to read another process' command line,
+// and without it a recycled PID would be reported as "running".
+function processCommandLine(pid) {
+  try {
+    if (process.platform === "win32") {
+      return execSync(
+        `powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command "(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}').CommandLine"`,
+        { encoding: "utf8", timeout: 8000, windowsHide: true }
+      );
+    }
+    return execSync(`ps -p ${pid} -o command=`, { encoding: "utf8", timeout: 3000 });
+  } catch {
+    return "";
+  }
+}
+
 function isOurServer(pid) {
   if (!isAlive(pid)) return false;
-  if (process.platform === "win32") return true;
-  try {
-    const cmd = execSync(`ps -p ${pid} -o command=`, { encoding: "utf8", timeout: 3000 }).toLowerCase();
-    return cmd.includes("server.js") || cmd.includes("next-server") || cmd.includes("9router");
-  } catch {
-    return false;
-  }
+  const cmd = processCommandLine(pid).toLowerCase();
+  // If CIM/powershell is unavailable, fall back to the old Windows behaviour: refusing to
+  // stop a live server would orphan it, which is worse than a stale-PID false positive.
+  if (!cmd) return process.platform === "win32";
+  return cmd.includes("server.js") || cmd.includes("next-server") || cmd.includes("9router");
 }
 
 function tcpProbe(port, timeoutMs = 1000) {
@@ -118,7 +127,7 @@ async function cmdStart(opts) {
 
   const { ensureSqliteRuntime, buildEnvWithRuntime } = require("../../../hooks/sqliteRuntime");
   try { ensureSqliteRuntime({ silent: true }); } catch { /* best-effort; server falls back to sql.js */ }
-  fs.mkdirSync(getAppDataDir(), { recursive: true });
+  fs.mkdirSync(APP_DATA_DIR, { recursive: true });
   const fd = fs.openSync(logFile, "a");
   const child = spawn(process.execPath,
     ["--dns-result-order=ipv4first", "--max-old-space-size=6144", serverPath], {
@@ -136,7 +145,7 @@ async function cmdStart(opts) {
   if (!ready) {
     console.error(`❌ Server did not come up on port ${opts.port} within 20s. Last log lines:`);
     console.error(tailLog());
-    try { process.kill(child.pid, "SIGKILL"); } catch { /* already dead */ }
+    terminateTree(child.pid, "SIGKILL");
     try { fs.unlinkSync(pidFile); } catch { /* ignore */ }
     return 1;
   }
@@ -147,6 +156,23 @@ async function cmdStart(opts) {
   return 0;
 }
 
+function terminateTree(pid, signal) {
+  if (process.platform === "win32") {
+    // A detached Windows console process can't be sent SIGTERM, so taskkill is the only
+    // lever. /T walks the process tree — otherwise the MITM/tunnel children survive us.
+    const flags = signal === "SIGKILL" ? "/T /F" : "/T";
+    try {
+      execSync(`taskkill ${flags} /PID ${pid}`, { stdio: "ignore", windowsHide: true, timeout: 8000 });
+    } catch { /* already gone / needs /F */ }
+    return;
+  }
+  // start() spawns detached, so the server is its own process-group leader: signalling
+  // -pid tears down its children in one go. Plain pid covers the non-leader case.
+  for (const target of [-pid, pid]) {
+    try { process.kill(target, signal); } catch { /* not a group leader / already dead */ }
+  }
+}
+
 function cmdStop() {
   const pid = readPid();
   if (!pid || !isOurServer(pid)) {
@@ -154,14 +180,11 @@ function cmdStop() {
     console.log("Not running.");
     return 0;
   }
-  // SIGTERM first so the server can tear down its MITM/tunnel children.
-  try { process.kill(pid, "SIGTERM"); } catch { /* ignore */ }
-  try { process.kill(-pid, "SIGTERM"); } catch { /* not a group leader (win/exec) */ }
+  terminateTree(pid, "SIGTERM");
   let deadline = Date.now() + 5000;
   while (Date.now() < deadline && isAlive(pid)) sleepSync(100);
   if (isAlive(pid)) {
-    try { process.kill(pid, "SIGKILL"); } catch { /* ignore */ }
-    try { process.kill(-pid, "SIGKILL"); } catch { /* ignore */ }
+    terminateTree(pid, "SIGKILL");
     deadline = Date.now() + 2000;
     while (Date.now() < deadline && isAlive(pid)) sleepSync(100);
   }
@@ -216,4 +239,4 @@ async function runDaemon(verb, argv) {
   return cmdStatus(opts);
 }
 
-module.exports = { runDaemon, __test__: { parseOpts, pidFile, logFile, getAppDataDir } };
+module.exports = { runDaemon, __test__: { parseOpts, pidFile, logFile, isOurServer, terminateTree, processCommandLine } };

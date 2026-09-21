@@ -65,6 +65,7 @@ function createSpinner(text) {
 const pkg = require("./package.json");
 const { ensureSqliteRuntime, buildEnvWithRuntime } = require("./hooks/sqliteRuntime");
 const { ensureTrayRuntime } = require("./hooks/trayRuntime");
+const { getDataDir } = require("./src/cli/utils/dataDir");
 const args = process.argv.slice(2);
 
 // Subcommands (`9router xai video …`) run against an already-running gateway
@@ -201,13 +202,6 @@ function compareVersions(a, b) {
   return 0;
 }
 
-// Get app data dir (matches app/src/lib/dataDir.js convention)
-function getAppDataDir() {
-  return process.platform === "win32"
-    ? path.join(process.env.APPDATA || "", "9router")
-    : path.join(os.homedir(), ".9router");
-}
-
 // Kill PID from file (best-effort, removes file after)
 function killByPidFile(pidFile) {
   try {
@@ -227,7 +221,7 @@ function killByPidFile(pidFile) {
 
 // Kill tunnel processes (cloudflared/tailscale) by their PID files
 function killTunnelByPidFile() {
-  const tunnelDir = path.join(getAppDataDir(), "tunnel");
+  const tunnelDir = path.join(getDataDir(), "tunnel");
   killByPidFile(path.join(tunnelDir, "cloudflared.pid"));
   killByPidFile(path.join(tunnelDir, "tailscale.pid"));
 }
@@ -379,7 +373,7 @@ function waitForExit(pid, timeoutMs) {
 // Sends SIGTERM first so MIT can clean up host entries before dying.
 function killProxyByPidFile() {
   try {
-    const pidFile = path.join(getAppDataDir(), "mitm", ".mitm.pid");
+    const pidFile = path.join(getDataDir(), "mitm", ".mitm.pid");
     if (!fs.existsSync(pidFile)) return;
     const pid = parseInt(fs.readFileSync(pidFile, "utf8").trim(), 10);
     if (!pid) return;
@@ -703,11 +697,12 @@ function startServer(updatePromise) {
     setTimeout(() => process.exit(0), 100);
   });
 
-  // Initialize tray icon (runs alongside TUI)
+  // Initialize tray icon (runs alongside TUI). Returns false on headless sessions
+  // (e.g. Linux without a display server) so callers can explain the real state.
   const initTrayIcon = () => {
     try {
       const { initTray } = require("./src/cli/tray/tray");
-      initTray({
+      return initTray({
         port,
         onQuit: () => {
           isShuttingDown = true;
@@ -718,7 +713,7 @@ function startServer(updatePromise) {
         onOpenDashboard: () => openBrowser(url)
       });
     } catch (err) {
-      // Tray not available - continue without it
+      return false;
     }
   };
 
@@ -732,9 +727,13 @@ function startServer(updatePromise) {
     console.log(`Server: http://${displayHost}:${port}`);
 
     waitServerReady(port).then(() => {
-      initTrayIcon();
-      console.log("\n💡 Router is now running in system tray. Close this terminal if you want.");
-      console.log("   Right-click tray icon to open dashboard or quit.\n");
+      const tray = initTrayIcon();
+      console.log(tray
+        ? "\n💡 Router is now running in system tray. Close this terminal if you want."
+        : "\n💡 Router is running headless (no system tray on this session).");
+      console.log(tray
+        ? "   Right-click tray icon to open dashboard or quit.\n"
+        : `   Open the dashboard in a browser, or stop it with: 9router-proxy stop\n`);
     });
 
     return;
@@ -745,7 +744,7 @@ function startServer(updatePromise) {
     // Resolve parallel update check (already running); don't block server start on it.
     const latestVersion = await latestVersionPromise;
     // Start tray icon alongside TUI
-    initTrayIcon();
+    const trayActive = !!initTrayIcon();
 
     try {
       while (true) {
@@ -778,9 +777,10 @@ function startServer(updatePromise) {
           clearScreen();
 
           // Enable auto startup on OS boot
+          let autostartOk = false;
           try {
             const { enableAutoStart } = require("./src/cli/tray/autostart");
-            enableAutoStart(__filename);
+            autostartOk = enableAutoStart(__filename) !== false;
           } catch (e) { }
 
           if (process.platform === "darwin") {
@@ -798,8 +798,15 @@ function startServer(updatePromise) {
             return;
           }
 
-          // Windows/Linux: spawn detached bgProcess (systray works fine in child)
-          console.log(`\n⏳ Starting background process... (tray icon will appear in ~3s)`);
+          if (!trayActive) {
+            // No tray session available (e.g. headless Linux): still keep the
+            // server alive in the background, but say so instead of pointing
+            // at an icon that will never appear.
+            console.log(`\n⏳ Starting background process... (no system tray in this session)`);
+          } else {
+            // Windows/Linux: spawn detached bgProcess (systray works fine in child)
+            console.log(`\n⏳ Starting background process... (tray icon will appear in ~3s)`);
+          }
 
           const bgProcess = spawn(process.execPath, ["--dns-result-order=ipv4first", __filename, "--tray", "--skip-update", "-p", port.toString()], {
             detached: true,
@@ -811,7 +818,14 @@ function startServer(updatePromise) {
 
           console.log(`🔔 9Router is now running in background (PID: ${bgProcess.pid})`);
           console.log(`   Server: http://${displayHost}:${port}`);
-          console.log(`\n💡 You can close this terminal. Right-click tray icon to quit.\n`);
+          if (trayActive) {
+            console.log(`\n💡 You can close this terminal. Right-click tray icon to quit.\n`);
+          } else {
+            console.log(`\n💡 You can close this terminal. Stop the server with: 9router-proxy stop\n`);
+          }
+          if (!autostartOk) {
+            console.log(`⚠️  Could not enable auto-start — it needs a desktop login session.\n`);
+          }
 
           // cleanup() kills server so bgProcess can claim the port fresh
           cleanup();
@@ -854,7 +868,7 @@ function startServer(updatePromise) {
     if (restartCount >= MAX_RESTARTS) {
       console.error(`\n⚠️  Server crashed ${MAX_RESTARTS} times. Disabling MIT and restarting...`);
       try {
-        const dbPath = path.join(os.homedir(), process.platform === "win32" ? path.join("AppData", "Roaming", "9router", "db.json") : path.join(".9router", "db.json"));
+        const dbPath = path.join(getDataDir(), "db.json");
         if (fs.existsSync(dbPath)) {
           const db = JSON.parse(fs.readFileSync(dbPath, "utf-8"));
           if (db.settings) db.settings.mitmEnabled = false;
