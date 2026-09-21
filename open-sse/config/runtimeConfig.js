@@ -58,6 +58,12 @@ export const STREAM_FIRST_CHUNK_TIMEOUT_MS = envMs("STREAM_FIRST_CHUNK_TIMEOUT_M
 // Fetch connect timeout: abort if upstream doesn't return response headers within this duration
 export const FETCH_CONNECT_TIMEOUT_MS = envMs("FETCH_CONNECT_TIMEOUT_MS", 60 * 1000);
 
+// Ceiling for the pre-first-frame SSE peek that looks for provider error
+// envelopes. Only comment/heartbeat lines can accumulate here (a data line ends
+// the peek), so exceeding it means upstream keeps emitting a heartbeat stream —
+// stop scanning and let the normal pump take over instead of buffering forever.
+export const SSE_PEEK_BUFFER_LIMIT = envMs("SSE_PEEK_BUFFER_LIMIT", 256 * 1024);
+
 // Gemini native TTS fetch timeout: abort if Google does not return response headers in time.
 export const GEMINI_NATIVE_TTS_FETCH_TIMEOUT_MS = envMs("GEMINI_NATIVE_TTS_FETCH_TIMEOUT_MS", 45 * 1000);
 

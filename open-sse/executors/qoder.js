@@ -28,8 +28,9 @@ import { createHash } from "crypto";
 import { BaseExecutor } from "./base.js";
 import { PROVIDERS } from "../config/providers.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
+import { buildErrorBody } from "../utils/error.js";
 import { SSE_DONE } from "../utils/sseConstants.js";
-import { FETCH_CONNECT_TIMEOUT_MS } from "../config/runtimeConfig.js";
+import { FETCH_CONNECT_TIMEOUT_MS, HTTP_STATUS, SSE_PEEK_BUFFER_LIMIT } from "../config/runtimeConfig.js";
 import {
   QODER_CHAT_SIG_PATH,
   QODER_CONTEXT_TIER_ENV,
@@ -335,14 +336,42 @@ async function buildQoderRequestBody({ model, body, credentials, log, proxyOptio
 }
 
 /**
+ * Qoder nests these payloads several levels deep and each level keeps its own
+ * `\"` escapes, so match on a backslash-stripped copy — a raw `"code":"10605"`
+ * search misses the `\"code\":\"10605\"` form that arrives inside the envelope.
+ */
+function flattenQoderPayload(text) {
+  return typeof text === "string" ? text.replace(/\\/g, "") : "";
+}
+
+/** Code 10605 = model congestion (`queueCount` in the thousands), not a credential problem. */
+const QUEUE_THROTTLE_CODE_RE = /"code"\s*:\s*"10605"/;
+
+/**
  * Check if a qoder error message indicates a billing/quota block.
  * Signatures: code 112 (quota exhausted), code 10605 (queue throttle), pricingUrl field.
  */
 function isBillingBlock(inner) {
-  if (!inner || typeof inner !== "string") return false;
-  const lowerMsg = inner.toLowerCase();
+  const flat = flattenQoderPayload(inner).toLowerCase();
   // Match: {"code":"112",...}, {"code":"10605",...}, or pricingUrl field
-  return /\"code\"\s*:\s*\"(112|10605)\"/.test(inner) || lowerMsg.includes("pricingurl");
+  return /"code"\s*:\s*"(112|10605)"/.test(flat) || flat.includes("pricingurl");
+}
+
+function isQueueThrottle(text) {
+  return QUEUE_THROTTLE_CODE_RE.test(flattenQoderPayload(text));
+}
+
+/**
+ * Qoder's queue throttle (code 10605) carries an exact `retryAfterSeconds`.
+ * Callers use it as the cooldown instead of the generic 403 rule.
+ * Returns null when the payload has no usable hint.
+ */
+function parseQueueRetryAfterMs(text) {
+  const flat = flattenQoderPayload(text);
+  if (!QUEUE_THROTTLE_CODE_RE.test(flat)) return null;
+  const sec = flat.match(/"retryAfterSeconds"\s*:\s*(\d+)/);
+  const s = sec ? Number(sec[1]) : 0;
+  return s > 0 ? s * 1000 : null; // no duration → let the status rules decide
 }
 
 /**
@@ -353,16 +382,24 @@ function isBillingBlock(inner) {
  */
 async function peekFirstQoderFrame(reader, decoder) {
   let consumed = "";
+  let scanned = 0; // offset into `consumed` for lines already ruled out
   while (true) {
-    const { done, value } = await reader.read();
-    if (done) return { isBilling: false, consumed, upstreamDone: true };
+    const nl = consumed.indexOf("\n", scanned);
+    if (nl === -1) {
+      // Heartbeats only, and too many of them: give up on detection rather than
+      // buffering forever. The caller replays `consumed`, so nothing is lost.
+      if (consumed.length > SSE_PEEK_BUFFER_LIMIT) return { isBilling: false, consumed };
+      const { done, value } = await reader.read();
+      if (done) return { isBilling: false, consumed, upstreamDone: true };
+      consumed += decoder.decode(value, { stream: true });
+      continue;
+    }
 
-    consumed += decoder.decode(value, { stream: true });
-    const nl = consumed.indexOf("\n");
-    if (nl === -1) continue; // need a full line first
-
-    const line = consumed.slice(0, nl).replace(/\r$/, "").trim();
-    if (!line.startsWith("data:")) continue;
+    // Advance before any early return: re-reading the same line forever is a
+    // stall that pushes detection past end-of-stream.
+    const line = consumed.slice(scanned, nl).replace(/\r$/, "").trim();
+    scanned = nl + 1;
+    if (!line.startsWith("data:")) continue; // heartbeat / `event:` / blank
 
     const data = line.slice(5).trimStart();
     if (data === "[DONE]") return { isBilling: false, consumed };
@@ -454,12 +491,25 @@ async function wrapQoderSSE(response, model) {
       : envelope.body != null ? JSON.stringify(envelope.body) : "";
     if (statusVal !== 200) {
       const msg = inner || `upstream status ${statusVal}`;
+      // HTTP 200 is already committed by the time a mid-stream frame fails, so
+      // the status code can no longer change. Emit an OpenAI error frame — that
+      // is the in-band signal every client format understands (stream.js renders
+      // `event: error` for Claude, `response.failed` for Responses, `{error}` +
+      // [DONE] otherwise; the SSE→JSON paths turn it into an error result).
+      // Putting the payload in delta.content with finish_reason:"stop" instead
+      // wrote raw upstream JSON into the conversation and made the request look
+      // successful. Only the peeked-first-frame path can still return a real
+      // status, so only that one cools the account down.
+      // A queue throttle is congestion with a retry hint, not exhausted quota:
+      // report 429 so clients back off and retry instead of giving up on the key.
+      const errStatus = isQueueThrottle(inner) ? HTTP_STATUS.RATE_LIMITED : statusVal;
       const errChunk = JSON.stringify({
         id: `qoder-error-${Date.now()}`,
         object: "chat.completion.chunk",
         created: Math.floor(Date.now() / 1000),
         model,
-        choices: [{ index: 0, delta: { content: `\n[qoder error ${statusVal}: ${truncate(msg, 200)}]` }, finish_reason: "stop" }],
+        choices: [],
+        error: buildErrorBody(errStatus, `[qoder error ${statusVal}: ${truncate(msg, 200)}]`).error,
       });
       controller.enqueue(encoder.encode(`data: ${errChunk}\n\n`));
       controller.enqueue(encoder.encode(SSE_DONE));
@@ -688,6 +738,18 @@ export class QoderExecutor extends BaseExecutor {
     return null;
   }
 
+  /**
+   * Honor Qoder's own queue throttle duration. Without this the 403 lands on the
+   * generic status rule and locks a healthy connection for 2 minutes while the
+   * upstream only asked for a ~30s retry.
+   */
+  parseError(response, bodyText) {
+    const base = super.parseError(response, bodyText);
+    const retryAfterMs = parseQueueRetryAfterMs(bodyText);
+    if (retryAfterMs) base.resetsAtMs = Date.now() + retryAfterMs;
+    return base;
+  }
+
   needsRefresh() {
     return false;
   }
@@ -702,4 +764,5 @@ export const __test__ = {
   wrapQoderSSE,
   buildQoderRequestBody,
   isBillingBlock,
+  parseQueueRetryAfterMs,
 };

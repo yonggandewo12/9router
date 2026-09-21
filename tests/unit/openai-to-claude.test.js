@@ -207,3 +207,18 @@ describe("openaiToClaudeResponse", () => {
     });
   });
 });
+
+describe("openaiToClaudeResponse error chunks", () => {
+  it("maps a mid-stream upstream error to a Claude error event", () => {
+    const out = openaiToClaudeResponse(
+      { id: "x", object: "chat.completion.chunk", choices: [], error: { message: "[qoder error 403: queued]", type: "permission_error", code: "insufficient_quota" } },
+      {}
+    );
+    expect(out).toEqual([{ type: "error", error: { type: "permission_error", message: "[qoder error 403: queued]" } }]);
+  });
+
+  it("defaults the error type when the upstream omits it", () => {
+    const out = openaiToClaudeResponse({ choices: [], error: { message: "boom" } }, {});
+    expect(out[0].error.type).toBe("api_error");
+  });
+});

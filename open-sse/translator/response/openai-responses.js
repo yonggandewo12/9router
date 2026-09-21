@@ -19,6 +19,13 @@ export function openaiToOpenAIResponsesResponse(chunk, state) {
     return flushEvents(state);
   }
   
+  // In-band upstream failure after HTTP 200 was already committed: close what is
+  // open and fail the response. Left to flush() this would end as a
+  // response.completed carrying truncated output.
+  if (chunk.error) {
+    return flushEvents(state, chunk.error);
+  }
+
   if (!chunk.choices?.length) return [];
   
   const events = [];
@@ -382,7 +389,7 @@ function sendCompleted(state, emit) {
   }
 }
 
-function flushEvents(state) {
+function flushEvents(state, failure = null) {
   if (state.completedSent) return [];
   
   const events = [];
@@ -395,7 +402,21 @@ function flushEvents(state) {
   for (const i in state.msgItemAdded) closeMessage(state, emit, i);
   closeReasoning(state, emit);
   for (const i in state.funcCallIds) closeToolCall(state, emit, i);
-  sendCompleted(state, emit);
+  if (failure) {
+    // Mark the terminal event as sent so a later flush() can't append a
+    // contradictory response.completed.
+    state.completedSent = true;
+    emit("response.failed", {
+      type: "response.failed",
+      response: {
+        id: state.responseId || `resp_${Date.now()}`,
+        status: "failed",
+        error: { ...failure, message: failure.message || "Upstream stream error" }
+      }
+    });
+  } else {
+    sendCompleted(state, emit);
+  }
   
   return events;
 }

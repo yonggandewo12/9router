@@ -294,6 +294,14 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
       appendLog({ status: `FAILED ${HTTP_STATUS.BAD_GATEWAY}` });
       return createErrorResult(HTTP_STATUS.BAD_GATEWAY, "Invalid SSE response for non-streaming request");
     }
+    // A provider can fail mid-stream after committing HTTP 200 (qoder queue
+    // throttle). The parser surfaces that as { error } — it must not be read as
+    // a completion body, or the client gets 200 + a body with no choices and the
+    // account keeps its healthy rotation.
+    if (parsed.error) {
+      appendLog({ status: `FAILED ${HTTP_STATUS.BAD_GATEWAY}` });
+      return createErrorResult(HTTP_STATUS.BAD_GATEWAY, parsed.error.message || "Upstream SSE stream failed");
+    }
     responseBody = parsed;
   } else {
     try {

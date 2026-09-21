@@ -69,6 +69,20 @@ function stopTextBlock(state, results) {
 
 // Convert OpenAI stream chunk to Claude format
 export function openaiToClaudeResponse(chunk, state) {
+  // Mid-stream upstream failure (HTTP 200 already committed) arrives as a
+  // top-level `error` with no choices. Without this it hits the guard below and
+  // is dropped, so Claude clients see a silently truncated message instead of
+  // an error.
+  if (chunk?.error) {
+    return [{
+      type: "error",
+      error: {
+        type: chunk.error.type || "api_error",
+        message: chunk.error.message || "Upstream stream error",
+      },
+    }];
+  }
+
   if (!chunk || !chunk.choices?.[0]) return null;
 
   const results = [];
