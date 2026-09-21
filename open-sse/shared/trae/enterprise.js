@@ -52,7 +52,15 @@ export async function resolveTraeEnterpriseModels(credentials, options = {}) {
 
   const promise = fetchCatalog(accessToken)
     .then((result) => {
-      if (result) catalogCache.set(key, { result, expiresAt: Date.now() + CATALOG_TTL_MS });
+      if (result) {
+        // Keys are the last chars of a rotating 14-day token, so every re-login
+        // adds an entry — prune the expired ones on each write.
+        const now = Date.now();
+        for (const [stale, entry] of catalogCache) {
+          if (entry.expiresAt <= now) catalogCache.delete(stale);
+        }
+        catalogCache.set(key, { result, expiresAt: now + CATALOG_TTL_MS });
+      }
       return result;
     })
     .finally(() => catalogInflight.delete(key));

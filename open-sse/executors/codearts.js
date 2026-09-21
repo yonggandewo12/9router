@@ -12,6 +12,7 @@
 import crypto from "node:crypto";
 import { DefaultExecutor } from "./default.js";
 import { HTTP_STATUS } from "../config/runtimeConfig.js";
+import { withCredentialRefreshLock } from "../services/oauthCredentialManager.js";
 import { signHuaweiRequest } from "../shared/codearts/signer.js";
 import { isSessionCapExceeded, sendUntilSessionSlot } from "../shared/codearts/sessionCap.js";
 import { CODEARTS_USER_AGENT, refreshCodeartsFromCredentials } from "../shared/codearts/auth.js";
@@ -174,7 +175,13 @@ export class CodeartsExecutor extends DefaultExecutor {
   }
 
   async refreshCredentials(credentials, log, proxyOptions = null) {
-    return refreshCodeartsFromCredentials(credentials, { log, proxyOptions });
+    // STS rotates the refresh token, so concurrent 401s on one connection must
+    // not replay the same RT (the loser would come back invalid_grant and mark
+    // healthy credentials dead — same lock codex/grok-cli use). chatCore omits
+    // proxyOptions, so fall back to the connection-scoped proxy on credentials.
+    return withCredentialRefreshLock(this.provider, credentials, () =>
+      refreshCodeartsFromCredentials(credentials, { log, proxyOptions: proxyOptions || credentials?.proxyOptions || null })
+    );
   }
 }
 

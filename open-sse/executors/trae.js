@@ -62,8 +62,14 @@ export default class TraeExecutor extends BaseExecutor {
 
   base() {
     const url = this.config?.baseUrl;
-    if (!url) throw new Error(`Trae provider "${this.provider}" has no transport baseUrl`);
-    return url.replace(/\/$/, "");
+    if (url) return url.replace(/\/$/, "");
+    // Consumer `trae` is intentionally hidden from the engine registry, so
+    // PROVIDERS.trae is undefined — but legacy connections still reach this
+    // executor. Falling back to the SOLO endpoint (mirroring
+    // registry/trae.js) keeps those conversations streaming instead of
+    // throwing out of every error path. Enterprise must never borrow it.
+    if (!this.isEnterprise) return "https://core-normal.trae.ai/api/remote/v1";
+    throw new Error(`Trae provider "${this.provider}" has no transport baseUrl`);
   }
 
   buildHeaders(credentials, stream = true) {

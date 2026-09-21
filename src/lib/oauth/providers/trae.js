@@ -90,7 +90,10 @@ export function createTraeProvider(config) {
         lastErr = `${url} missing LoginHost`;
       } catch (e) { lastErr = `${url} ${e.message}`; }
     }
-    throw new Error(`Trae GetLoginGuidance failed: ${lastErr}`);
+    // Not a throw: buildAuthUrl() is the only consumer of loginHost, while
+    // exchangeTokens() re-runs prepareConfig() after the browser flow already
+    // succeeded — guidance flakiness must not destroy a completed login.
+    return { error: `Trae GetLoginGuidance failed: ${lastErr}` };
   }
 
   // Build the browser verification URL the user opens to sign in.
@@ -256,6 +259,11 @@ export function createTraeProvider(config) {
       return { ...cfg, loginTraceID, loginHost };
     },
     buildAuthUrl: (config, redirectUri, state) => {
+      // A guidance failure surfaces as { error } — hard-fail only here, the
+      // one place that actually needs the host (the authorize step).
+      if (typeof config.loginHost !== "string") {
+        throw new Error(config.loginHost?.error || "Trae GetLoginGuidance returned no LoginHost");
+      }
       const ctx = buildDeviceContext();
       const traceId = config.loginTraceID || state;
       return buildVerificationUrl(config.loginHost, traceId, redirectUri, ctx);

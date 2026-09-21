@@ -313,6 +313,14 @@ export async function refreshCodeartsFromCredentials(credentials, { proxyOptions
     });
     // The account identity is stable across refreshes; STS never returns it.
     creds.accountId = stored.accountId;
+    // The gateway only accepts calls signed with the temp AK/SK *and* its
+    // security token — a credential set without one can never sign a request
+    // that passes, so do not report success (an empty `accessToken` patch is
+    // also falsy, which would make chatCore skip the post-refresh retry).
+    if (!creds.securityToken) {
+      log?.warn?.("TOKEN_REFRESH", "CodeArts refresh returned credentials without a security token");
+      return null;
+    }
     log?.info?.("TOKEN_REFRESH", `CodeArts AK/SK renewed until ${new Date(creds.expiresAt).toISOString()}`);
     return toCodeartsCredentialPatch(creds);
   } catch (error) {
