@@ -1,0 +1,86 @@
+name: Publish CLI to npm
+
+# Release = bump "version" in cli/package.json, then:
+#   git tag cli-v<version> && git push fork cli-v<version>
+# The `cli-v` prefix keeps this clear of docker-publish.yml, which watches `v*`.
+
+on:
+  push:
+    tags:
+      - "cli-v*"
+  workflow_dispatch:
+    inputs:
+      dryRun:
+        description: "Build only — skip npm publish"
+        type: boolean
+        default: false
+
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # node 22's bundled npm 10.x crashes (arborist "edgesOut" null) on this tree.
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Check tag matches cli/package.json version
+        if: startsWith(github.ref, 'refs/tags/cli-v')
+        run: |
+          tag="${GITHUB_REF_NAME#cli-v}"
+          pkg="$(node -p "require('./cli/package.json').version")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::tag cli-v$tag does not match cli/package.json $pkg"
+            exit 1
+          fi
+
+      - name: Install dependencies
+        # Lockfiles are gitignored in this repo, so npm ci is not possible here.
+        # Root deps are needed too: cli/scripts/build-cli.js runs the app's Next.js build.
+        run: |
+          npm install --no-audit --no-fund
+          cd cli && npm install --no-audit --no-fund
+
+      - name: Resolve package coordinates
+        id: pkg
+        run: |
+          echo "name=$(node -p "require('./cli/package.json').name")" >> "$GITHUB_OUTPUT"
+          echo "version=$(node -p "require('./cli/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Check whether this version is already published
+        id: already
+        run: |
+          if npm view "${{ steps.pkg.outputs.name }}@${{ steps.pkg.outputs.version }}" version \
+               --registry=https://registry.npmjs.org >/dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build CLI bundle
+        run: npm run build
+        working-directory: cli
+
+      - name: Publish to npm
+        if: steps.already.outputs.published != 'true' && !inputs.dryRun
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        # cd, not --prefix: npm_config_prefix leaks into the child process and breaks arborist.
+        # --ignore-scripts skips prepublishOnly, which would rebuild the bundle built above.
+        run: cd cli && npm publish --ignore-scripts
+
+      - name: Report
+        run: |
+          if [ "${{ steps.already.outputs.published }}" = "true" ]; then
+            echo "Skipped — ${{ steps.pkg.outputs.name }}@${{ steps.pkg.outputs.version }} is already on npm."
+          elif [ "${{ inputs.dryRun }}" = "true" ]; then
+            echo "Dry run — build succeeded, publish skipped."
+          else
+            echo "Published ${{ steps.pkg.outputs.name }}@${{ steps.pkg.outputs.version }}."
+          fi

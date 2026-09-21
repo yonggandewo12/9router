@@ -1,0 +1,36 @@
+name: Cleanup
+
+on:
+  schedule:
+    - cron: "30 3 * * *" # daily 03:30 UTC
+  workflow_dispatch:
+
+permissions:
+  actions: write
+
+jobs:
+  old-runs-and-caches:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete workflow runs older than 14 days
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          cutoff=$(date -u -d '14 days ago' +%Y-%m-%dT%H:%M:%SZ)
+          gh api "repos/$REPO/actions/runs?per_page=100&created_at<$cutoff" \
+            --jq '.workflow_runs[].run_id' | while read -r id; do
+              gh api -X DELETE "repos/$REPO/actions/runs/$id" >/dev/null 2>&1 || true
+            done
+
+      - name: Delete action caches idle for 7 days
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          cutoff=$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ)
+          gh api "repos/$REPO/actions/caches?per_page=100" \
+            | jq -r --arg c "$cutoff" '.caches[] | select(.last_accessed_at < $c) | .id' \
+            | while read -r id; do
+                gh api -X DELETE "repos/$REPO/actions/caches/$id" >/dev/null 2>&1 || true
+              done
