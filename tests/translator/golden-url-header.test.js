@@ -27,10 +27,18 @@ const SPECIALIZED = new Set([
   "codearts",
 ]);
 
-// Sanitize header: khử token + field thời gian động (kimi X-Msh-Device-Id) để snapshot ổn định.
+// Sanitize header:  khử token + field thời gian động (kimi X-Msh-Device-Id) để snapshot ổn định.
+// Machine-derived identity headers: lock presence only (Linux CI ≠ dev Mac).
+const VOLATILE_HEADER_NAME = /^(x-platform(-version)?|x-msh-device-(id|model|name))$/i;
 function sanitize(headers) {
   const out = {};
   for (const [k, v] of Object.entries(headers)) {
+    // Lock the *presence* of machine-derived headers, never their values
+    // (cline X-PLATFORM*, kimi X-Msh-Device-*) — snapshots must pass on Linux CI.
+    if (VOLATILE_HEADER_NAME.test(k)) {
+      out[k] = "<VOLATILE>";
+      continue;
+    }
     out[k] = typeof v === "string"
       ? v.replace(/Bearer .+/, "Bearer <TOK>")
           .replace(/sk-test-APIKEY|tok-test-ACCESS/g, "<CRED>")
