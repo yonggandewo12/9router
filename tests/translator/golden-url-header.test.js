@@ -20,7 +20,7 @@ const SPECIALIZED = new Set([
   "antigravity", "azure", "gemini-cli", "github", "iflow", "qoder", "kiro",
   "codex", "cursor", "vertex", "vertex-partner", "opencode",
   "opencode-go", "grok-web", "perplexity-web", "ollama-local", "commandcode",
-  "xiaomi-tokenplan", "mimo-free",
+  "xiaomi-tokenplan",
   // Signs every request with a Huawei SDK-HMAC-SHA256 signature instead of
   // carrying a bearer key — locking it here would freeze DefaultExecutor's
   // output and call it the contract. Locked in tests/unit/codearts.test.js.
