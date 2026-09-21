@@ -29,7 +29,8 @@ const SPECIALIZED = new Set([
 
 // Sanitize header:  khử token + field thời gian động (kimi X-Msh-Device-Id) để snapshot ổn định.
 // Machine-derived identity headers: lock presence only (Linux CI ≠ dev Mac).
-const VOLATILE_HEADER_NAME = /^(x-platform(-version)?|x-msh-device-(id|model|name))$/i;
+// X-Msh-Version is the app version, so it changes on every release bump.
+const VOLATILE_HEADER_NAME = /^(x-platform(-version)?|x-msh-device-(id|model|name)|x-msh-version)$/i;
 function sanitize(headers) {
   const out = {};
   for (const [k, v] of Object.entries(headers)) {
@@ -43,6 +44,8 @@ function sanitize(headers) {
       ? v.replace(/Bearer .+/, "Bearer <TOK>")
           .replace(/sk-test-APIKEY|tok-test-ACCESS/g, "<CRED>")
           .replace(/kimi-\d{10,}/g, "kimi-<TS>")
+          // Release bumps must not break the golden file (UA / X-*-VERSION headers).
+          .replace(/\b\d+\.\d+\.\d+\b/g, "<VER>")
       : v;
   }
   return out;
