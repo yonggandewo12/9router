@@ -181,9 +181,18 @@ async function synthesizeLinux(text, voiceId) {
   }
 }
 
+// Local engines render whole sentences (measured worst case with a voice/language
+// mismatch: ~100KB of WAV per CJK char). The audio travels as one base64 string,
+// so an unbounded prompt blows up memory — ~4000 chars crosses Node's max string
+// length and the request dies with ERR_STRING_TOO_LONG instead of an answer.
+const MAX_LOCAL_TEXT = 1000;
+
 export default {
   noAuth: true,
   async synthesize(text, model) {
+    if (text.length > MAX_LOCAL_TEXT) {
+      throw new Error(`local-device TTS accepts at most ${MAX_LOCAL_TEXT} characters per request (got ${text.length}) — split the text or use a cloud provider`);
+    }
     if (process.platform === "win32") return synthesizeWin(text, model);
     if (process.platform === "darwin") return synthesizeMac(text, model);
     return synthesizeLinux(text, model);
