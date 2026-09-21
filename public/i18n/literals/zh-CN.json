@@ -475,6 +475,7 @@
   "Fallback — tries models in order (next on failure)": "回退 — 按顺序尝试模型（失败时切换到下一个）",
   "Fallback — try in order": "回退 — 按顺序尝试",
   "Features": "功能特性",
+  "Fetch CodeArts Models": "获取 CodeArts 模型",
   "Fetch Qoder Models": "获取 Qoder 模型",
   "Fetch Trae Enterprise Models": "获取 Trae 企业版模型",
   "Fetching...": "获取中...",

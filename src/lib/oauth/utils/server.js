@@ -1,6 +1,7 @@
 import http from "http";
 import { URL } from "url";
-import { CODEX_CONFIG, WINDSURF_CONFIG, ZED_HOSTED_CONFIG } from "../constants/oauth.js";
+import { CODEARTS_CONFIG, CODEX_CONFIG, WINDSURF_CONFIG, ZED_HOSTED_CONFIG } from "../constants/oauth.js";
+import { codeartsCallbackUrl } from "open-sse/shared/codearts/auth.js";
 
 // Loopback origin guard for local callback proxies.
 // Legit OAuth redirects are top-level navigations (no `Origin` header); a cross-site
@@ -985,3 +986,181 @@ export function stopXiaomiMimoProxy() {
   xiaomiMimoSessions.clear();
 }
 
+
+// ───────────────────────────────────────────────────────────────────────────
+// CodeArts (华为云码道) loopback callback proxy. Singleton session — the portal
+// echoes no `state`, so the pending login is matched exactly the way the
+// official CLI's own 127.0.0.1 server does.
+// Callback: GET http://127.0.0.1:<port>/oauth/callback?code=<32>
+//      or:                                    …?secret=<…>&redirect=<…> (already
+//      signed-in portal; the ticket endpoint then yields the same credentials)
+// ───────────────────────────────────────────────────────────────────────────
+
+let codeartsProxyServer = null;
+let codeartsProxyTimeout = null;
+let codeartsProxyPort = null;
+// Holds the PKCE verifier and ticket_id, so it is never handed back to the client.
+let codeartsSession = null;
+
+export function registerCodeartsSession({ state, codeVerifier, ticketId }) {
+  if (!state || !codeVerifier) return false;
+  codeartsSession = {
+    state,
+    codeVerifier,
+    ticketId: ticketId || null,
+    status: "pending",
+    createdAt: Date.now(),
+  };
+  return true;
+}
+
+export function getCodeartsSessionStatus(state) {
+  if (!codeartsSession) return null;
+  if (state && codeartsSession.state !== state) return null;
+  return {
+    state: codeartsSession.state,
+    status: codeartsSession.status,
+    connectionId: codeartsSession.connectionId || null,
+    email: codeartsSession.email || null,
+    error: codeartsSession.error || null,
+  };
+}
+
+export function clearCodeartsSession(state) {
+  if (!state || (codeartsSession && codeartsSession.state === state)) codeartsSession = null;
+}
+
+// Mirror the CLI's own landing behaviour: the browser always goes back to the
+// portal's login page with the outcome. The callback's `redirect` param is
+// deliberately NOT followed — it is attacker-controllable input to a 307.
+function codeartsPortalRedirect(success) {
+  const params = new URLSearchParams({
+    login_succeed: String(success),
+    locale: CODEARTS_CONFIG.locale || "zh-cn",
+  });
+  return `${CODEARTS_CONFIG.portalBase}/login?${params.toString()}`;
+}
+
+export function startCodeartsProxy() {
+  return new Promise((resolve) => {
+    if (codeartsProxyServer) {
+      // Reuse the live listener, but renew its deadline so a previous flow's
+      // timeout can never kill the flow that just adopted the port.
+      if (codeartsProxyTimeout) clearTimeout(codeartsProxyTimeout);
+      codeartsProxyTimeout = setTimeout(() => {
+        console.log("[CodeArts proxy] timeout, stopping");
+        stopCodeartsProxy();
+      }, CODEARTS_CONFIG.oauthTimeoutMs);
+      resolve({ success: true, port: codeartsProxyPort, callbackUrl: codeartsCallbackUrl(codeartsProxyPort) });
+      return;
+    }
+    const server = http.createServer(async (req, res) => {
+      const url = new URL(req.url, "http://localhost");
+      if (url.pathname !== CODEARTS_CONFIG.callbackPath) {
+        res.writeHead(404);
+        res.end("Not found");
+        return;
+      }
+      const qp = url.searchParams;
+      console.log("[CodeArts proxy]", req.method, url.pathname, JSON.stringify({
+        hasCode: qp.has("code"), hasSecret: qp.has("secret"), redirect: qp.get("redirect") ? "<ignored>" : null,
+      }));
+      // Not the callback (probe, prefetch, favicon-style miss): answer and keep
+      // both the session and the listener, so the real redirect can still land.
+      if (!qp.has("code") && !qp.has("secret")) {
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(renderCodexResultPage(false, "Waiting for CodeArts sign-in — this request carried no login data."));
+        return;
+      }
+      // Anti-CSRF: legit redirects are top-level navigations (no Origin).
+      if (!isLoopbackOrigin(req.headers.origin)) {
+        res.writeHead(403, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(renderCodexResultPage(false, "Cross-origin callback rejected"));
+        return;
+      }
+      const session = codeartsSession;
+      if (!session) {
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(renderCodexResultPage(false, "No active CodeArts login session"));
+        return;
+      }
+      if (session.status !== "pending") {
+        // The code is single-use; a duplicate navigation (reload, retry) must
+        // not re-run the exchange and report a bogus failure.
+        res.writeHead(307, { Location: codeartsPortalRedirect(session.status === "done") });
+        res.end();
+        return;
+      }
+      try {
+        const { exchangeTokens } = await import("../providers.js");
+        const { createProviderConnection } = await import("@/models");
+        const rawCallback = `${url.pathname}?${qp.toString()}`;
+        const tokenData = await exchangeTokens(
+          "codearts",
+          rawCallback,
+          codeartsCallbackUrl(codeartsProxyPort),
+          session.codeVerifier,
+          session.state,
+          session.ticketId ? { ticketId: session.ticketId } : undefined,
+        );
+        const connection = await createProviderConnection({
+          provider: "codearts",
+          authType: "oauth",
+          ...tokenData,
+          expiresAt: tokenData.expiresIn
+            ? new Date(Date.now() + tokenData.expiresIn * 1000).toISOString()
+            : null,
+          testStatus: "active",
+        });
+        session.status = "done";
+        session.connectionId = connection.id;
+        session.email = connection.email;
+        // The code is spent and the connection exists: drop the login material
+        // but keep the record, which is what the modal's poll reads.
+        session.codeVerifier = null;
+        session.ticketId = null;
+        res.writeHead(307, { Location: codeartsPortalRedirect(true) });
+        res.end();
+        stopCodeartsProxy();
+      } catch (err) {
+        session.status = "error";
+        session.error = err.message;
+        session.codeVerifier = null;
+        session.ticketId = null;
+        res.writeHead(307, { Location: codeartsPortalRedirect(false) });
+        res.end();
+        // Intentionally NOT stopping the listener: this failure may belong to a
+        // superseded attempt, and the idle timeout + modal close already bound it.
+      }
+    });
+    server.listen(0, "127.0.0.1", () => {
+      codeartsProxyServer = server;
+      codeartsProxyPort = server.address().port;
+      codeartsProxyTimeout = setTimeout(() => {
+        console.log("[CodeArts proxy] timeout, stopping");
+        stopCodeartsProxy();
+      }, CODEARTS_CONFIG.oauthTimeoutMs);
+      console.log(`[CodeArts proxy] listening on port ${codeartsProxyPort}`);
+      resolve({ success: true, port: codeartsProxyPort, callbackUrl: codeartsCallbackUrl(codeartsProxyPort) });
+    });
+    server.on("error", (err) => {
+      console.log(`[CodeArts proxy] listen error: ${err.message}`);
+      resolve({ success: false, reason: err.message });
+    });
+  });
+}
+
+export function stopCodeartsProxy() {
+  console.log(`[CodeArts proxy] stopping (port ${codeartsProxyPort || "-"})`);
+  if (codeartsProxyTimeout) { clearTimeout(codeartsProxyTimeout); codeartsProxyTimeout = null; }
+  if (codeartsProxyServer) { codeartsProxyServer.close(); codeartsProxyServer = null; }
+  codeartsProxyPort = null;
+  // The record must outlive the listener: a finished login reports itself to the
+  // modal through poll-status, which is also what clears it (route.js). Only the
+  // PKCE verifier / ticket are dropped — no callback can land once we stop
+  // listening, so they can only be leaked, never used.
+  if (codeartsSession) {
+    codeartsSession.codeVerifier = null;
+    codeartsSession.ticketId = null;
+  }
+}

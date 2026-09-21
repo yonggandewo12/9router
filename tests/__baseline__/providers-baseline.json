@@ -172,6 +172,15 @@
     "thinkingFormat": "openai",
     "format": "openai"
   },
+  "codearts": {
+    "baseUrl": "https://snap-access.cn-north-4.myhuaweicloud.com/api/v2/chat/completions",
+    "format": "openai",
+    "headers": {
+      "User-Agent": "codearts/26.9.3"
+    },
+    "clientId": "CodeArts_Tui",
+    "tokenUrl": "https://sts.cn-north-4.myhuaweicloud.com/v1/oauth2/tokens"
+  },
   "codebuddy-cn": {
     "baseUrl": "https://copilot.tencent.com/v2/chat/completions",
     "forceStream": true,

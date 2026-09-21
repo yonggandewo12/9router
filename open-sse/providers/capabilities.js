@@ -156,6 +156,15 @@ const CODEX_GPT_56_DEFAULT_CAPS = { vision: true, reasoning: true, search: true,
  * Provider-specific capability overrides. Keyed by provider alias/id.
  */
 export const PROVIDER_CAPABILITIES = {
+  // CodeArts (华为云码道) snap-access gateway. Limits read from the live agent
+  // catalog on 2026-09-20 (model_parameters.context_window / max_tokens).
+  // reasoning:true is a wire fact (SSE carries delta.reasoning_content), but the
+  // gateway takes no thinking param — see the codearts rules in paramSupport.js.
+  "codearts": {
+    "GLM-5.2": { reasoning: true, contextWindow: 202752, maxOutput: 131072 },
+    "OpenPangu-2.0-Pro": { reasoning: true, contextWindow: 524288, maxOutput: 131072 },
+    "OpenPangu-2.0-Flash": { reasoning: true, contextWindow: 524288, maxOutput: 131072 },
+  },
   // NVIDIA NIM is OpenAI-compatible → rejects MiniMax/GLM native `thinking` field.
   // Force openai reasoning_effort format for its reasoning models. #issue
   "nvidia": {

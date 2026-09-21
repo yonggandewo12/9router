@@ -28,6 +28,7 @@ import trae from "./trae.js";
 import traeEnterprise from "./trae-enterprise.js";
 import windsurf from "./windsurf.js";
 import zed from "./zed.js";
+import codearts from "./codearts.js";
 
 // Provider configurations
 const PROVIDERS = {
@@ -55,6 +56,7 @@ const PROVIDERS = {
   "trae-enterprise": traeEnterprise,
   windsurf,
   zed,
+  codearts,
 };
 
 export { PROVIDERS };
@@ -121,6 +123,9 @@ export async function generateAuthData(providerName, redirectUri, meta) {
     // (exchangeTokens re-runs prepareConfig, which would otherwise mint a
     // different one). Absent for every other provider — purely additive.
     ...(config.systemId ? { systemId: config.systemId } : {}),
+    // CodeArts: same threading for the ticket_id its authorize URL carries, so a
+    // secret-style callback can be resolved against the login that opened it.
+    ...(config.ticketId ? { ticketId: config.ticketId } : {}),
   };
 }
 

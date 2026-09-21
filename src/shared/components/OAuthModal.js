@@ -7,7 +7,7 @@ import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 
 // Providers using the dynamic-port local callback proxy.
 // Browser OAuth: popup → auto callback → auto exchange → poll-status.
-const PROXY_OAUTH_PROVIDERS = new Set(["trae", "trae-enterprise", "windsurf", "zed"]);
+const PROXY_OAUTH_PROVIDERS = new Set(["trae", "trae-enterprise", "windsurf", "zed", "codearts"]);
 
 // Providers offering a paste-token fallback (import-token flow).
 // UX warns if the IDE (which issues the token) is not installed.
@@ -241,6 +241,9 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
     const regBody = { state: authData.state };
     if (authData.codeVerifier) regBody.codeVerifier = authData.codeVerifier;
     if (authData.systemId) regBody.systemId = authData.systemId;
+    // CodeArts: the loopback proxy needs the login's ticket_id to resolve a
+    // secret-style callback; sent in the body, never in a URL.
+    if (authData.ticketId) regBody.ticketId = authData.ticketId;
     const regRes = await fetch(`/api/oauth/${providerId}/register-session`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -679,6 +682,7 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
             ...(authData?.redirectUri ? { redirectUri: authData.redirectUri } : {}),
             ...(authData?.codeVerifier ? { codeVerifier: authData.codeVerifier } : {}),
             ...(authData?.systemId ? { systemId: authData.systemId } : {}),
+            ...(authData?.ticketId ? { ticketId: authData.ticketId } : {}),
           }),
         });
         const data = await res.json();

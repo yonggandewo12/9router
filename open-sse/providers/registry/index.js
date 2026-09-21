@@ -17,6 +17,7 @@ import p14 from "./claude.js";
 import p15 from "./cline.js";
 import p16 from "./clinepass.js";
 import p17 from "./cloudflare-ai.js";
+import p126 from "./codearts.js";
 import p18 from "./codebuddy-cn.js";
 import p19 from "./codex.js";
 import p20 from "./cohere.js";
@@ -144,6 +145,7 @@ export default [
   p15,
   p16,
   p17,
+  p126,
   p18,
   p19,
   p20,

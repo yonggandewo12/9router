@@ -4,6 +4,7 @@ import { testProxyUrl } from "@/lib/network/proxyTest";
 import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider } from "@/shared/constants/providers";
 import { getDefaultModel } from "open-sse/config/providerModels.js";
 import { traeEnterpriseConfig } from "open-sse/shared/trae/enterprise.js";
+import { fetchCodeartsCurrentUser } from "open-sse/shared/codearts/api.js";
 import { resolveOllamaLocalHost, PROVIDERS } from "open-sse/config/providers.js";
 import { CODEX_CLI_VERSION } from "open-sse/config/appConstants.js";
 import {
@@ -93,6 +94,10 @@ const OAUTH_TEST_CONFIG = {
     extraHeaders: { Accept: "application/json" },
     refreshable: true,
   },
+  // CodeArts proves its credentials against /current/user with an SDK-HMAC
+  // signature, which the generic probe cannot express — see the codearts branch
+  // in testOAuthConnection.
+  codearts: { refreshable: true },
   kimi: { checkExpiry: true, refreshable: true },
   "kimi-coding": { checkExpiry: true, refreshable: true },
   cursor: { tokenExists: true },
@@ -258,7 +263,7 @@ async function refreshOAuthToken(connection) {
       return { accessToken: data.access_token, expiresIn: data.expires_in, refreshToken: data.refresh_token || refreshToken };
     }
 
-    if (provider === "codex" || provider === "grok-cli" || provider === "xai") {
+    if (provider === "codex" || provider === "grok-cli" || provider === "xai" || provider === "codearts") {
       return await refreshProviderCredentials(provider, connection, console);
     }
 
@@ -409,6 +414,37 @@ async function testOAuthConnection(connection, effectiveProxy = null) {
     newTokens = tokens;
     accessToken = tokens.accessToken;
     return await tryProbe(accessToken);
+  }
+
+  // CodeArts has no bearer token to probe with: every call is signed
+  // SDK-HMAC-SHA256 with the temporary AK/SK, so it gets its own branch instead
+  // of the generic { url, authHeader } probe below.
+  if (connection.provider === "codearts") {
+    const probeCodearts = async (tokens) => {
+      await fetchCodeartsCurrentUser(
+        {
+          accessToken: tokens.accessToken || connection.accessToken,
+          providerSpecificData: tokens.providerSpecificData || connection.providerSpecificData || {},
+        },
+        { proxyOptions: effectiveProxy },
+      );
+    };
+    try {
+      await probeCodearts(newTokens || {});
+      return { valid: true, error: null, refreshed, newTokens };
+    } catch (err) {
+      if (err.status !== 401 || !config.refreshable || refreshed || !connection.refreshToken) {
+        return { valid: false, error: err.message, refreshed };
+      }
+      const tokens = await refreshOAuthToken(connection);
+      if (!tokens) return { valid: false, error: "Token invalid or revoked", refreshed: false };
+      try {
+        await probeCodearts(tokens);
+        return { valid: true, error: null, refreshed: true, newTokens: tokens };
+      } catch (retryErr) {
+        return { valid: false, error: retryErr.message, refreshed: true, newTokens: tokens };
+      }
+    }
   }
 
   try {

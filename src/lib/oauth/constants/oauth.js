@@ -229,6 +229,11 @@ export const ZED_HOSTED_CONFIG = {
   oauthTimeoutMs: 600_000,
 };
 
+// 华为云码道 (CodeArts) — the CLI's loopback PKCE login. Endpoints, client id and
+// the DPoP-bound token URL all come from the registry entry (single source);
+// see open-sse/shared/codearts/auth.js for the proof/ticket helpers.
+export const CODEARTS_CONFIG = { ...PROVIDER_OAUTH["codearts"] };
+
 // OAuth timeout (5 minutes)
 export const OAUTH_TIMEOUT = 300000;
 
@@ -258,4 +263,5 @@ export const PROVIDERS = {
   TRAE: "trae",
   WINDSURF: "windsurf",
   ZED: "zed",
+  CODEARTS: "codearts",
 };

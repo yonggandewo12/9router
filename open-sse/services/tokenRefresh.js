@@ -19,6 +19,7 @@ import {
   refreshWindsurfToken,
   classifyOAuthRefreshError,
 } from "./tokenRefresh/providers.js";
+import { refreshCodeartsFromCredentials } from "../shared/codearts/auth.js";
 
 // Re-export all provider refresh functions (preserves public API for all consumers)
 export {
@@ -146,6 +147,9 @@ const REFRESH_HANDLERS = {
   gcli: (c, log) => refreshXaiToken(c.refreshToken, log),
   "codebuddy-cn": (c, log) => refreshCodebuddyToken(c.refreshToken, log),
   "codebuddy-intl": (c, log) => refreshCodebuddyIntlToken(c.refreshToken, log),
+  // CodeArts mints a temporary Huawei AK/SK, not a bearer token: the DPoP proof
+  // and x-agent-user-account it needs live with the stored credentials.
+  codearts: (c, log) => refreshCodeartsFromCredentials(c, { log }),
   trae: (c, log) => refreshTraeToken(c.refreshToken, c, log, "trae"),
   "trae-enterprise": (c, log) => refreshTraeToken(c.refreshToken, c, log, "trae-enterprise"),
   cline: (c, log) => refreshClineToken(c.refreshToken, log),

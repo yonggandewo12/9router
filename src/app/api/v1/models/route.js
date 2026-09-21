@@ -16,6 +16,7 @@ import { resolveGrokCliModels } from "open-sse/services/grokCliModels.js";
 import { resolveCursorModels } from "open-sse/services/cursorModels.js";
 import { resolveZedModels } from "open-sse/shared/zedAuth.js";
 import { resolveTraeEnterpriseModels } from "open-sse/shared/trae/enterprise.js";
+import { resolveCodeartsModels } from "open-sse/shared/codearts/api.js";
 import { updateProviderCredentials } from "@/sse/services/tokenRefresh";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { capabilitiesFromServiceKind, getCapabilitiesForModel } from "open-sse/providers/capabilities.js";
@@ -145,6 +146,21 @@ const LIVE_MODEL_RESOLVERS = {
   "trae-enterprise": async (conn) => {
     const result = await resolveTraeEnterpriseModels({ accessToken: conn.accessToken });
     return result?.models?.length ? { models: result.models.map((m) => ({ id: m.id, name: m.name })) } : null;
+  },
+  // CodeArts answers with the AK/SK the login minted, which rotate hourly, so
+  // listings ride the shared 10-minute catalog cache instead of forcing a fetch.
+  codearts: async (conn) => {
+    const proxy = await resolveConnectionProxyConfig(conn.providerSpecificData || {});
+    const result = await resolveCodeartsModels(conn, {
+      proxyOptions: {
+        connectionProxyEnabled: proxy.connectionProxyEnabled === true,
+        connectionProxyUrl: proxy.connectionProxyUrl || "",
+        connectionNoProxy: proxy.connectionNoProxy || "",
+        vercelRelayUrl: proxy.vercelRelayUrl || "",
+        strictProxy: proxy.strictProxy === true,
+      },
+    });
+    return result?.models?.length ? { models: result.models } : null;
   },
 };
 

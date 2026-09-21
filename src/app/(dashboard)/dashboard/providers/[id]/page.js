@@ -38,6 +38,7 @@ const LIVE_CATALOG_IMPORT_PROVIDERS = {
   qoder: "Fetch Qoder Models",
   "qoder-cn": "Fetch Qoder Models",
   "trae-enterprise": "Fetch Trae Enterprise Models",
+  codearts: "Fetch CodeArts Models",
 };
 
 function sleep(ms) {

@@ -21,6 +21,10 @@ const SPECIALIZED = new Set([
   "codex", "cursor", "vertex", "vertex-partner", "opencode",
   "opencode-go", "grok-web", "perplexity-web", "ollama-local", "commandcode",
   "xiaomi-tokenplan", "mimo-free",
+  // Signs every request with a Huawei SDK-HMAC-SHA256 signature instead of
+  // carrying a bearer key — locking it here would freeze DefaultExecutor's
+  // output and call it the contract. Locked in tests/unit/codearts.test.js.
+  "codearts",
 ]);
 
 // Sanitize header: khử token + field thời gian động (kimi X-Msh-Device-Id) để snapshot ổn định.

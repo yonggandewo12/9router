@@ -13,6 +13,7 @@ import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { resolveCursorModels } from "open-sse/services/cursorModels.js";
 import { resolveZedModels } from "open-sse/shared/zedAuth.js";
 import { resolveTraeEnterpriseModels } from "open-sse/shared/trae/enterprise.js";
+import { resolveCodeartsModels } from "open-sse/shared/codearts/api.js";
 import { resolveClineModels, resolveClinepassModels } from "open-sse/services/clinepassModels.js";
 
 const GEMINI_CLI_MODELS_URL = "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
@@ -460,6 +461,33 @@ const PROVIDER_MODELS_CONFIG = {
       return {
         models: getStaticProviderModels("trae-enterprise"),
         warning: "Trae Enterprise returned no live models; falling back to static catalog.",
+      };
+    },
+  },
+  codearts: {
+    customResolver: async (connection) => {
+      const proxy = await resolveConnectionProxyConfig(connection.providerSpecificData || {});
+      let result = null;
+      try {
+        // The dashboard button is an explicit refresh: skip the catalog cache so
+        // a model Huawei just granted this account appears in this click.
+        result = await resolveCodeartsModels(connection, {
+          forceRefresh: true,
+          proxyOptions: {
+            connectionProxyEnabled: proxy.connectionProxyEnabled === true,
+            connectionProxyUrl: proxy.connectionProxyUrl || "",
+            connectionNoProxy: proxy.connectionNoProxy || "",
+            vercelRelayUrl: proxy.vercelRelayUrl || "",
+            strictProxy: proxy.strictProxy === true,
+          },
+        });
+      } catch (error) {
+        console.log("Failed to fetch CodeArts models dynamically, falling back to static:", error.message);
+      }
+      if (result?.models?.length) return { models: result.models };
+      return {
+        models: getStaticProviderModels("codearts"),
+        warning: "CodeArts returned no live models; falling back to static catalog.",
       };
     },
   },
