@@ -105,7 +105,13 @@ describe("Kiro external_idp (CLIProxyAPI) import and refresh", () => {
     expect(headers.TokenType).toBe("EXTERNAL_IDP");
     expect(headers.tokentype).toBeUndefined();
 
+    // 35b950be: all auth methods now lead with the q.* amazonaws surface
+    // (kiro.dev legacy gateway answers 400 REQUEST_BODY_INVALID, which is
+    // terminal); codewhisperer stays as the next fallback surface.
     expect(executor.buildUrl("claude-sonnet-4.5", true, 0, credentials)).toBe(
+      "https://q.us-east-1.amazonaws.com/generateAssistantResponse"
+    );
+    expect(executor.buildUrl("claude-sonnet-4.5", true, 1, credentials)).toBe(
       "https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse"
     );
   });

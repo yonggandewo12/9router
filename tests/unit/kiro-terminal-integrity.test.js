@@ -705,9 +705,11 @@ describe("Kiro terminal integrity recovery", () => {
   });
 
   it("surfaces retry HTTP failures as SSE after heartbeat commits headers", async () => {
+    // 401 is in KIRO_ENDPOINT_FALLBACK_STATUSES: the integrity retry walks all
+    // three endpoint surfaces, so every post-initial fetch must return a 401.
     fetchMock
       .mockResolvedValueOnce(response([]))
-      .mockResolvedValueOnce(new Response("unauthorized", {
+      .mockImplementation(async () => new Response("unauthorized", {
         status: 401,
         statusText: "Unauthorized"
       }));
@@ -721,9 +723,10 @@ describe("Kiro terminal integrity recovery", () => {
   });
 
   it("bounds the retry HTTP error body", async () => {
+    // Same endpoint-fallback walk as above — each attempt gets a fresh oversized body.
     fetchMock
       .mockResolvedValueOnce(response([]))
-      .mockResolvedValueOnce(new Response(`error-start-${"x".repeat(10_000)}-error-tail`, {
+      .mockImplementation(async () => new Response(`error-start-${"x".repeat(10_000)}-error-tail`, {
         status: 401,
         statusText: "Unauthorized"
       }));

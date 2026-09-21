@@ -35,11 +35,13 @@ describe("detectRequiredCapabilities", () => {
     expect(r.has("vision")).toBe(true);
   });
 
-  it("web_search tool -> search", () => {
+  // b282f055: search-based reordering is intentionally disabled in auto-switch
+  // (feature not wired yet). Pinned so re-enabling it is a deliberate change.
+  it("web_search tool does NOT trigger search capability (disabled)", () => {
     const r = detectRequiredCapabilities({ messages: [{ role: "user", content: "q" }], tools: [
       { type: "web_search" },
     ] });
-    expect(r.has("search")).toBe(true);
+    expect(r.has("search")).toBe(false);
   });
 
   it("responses input_image -> vision", () => {
@@ -68,7 +70,7 @@ describe("reorderByCapabilities", () => {
   it("keeps order when no model matches", () => {
     const models = ["deepseek/deepseek-chat", "deepseek/deepseek-reasoner"];
     const out = reorderByCapabilities(models, new Set(["vision"]));
-    expect(out).toBe(models);
+    expect(out).toEqual(models); // stable sort keeps tier-2 order (returns a copy)
   });
 
   it("single model -> unchanged", () => {

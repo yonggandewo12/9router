@@ -7,7 +7,7 @@ import { filterToOpenAIFormat } from "../../open-sse/translator/formats/openai.j
 import { parseSSELine } from "../../open-sse/utils/streamHelpers.js";
 
 describe("request normalization", () => {
-  it("claudeToOpenAIRequest flattens text-only content arrays into string", () => {
+  it("claudeToOpenAIRequest normalizes text-only content arrays into OpenAI text parts", () => {
     const body = {
       messages: [
         {
@@ -21,7 +21,12 @@ describe("request normalization", () => {
     };
 
     const result = claudeToOpenAIRequest("gpt-oss:120b", body, true);
-    expect(result.messages[0].content).toBe("hi\nthere");
+    // Current design: the claude->openai leg keeps multi-part content as an
+    // array of text parts; flattening to a string happens downstream (openai->ollama).
+    expect(result.messages[0].content).toEqual([
+      { type: "text", text: "hi" },
+      { type: "text", text: "there" },
+    ]);
   });
 
   it("claudeToOpenAIRequest preserves multimodal arrays", () => {
@@ -48,7 +53,7 @@ describe("request normalization", () => {
     expect(Array.isArray(result.messages[0].content)).toBe(true);
   });
 
-  it("filterToOpenAIFormat flattens text-only arrays to string", () => {
+  it("filterToOpenAIFormat keeps text-only arrays as OpenAI text parts", () => {
     const body = {
       messages: [
         {
@@ -62,10 +67,13 @@ describe("request normalization", () => {
     };
 
     const result = filterToOpenAIFormat(JSON.parse(JSON.stringify(body)));
-    expect(result.messages[0].content).toBe("a\nb");
+    expect(result.messages[0].content).toEqual([
+      { type: "text", text: "a" },
+      { type: "text", text: "b" },
+    ]);
   });
 
-  it("translateRequest keeps /v1/messages Claude->OpenAI text payloads string-safe", () => {
+  it("translateRequest keeps /v1/messages Claude->OpenAI text payloads intact and string-safe on the ollama leg", () => {
     const body = {
       model: "ollama/gpt-oss:120b",
       system: [{ type: "text", text: "You are helpful." }],
@@ -92,8 +100,26 @@ describe("request normalization", () => {
     );
 
     const userMessage = result.messages.find((m) => m.role === "user");
-    expect(typeof userMessage.content).toBe("string");
-    expect(userMessage.content).toBe("hello\nworld");
+    // claude->openai leg preserves the text parts (single-part collapse only).
+    expect(Array.isArray(userMessage.content)).toBe(true);
+    expect(userMessage.content).toEqual([
+      { type: "text", text: "hello" },
+      { type: "text", text: "world" },
+    ]);
+
+    // openai->ollama leg flattens them to the plain string Ollama requires.
+    const ollamaResult = translateRequest(
+      FORMATS.OPENAI,
+      FORMATS.OLLAMA,
+      "gpt-oss:120b",
+      JSON.parse(JSON.stringify(result)),
+      true,
+      null,
+      "ollama",
+    );
+    const ollamaUser = ollamaResult.messages.find((m) => m.role === "user");
+    expect(typeof ollamaUser.content).toBe("string");
+    expect(ollamaUser.content).toBe("hello\nworld");
   });
 
   it("translateRequest strips unsupported Anthropic output_config for MiniMax Claude-compatible endpoints", () => {
@@ -171,7 +197,8 @@ describe("request normalization", () => {
       done: false,
     });
 
-    const parsed = parseSSELine(raw);
+    // NDJSON raw lines require the explicit ollama format argument.
+    const parsed = parseSSELine(raw, FORMATS.OLLAMA);
     expect(parsed).toEqual({
       model: "gpt-oss:120b",
       message: { role: "assistant", content: "hello" },

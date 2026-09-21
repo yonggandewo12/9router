@@ -193,7 +193,10 @@ describe("openaiToClaudeResponse", () => {
       }]
     };
 
+    // Args are now buffered and flushed as one sanitized delta on finish.
     const result = openaiToClaudeResponse(chunk, state);
+    openaiToClaudeResponse({ id: "chatcmpl-test", choices: [{ delta: {}, finish_reason: "tool_use" }] }, state)
+      .forEach(e => result.push(e));
     const inputDelta = result.find(event => event.delta?.type === "input_json_delta");
 
     expect(inputDelta).toBeDefined();

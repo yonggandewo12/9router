@@ -2,281 +2,373 @@ import { describe, expect, it } from "vitest";
 import {
   decodeMessage,
   encodeField,
-  encodeAgentValue,
-  decodeAgentValue,
-  encodeMcpToolDefinition,
-  encodeMcpTools,
-  decodeMcpArgs,
-  encodeMcpResultSuccess,
-  encodeMcpResultError,
-  encodeMcpResultToolNotFound,
+  encodeMcpTool,
+  buildChatRequest,
+  encodeToolResult,
+  buildToolResultRequest,
+  generateToolResultBody,
+  extractTextFromResponse,
+  parseConnectRPCFrame,
 } from "../../open-sse/utils/cursorProtobuf.js";
 import {
-  isAgentCapableRequest,
   buildAgentRunFrame,
+  CursorExecutor,
 } from "../../open-sse/executors/cursor.js";
 
-// AgentService (agent.v1) codec tests — validate the production implementation
-// in cursorProtobuf.js + the executor's frame builders. Pure round-trip, no network.
-// Field numbers verified against Cursor's agent.proto (extracted via @oh-my-pi).
+// Cursor protocol codec tests — validate what the production code actually speaks:
+//   * ChatService (api2.cursor.sh): StreamUnifiedChat* protos in cursorProtobuf.js,
+//     which is the only path that carries MCP tools today.
+//   * AgentService (agent.v1): the run frame built by cursor.js. Its tool protocol is
+//     NOT implemented (see cursor.js `isAgentTextRequest` comment), so requests that
+//     contain tool calls/results stay on the ChatService path.
+// Field numbers verified against the encoders themselves and Cursor's protos.
+// Pure round-trip, no network.
 
 const LEN = 2;
-// McpArgs.args map entry { field1: key, field2: Value }
-const entry = (k, v) => Buffer.concat([
-  Buffer.from(encodeField(2, LEN,
-    Buffer.concat([Buffer.from(encodeField(1, LEN, k)), Buffer.from(encodeField(2, LEN, encodeAgentValue(v)))])
-  )),
-]);
+const VARINT = 0;
 
-describe("Cursor AgentService codec (cursorProtobuf.js)", () => {
-  describe("google.protobuf.Value round-trip", () => {
-    const cases = [
-      ["null", null],
-      ["bool true", true],
-      ["bool false", false],
-      ["string", "hello"],
-      ["integer", 42],
-      ["float", 3.14],
-      ["empty object", {}],
-      ["flat object", { a: 1, b: "x", c: true }],
-      ["nested object", { outer: { inner: [1, 2, "three"] } }],
-      ["array of mixed", [1, "two", false, null]],
-      ["deeply nested", { a: { b: { c: { d: 1 } } } }],
+const str = (value) => Buffer.from(value).toString("utf8");
+const bytes = (value) => Buffer.from(value);
+
+// ==================== ChatService: MCP tool declarations ====================
+
+describe("Cursor ChatService MCP tool codec (cursorProtobuf.js)", () => {
+  it("encodes MCPTool: name(1), description(2), parameters JSON(3), server(4)", () => {
+    const schema = { type: "object", properties: { city: { type: "string" } }, required: ["city"] };
+    const tool = encodeMcpTool({ function: { name: "get_weather", description: "Get weather", parameters: schema } });
+    const msg = decodeMessage(tool);
+    expect(str(msg.get(1)[0].value)).toBe("get_weather");
+    expect(str(msg.get(2)[0].value)).toBe("Get weather");
+    // ChatService carries the schema as a JSON string, not a google.protobuf.Value.
+    expect(JSON.parse(str(msg.get(3)[0].value))).toEqual(schema);
+    expect(str(msg.get(4)[0].value)).toBe("custom");
+  });
+
+  it("preserves nested JSON-schema types", () => {
+    const schema = {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "search query" },
+        opts: { type: "array", items: { type: "string" } },
+      },
+      required: ["query"],
+    };
+    const msg = decodeMessage(encodeMcpTool({ function: { name: "search", parameters: schema } }));
+    expect(JSON.parse(str(msg.get(3)[0].value))).toEqual(schema);
+  });
+
+  it("accepts flat tool shape (no .function wrapper)", () => {
+    const msg = decodeMessage(encodeMcpTool({ name: "noop", description: "d", input_schema: { type: "object" } }));
+    expect(str(msg.get(1)[0].value)).toBe("noop");
+    expect(str(msg.get(2)[0].value)).toBe("d");
+    expect(JSON.parse(str(msg.get(3)[0].value))).toEqual({ type: "object" });
+  });
+
+  it("omits empty name/description/parameters but always sets server", () => {
+    const msg = decodeMessage(encodeMcpTool({ function: {} }));
+    expect(msg.has(1)).toBe(false);
+    expect(msg.has(2)).toBe(false);
+    expect(msg.has(3)).toBe(false);
+    expect(str(msg.get(4)[0].value)).toBe("custom");
+  });
+
+  it("attaches each tool as a repeated MCP_TOOLS(34) entry and flips agentic mode", () => {
+    const tools = [
+      { function: { name: "get_weather", parameters: { type: "object" } } },
+      { function: { name: "calculate", parameters: { type: "object" } } },
     ];
-    for (const [label, value] of cases) {
-      it(`encodes/decodes ${label}`, () => {
-        expect(decodeAgentValue(encodeAgentValue(value))).toEqual(value);
-      });
-    }
+    const request = decodeMessage(decodeMessage(buildChatRequest([{ role: "user", content: "hi" }], "gpt-5.2", tools)).get(1)[0].value);
+    expect(request.get(34).length).toBe(2);
+    expect(str(decodeMessage(request.get(34)[0].value).get(1)[0].value)).toBe("get_weather");
+    expect(str(decodeMessage(request.get(34)[1].value).get(1)[0].value)).toBe("calculate");
+    expect(request.get(27)[0].value).toBe(1); // is_agentic
+    expect(str(request.get(54)[0].value)).toBe("Agent"); // unified_mode_name
   });
 
-  describe("McpToolDefinition", () => {
-    it("encodes name, description, input_schema (Value), provider, tool_name", () => {
-      const schema = { type: "object", properties: { city: { type: "string" } }, required: ["city"] };
-      const def = encodeMcpToolDefinition({ function: { name: "get_weather", description: "Get weather", parameters: schema } });
-      const msg = decodeMessage(def);
-      expect(Buffer.from(msg.get(1)[0].value).toString("utf8")).toBe("get_weather");
-      expect(Buffer.from(msg.get(2)[0].value).toString("utf8")).toBe("Get weather");
-      expect(Buffer.from(msg.get(4)[0].value).toString("utf8")).toBe("9router");
-      expect(Buffer.from(msg.get(5)[0].value).toString("utf8")).toBe("get_weather");
-      expect(decodeAgentValue(msg.get(3)[0].value)).toEqual(schema);
-    });
-
-    it("preserves nested JSON-schema types", () => {
-      const schema = {
-        type: "object",
-        properties: {
-          query: { type: "string", description: "search query" },
-          opts: { type: "array", items: { type: "string" } },
-        },
-        required: ["query"],
-      };
-      const def = encodeMcpToolDefinition({ function: { name: "search", parameters: schema } });
-      const msg = decodeMessage(def);
-      expect(decodeAgentValue(msg.get(3)[0].value)).toEqual(schema);
-    });
-
-    it("accepts flat tool shape (no .function wrapper)", () => {
-      const def = encodeMcpToolDefinition({ name: "noop", description: "d", inputSchema: { type: "object" } });
-      const msg = decodeMessage(def);
-      expect(Buffer.from(msg.get(1)[0].value).toString("utf8")).toBe("noop");
-    });
-  });
-
-  describe("encodeMcpTools", () => {
-    it("produces empty bytes for no tools", () => {
-      expect(encodeMcpTools([]).length).toBe(0);
-      expect(encodeMcpTools().length).toBe(0);
-    });
-
-    it("wraps multiple tool defs as repeated field 1", () => {
-      const tools = [
-        { function: { name: "get_weather", parameters: { type: "object" } } },
-        { function: { name: "calculate", parameters: { type: "object" } } },
-      ];
-      const mcpTools = encodeMcpTools(tools);
-      const inner = decodeMessage(mcpTools);
-      expect(inner.get(1).length).toBe(2);
-    });
-  });
-
-  describe("McpArgs decode", () => {
-    it("decodes name, toolName, toolCallId, and typed args map", () => {
-      const argsBytes = Buffer.concat([
-        entry("city", "Hanoi"),
-        entry("count", 5),
-        entry("flag", true),
-        entry("nested", { a: [1, 2] }),
-      ]);
-      const mcpArgs = Buffer.concat([
-        Buffer.from(encodeField(1, LEN, "get_weather")),
-        argsBytes,
-        Buffer.from(encodeField(3, LEN, "call_abc")),
-        Buffer.from(encodeField(5, LEN, "get_weather")),
-      ]);
-      const decoded = decodeMcpArgs(mcpArgs);
-      expect(decoded.name).toBe("get_weather");
-      expect(decoded.toolName).toBe("get_weather");
-      expect(decoded.toolCallId).toBe("call_abc");
-      expect(decoded.args).toEqual({ city: "Hanoi", count: 5, flag: true, nested: { a: [1, 2] } });
-    });
-
-    it("handles empty args map", () => {
-      const mcpArgs = Buffer.concat([
-        Buffer.from(encodeField(1, LEN, "noop")),
-        Buffer.from(encodeField(5, LEN, "noop")),
-      ]);
-      expect(decodeMcpArgs(mcpArgs).args).toEqual({});
-    });
-  });
-
-  describe("McpResult success", () => {
-    it("builds success with single text content", () => {
-      const bytes = encodeMcpResultSuccess({ textItems: ['{"temp":32}'], isError: false });
-      const msg = decodeMessage(bytes); // McpResult level
-      expect(msg.has(1)).toBe(true); // success variant
-      const success = decodeMessage(msg.get(1)[0].value);
-      expect(success.get(1).length).toBe(1);
-      expect(success.get(2)[0].value).toBe(0); // is_error=false
-      const item = decodeMessage(success.get(1)[0].value);
-      const textContent = decodeMessage(item.get(1)[0].value);
-      expect(Buffer.from(textContent.get(1)[0].value).toString("utf8")).toBe('{"temp":32}');
-    });
-
-    it("builds success with multiple text items", () => {
-      const bytes = encodeMcpResultSuccess({ textItems: ["line1", "line2"] });
-      const success = decodeMessage(decodeMessage(bytes).get(1)[0].value);
-      expect(success.get(1).length).toBe(2);
-    });
-
-    it("marks is_error=true", () => {
-      const bytes = encodeMcpResultSuccess({ textItems: ["fail"], isError: true });
-      const success = decodeMessage(decodeMessage(bytes).get(1)[0].value);
-      expect(success.get(2)[0].value).toBe(1);
-    });
-  });
-
-  describe("McpResult image content", () => {
-    it("builds image item with raw bytes + mime type", () => {
-      const imgBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
-      const bytes = encodeMcpResultSuccess({ imageItems: [{ data: imgBytes, mimeType: "image/png" }] });
-      const success = decodeMessage(decodeMessage(bytes).get(1)[0].value);
-      const item = decodeMessage(success.get(1)[0].value);
-      expect(item.has(2)).toBe(true); // image variant
-      const img = decodeMessage(item.get(2)[0].value);
-      expect(Buffer.from(img.get(1)[0].value)).toEqual(Buffer.from(imgBytes));
-      expect(Buffer.from(img.get(2)[0].value).toString("utf8")).toBe("image/png");
-    });
-
-    it("builds mixed text + image content", () => {
-      const imgBytes = new Uint8Array([1, 2, 3]);
-      const bytes = encodeMcpResultSuccess({ textItems: ["see image"], imageItems: [{ data: imgBytes, mimeType: "image/jpeg" }] });
-      const success = decodeMessage(decodeMessage(bytes).get(1)[0].value);
-      expect(success.get(1).length).toBe(2);
-      expect(decodeMessage(success.get(1)[0].value).has(1)).toBe(true); // text
-      expect(decodeMessage(success.get(1)[1].value).has(2)).toBe(true); // image
-    });
-  });
-
-  describe("McpResult error / toolNotFound", () => {
-    it("builds error result (field 2)", () => {
-      const bytes = encodeMcpResultError("tool crashed");
-      const msg = decodeMessage(bytes);
-      expect(msg.has(2)).toBe(true);
-      const err = decodeMessage(msg.get(2)[0].value);
-      expect(Buffer.from(err.get(1)[0].value).toString("utf8")).toBe("tool crashed");
-    });
-
-    it("builds toolNotFound result (field 5)", () => {
-      const bytes = encodeMcpResultToolNotFound("missing_tool");
-      const msg = decodeMessage(bytes);
-      expect(msg.has(5)).toBe(true);
-      const tnf = decodeMessage(msg.get(5)[0].value);
-      expect(Buffer.from(tnf.get(1)[0].value).toString("utf8")).toBe("missing_tool");
-    });
+  it("emits no MCP_TOOLS(34) and stays in Ask mode without tools", () => {
+    const request = decodeMessage(decodeMessage(buildChatRequest([{ role: "user", content: "hi" }], "gpt-5.2", [])).get(1)[0].value);
+    expect(request.has(34)).toBe(false);
+    expect(request.get(27)[0].value).toBe(0); // is_agentic
+    expect(str(request.get(54)[0].value)).toBe("Ask");
   });
 });
 
-describe("Cursor AgentService executor helpers (cursor.js)", () => {
-  describe("isAgentCapableRequest", () => {
-    it("accepts plain text content", () => {
-      expect(isAgentCapableRequest({ messages: [{ role: "user", content: "hi" }] })).toBe(true);
-    });
+// ==================== ChatService: tool call decoding ====================
 
-    it("accepts array text content", () => {
-      expect(isAgentCapableRequest({ messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] })).toBe(true);
-    });
+describe("Cursor ChatService tool-call decoding (extractTextFromResponse)", () => {
+  const mcpParams = (name, argsJson) =>
+    encodeField(1, LEN, concatAll(encodeField(1, LEN, name), encodeField(3, LEN, argsJson)));
 
-    it("accepts request with tools declared", () => {
-      expect(isAgentCapableRequest({ messages: [{ role: "user", content: "hi" }], tools: [{ function: { name: "t" } }] })).toBe(true);
-    });
+  const clientSideToolV2Call = (parts) => concatAll(...parts);
 
-    it("accepts history with assistant tool_calls + tool results", () => {
-      expect(isAgentCapableRequest({
-        messages: [
-          { role: "user", content: "weather?" },
-          { role: "assistant", content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "get_weather", arguments: "{}" } }] },
-          { role: "tool", tool_call_id: "c1", content: "sunny" },
-          { role: "user", content: "thanks" },
-        ],
-      })).toBe(true);
-    });
+  function responseWithToolCall(callBytes) {
+    return new Uint8Array(encodeField(1, LEN, callBytes));
+  }
 
-    it("rejects non-text (image) content", () => {
-      expect(isAgentCapableRequest({ messages: [{ role: "user", content: [{ type: "image_url" }] }] })).toBe(false);
-    });
+  function concatAll(...parts) {
+    const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+    let offset = 0;
+    for (const part of parts) {
+      out.set(part, offset);
+      offset += part.length;
+    }
+    return out;
+  }
 
-    it("rejects missing messages", () => {
-      expect(isAgentCapableRequest({})).toBe(false);
-      expect(isAgentCapableRequest(null)).toBe(false);
+  it("reads id, formatted name and MCP arguments from a ClientSideToolV2Call", () => {
+    const call = clientSideToolV2Call([
+      encodeField(1, VARINT, 19), // tool = MCP
+      encodeField(3, LEN, "call_abc\nmc_model9"), // tool_call_id (model id after delimiter)
+      encodeField(9, LEN, "mcp_custom_get_weather"), // name
+      encodeField(11, VARINT, 1), // is_last
+      encodeField(27, LEN, mcpParams("get_weather", '{"city":"Hanoi"}')), // mcp_params
+    ]);
+    const result = extractTextFromResponse(responseWithToolCall(call));
+    expect(result.toolCall).toEqual({
+      id: "call_abc",
+      type: "function",
+      function: { name: "get_weather", arguments: '{"city":"Hanoi"}' },
+      isLast: true,
     });
   });
 
-  describe("buildAgentRunFrame", () => {
-    // buildAgentRunFrame returns a wrapped Connect-RPC frame (5-byte header + AgentClientMessage).
-    const unwrap = (frame) => frame.subarray(5);
+  it("falls back to raw_args(10) and keeps the surfaced name when mcp_params is absent", () => {
+    const call = clientSideToolV2Call([
+      encodeField(1, VARINT, 19),
+      encodeField(3, LEN, "call_1"),
+      encodeField(9, LEN, "mcp_custom_calculate"),
+      encodeField(10, LEN, '{"expr":"1+1"}'),
+    ]);
+    const { toolCall } = extractTextFromResponse(responseWithToolCall(call));
+    expect(toolCall.id).toBe("call_1");
+    expect(toolCall.function).toEqual({ name: "mcp_custom_calculate", arguments: '{"expr":"1+1"}' });
+    expect(toolCall.isLast).toBe(false);
+  });
 
-    it("encodes a text-only run request with system + model", () => {
-      const frame = unwrap(buildAgentRunFrame(
-        [{ role: "system", content: "be brief" }, { role: "user", content: "hi" }],
-        "gpt-5.2",
-      ));
-      const clientMsg = decodeMessage(frame);
-      expect(clientMsg.has(1)).toBe(true); // run_request
-      const run = decodeMessage(clientMsg.get(1)[0].value);
-      expect(run.has(2)).toBe(true); // action
-      expect(run.has(9)).toBe(true); // requested_model
+  it("returns text/thinking instead of a tool call for a StreamUnifiedChatResponse", () => {
+    const thinking = encodeField(1, LEN, "plan");
+    const response = encodeField(2, LEN, concatAll(encodeField(1, LEN, "hello"), encodeField(25, LEN, thinking)));
+    const result = extractTextFromResponse(new Uint8Array(response));
+    expect(result.text).toBe("hello");
+    expect(result.thinking).toBe("plan");
+    expect(result.toolCall).toBeNull();
+  });
+});
+
+// ==================== ChatService: tool result encoding ====================
+
+describe("Cursor ChatService tool-result codec (cursorProtobuf.js)", () => {
+  it("builds a ClientSideToolV2Result frame with stripped selected_tool and split ids", () => {
+    const framed = buildToolResultRequest({
+      tool_call_id: "call_abc\nmc_model9",
+      tool_name: "mcp_custom_get_weather",
+      result_content: '{"temp":32}',
     });
+    const wrapper = decodeMessage(framed);
+    expect(wrapper.has(2)).toBe(true); // StreamUnifiedChatRequestWithTools.client_side_tool_v2_result
+    const cv2 = decodeMessage(wrapper.get(2)[0].value);
+    expect(cv2.get(1)[0].value).toBe(19); // tool = MCP
+    expect(str(cv2.get(35)[0].value)).toBe("call_abc");
+    expect(str(cv2.get(48)[0].value)).toBe("model9");
+    expect(cv2.has(49)).toBe(false); // tool_index intentionally omitted
 
-    it("encodes mcp_tools (field 4) when tools are provided", () => {
-      const tools = [{ function: { name: "get_weather", description: "weather", parameters: { type: "object", properties: { city: { type: "string" } } } } }];
-      const frame = unwrap(buildAgentRunFrame([{ role: "user", content: "weather?" }], "gpt-5.2", tools));
-      const run = decodeMessage(decodeMessage(frame).get(1)[0].value);
-      expect(run.has(4)).toBe(true); // mcp_tools
-      const mcpTools = decodeMessage(run.get(4)[0].value);
-      expect(mcpTools.get(1).length).toBe(1);
-    });
+    const mcpResult = decodeMessage(cv2.get(28)[0].value);
+    expect(str(mcpResult.get(1)[0].value)).toBe("get_weather"); // prefix stripped
+    expect(str(mcpResult.get(2)[0].value)).toBe('{"temp":32}');
+  });
 
-    it("omits mcp_tools when no tools provided", () => {
-      const frame = unwrap(buildAgentRunFrame([{ role: "user", content: "hi" }], "gpt-5.2", []));
-      const run = decodeMessage(decodeMessage(frame).get(1)[0].value);
-      expect(run.has(4)).toBe(false);
-    });
+  it("keeps an unformatted tool name as-is in the MCP result", () => {
+    const cv2 = decodeMessage(
+      decodeMessage(buildToolResultRequest({ tool_call_id: "c1", tool_name: "lookup", result_content: "ok" })).get(2)[0].value,
+    );
+    const mcpResult = decodeMessage(cv2.get(28)[0].value);
+    expect(str(mcpResult.get(1)[0].value)).toBe("lookup");
+    expect(str(mcpResult.get(2)[0].value)).toBe("ok");
+    expect(cv2.has(48)).toBe(false); // no model_call_id without the "\nmc_" delimiter
+  });
 
-    it("encodes conversation_history from prior turns including tool calls/results", () => {
-      const messages = [
-        { role: "user", content: "weather in Tokyo?" },
-        { role: "assistant", content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "get_weather", arguments: '{"city":"Tokyo"}' } }] },
-        { role: "tool", tool_call_id: "c1", content: "18C cloudy" },
+  it("frames the result for the wire via generateToolResultBody", () => {
+    const frame = generateToolResultBody({ tool_call_id: "c1", tool_name: "mcp_custom_noop", result_content: "done" });
+    const parsed = parseConnectRPCFrame(Buffer.from(frame));
+    expect(parsed.flags).toBe(0x00); // Cursor rejects compressed requests
+    expect(parsed.consumed).toBe(frame.length);
+    expect(new Uint8Array(parsed.payload)).toEqual(
+      new Uint8Array(
+        buildToolResultRequest({ tool_call_id: "c1", tool_name: "mcp_custom_noop", result_content: "done" }),
+      ),
+    );
+  });
+
+  it("nests the full tool-result structure inside a ConversationMessage", () => {
+    const msg = decodeMessage(
+      encodeToolResult({
+        tool_call_id: "call_7",
+        tool_name: "get_weather",
+        tool_index: 2,
+        raw_args: '{"city":"Hanoi"}',
+        result_content: "sunny",
+      }),
+    );
+    expect(str(msg.get(1)[0].value)).toBe("call_7"); // call id
+    expect(str(msg.get(2)[0].value)).toBe("mcp_custom_get_weather"); // formatted name
+    expect(msg.get(3)[0].value).toBe(2); // tool index
+    expect(str(msg.get(5)[0].value)).toBe('{"city":"Hanoi"}'); // raw args
+    const cv2 = decodeMessage(msg.get(8)[0].value); // result
+    expect(cv2.get(1)[0].value).toBe(19);
+    expect(str(decodeMessage(cv2.get(28)[0].value).get(2)[0].value)).toBe("sunny");
+    expect(cv2.get(49)[0].value).toBe(2); // tool_index present inside a message
+    const call = decodeMessage(msg.get(11)[0].value); // tool_call echo
+    expect(str(call.get(9)[0].value)).toBe("mcp_custom_get_weather");
+    const mcpParams = decodeMessage(call.get(27)[0].value);
+    const nested = decodeMessage(mcpParams.get(1)[0].value);
+    expect(str(nested.get(1)[0].value)).toBe("get_weather");
+    expect(str(nested.get(4)[0].value)).toBe("custom");
+  });
+});
+
+// ==================== AgentService (agent.v1) run frame ====================
+
+describe("Cursor AgentService run frame (cursor.js buildAgentRunFrame)", () => {
+  const unwrap = (frame) => {
+    const parsed = parseConnectRPCFrame(Buffer.from(frame));
+    expect(parsed.flags).toBe(0x00);
+    expect(parsed.consumed).toBe(frame.length);
+    return parsed.payload;
+  };
+  const runOf = (frame) => {
+    const clientMsg = decodeMessage(unwrap(frame));
+    expect(clientMsg.has(1)).toBe(true); // AgentClientMessage.run_request
+    return decodeMessage(clientMsg.get(1)[0].value);
+  };
+  const userActionOf = (run) => {
+    expect(run.has(2)).toBe(true); // action
+    return decodeMessage(decodeMessage(run.get(2)[0].value).get(1)[0].value);
+  };
+
+  it("encodes a text-only run request with system prompt and requested model", () => {
+    const run = runOf(buildAgentRunFrame(
+      [{ role: "system", content: "be brief" }, { role: "user", content: "hi" }],
+      "gpt-5.2",
+    ));
+    expect(run.has(1)).toBe(true); // empty ConversationStateStructure = fresh session
+    expect(bytes(run.get(1)[0].value)).toEqual(Buffer.alloc(0));
+    expect(str(run.get(8)[0].value)).toBe("be brief"); // system prompt folded in
+    const requestedModel = decodeMessage(run.get(9)[0].value);
+    expect(str(requestedModel.get(1)[0].value)).toBe("gpt-5.2");
+    expect(requestedModel.get(7)[0].value).toBe(1);
+
+    const userAction = userActionOf(run);
+    const userMessage = decodeMessage(userAction.get(1)[0].value);
+    expect(str(userMessage.get(1)[0].value)).toBe("hi");
+    expect(str(userMessage.get(2)[0].value)).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  });
+
+  it("omits the system field when no system message is present", () => {
+    const run = runOf(buildAgentRunFrame([{ role: "user", content: "hi" }], "gpt-5.2"));
+    expect(run.has(8)).toBe(false);
+  });
+
+  it("carries no mcp_tools: the AgentService tool protocol is not implemented", () => {
+    // Tools are intentionally absent from the agent.v1 frame; `isAgentTextRequest`
+    // keeps conversations that actually use tools on the ChatService path.
+    const run = runOf(buildAgentRunFrame([{ role: "user", content: "weather?" }], "gpt-5.2"));
+    expect(run.has(4)).toBe(false);
+  });
+
+  it("encodes conversation_history(7) from prior turns", () => {
+    const messages = [
+      { role: "user", content: "weather in Tokyo?" },
+      { role: "assistant", content: "checking", tool_calls: [{ id: "c1", type: "function", function: { name: "get_weather", arguments: '{"city":"Tokyo"}' } }] },
+      { role: "tool", tool_call_id: "c1", content: "18C cloudy" },
+      { role: "user", content: "thanks" },
+    ];
+    const userAction = userActionOf(runOf(buildAgentRunFrame(messages, "gpt-5.2")));
+    expect(userAction.has(7)).toBe(true);
+    const history = decodeMessage(userAction.get(7)[0].value);
+    expect(history.get(1).length).toBeGreaterThanOrEqual(2); // prior turns, oldest first
+
+    // ConversationHistoryMessage.user vs .assistant variants (field 1 vs field 2).
+    expect(decodeMessage(history.get(1)[0].value).has(1)).toBe(true);
+    expect(decodeMessage(history.get(1)[1].value).has(2)).toBe(true);
+
+    const historyBytes = Buffer.concat(history.get(1).map((entry) => Buffer.from(entry.value)));
+    const carries = (text) => historyBytes.includes(Buffer.from(text, "utf8"));
+    expect(carries("weather in Tokyo?")).toBe(true);
+    expect(carries("checking")).toBe(true);
+    expect(carries("thanks")).toBe(false); // the current turn is not duplicated
+  });
+
+  it("sends a placeholder user text when the current turn is empty", () => {
+    const userAction = userActionOf(runOf(buildAgentRunFrame([{ role: "user", content: "" }], "gpt-5.2")));
+    expect(str(decodeMessage(userAction.get(1)[0].value).get(1)[0].value)).toBe("Continue.");
+  });
+});
+
+// ==================== AgentService routing decision ====================
+
+describe("CursorExecutor agent.v1 vs ChatService routing (cursor.js)", () => {
+  async function agentPathTaken(body) {
+    const executor = new CursorExecutor();
+    let called = false;
+    executor.executeAgent = async () => {
+      called = true;
+      return { response: new Response("agent") };
+    };
+    // The legacy ChatService branch must never run here: it needs headers/network.
+    executor.buildHeaders = () => {
+      throw new Error("LEGACY_PATH");
+    };
+    try {
+      await executor.execute({ model: "gpt-5.2", body, stream: false, credentials: {} });
+    } catch (error) {
+      if (error.message !== "LEGACY_PATH") throw error;
+    }
+    return called;
+  }
+
+  it("sends a plain text turn to AgentService", async () => {
+    expect(await agentPathTaken({ messages: [{ role: "user", content: "hi" }] })).toBe(true);
+  });
+
+  it("sends array text content to AgentService", async () => {
+    expect(await agentPathTaken({ messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] })).toBe(true);
+  });
+
+  it("sends a text turn that merely declares tools to AgentService", async () => {
+    // Compatible clients always attach their built-in tool schemas; that alone
+    // must not pin the request to the retired ChatService.
+    expect(await agentPathTaken({
+      messages: [{ role: "user", content: "hi" }],
+      tools: [{ function: { name: "t" } }],
+    })).toBe(true);
+  });
+
+  it("keeps a conversation with assistant tool_calls on ChatService", async () => {
+    expect(await agentPathTaken({
+      messages: [
+        { role: "user", content: "weather?" },
+        { role: "assistant", content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "get_weather", arguments: "{}" } }] },
+        { role: "tool", tool_call_id: "c1", content: "sunny" },
         { role: "user", content: "thanks" },
-      ];
-      const frame = unwrap(buildAgentRunFrame(messages, "gpt-5.2", []));
-      const run = decodeMessage(decodeMessage(frame).get(1)[0].value);
-      const action = decodeMessage(run.get(2)[0].value);
-      const userAction = decodeMessage(action.get(1)[0].value);
-      expect(userAction.has(7)).toBe(true); // conversation_history (field 7)
-      const history = decodeMessage(userAction.get(7)[0].value);
-      expect(history.get(1).length).toBeGreaterThanOrEqual(2); // prior turns
-    });
+      ],
+    })).toBe(false);
+  });
+
+  it("keeps a bare tool-result message on ChatService", async () => {
+    expect(await agentPathTaken({
+      messages: [
+        { role: "user", content: "weather?" },
+        { role: "tool", tool_call_id: "c1", content: "sunny" },
+      ],
+    })).toBe(false);
+  });
+
+  it("keeps non-text (image) content on ChatService", async () => {
+    expect(await agentPathTaken({ messages: [{ role: "user", content: [{ type: "image_url" }] }] })).toBe(false);
+  });
+
+  it("keeps requests without messages on ChatService", async () => {
+    expect(await agentPathTaken({})).toBe(false);
+    expect(await agentPathTaken(null)).toBe(false);
   });
 });

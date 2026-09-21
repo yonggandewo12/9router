@@ -73,7 +73,8 @@ describe("OpenAI → CommandCode", () => {
     expect(JSON.stringify(out)).not.toContain("[image omitted]");
     expect(out.params.messages[0].content).toEqual([
       { type: "text", text: "look" },
-      { type: "image", image: "data:image/png;base64,BBBB", mimeType: "image/png" },
+      // upstream accepts both mimeType and mediaType; translator emits both
+      { type: "image", image: "data:image/png;base64,BBBB", mimeType: "image/png", mediaType: "image/png" },
     ]);
   });
 });

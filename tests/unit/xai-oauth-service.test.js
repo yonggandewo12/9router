@@ -22,7 +22,9 @@ describe("xai/oauth service", () => {
   });
 
   it("discovers endpoints without custom user-agent headers", async () => {
-    fetch.mockResolvedValueOnce({
+    // Importing the service patches globalThis.fetch; keep a handle on the stub.
+    const fetchMock = fetch;
+    fetchMock.mockResolvedValueOnce({
       ok: true,
       json: async () => ({
         authorization_endpoint: "https://auth.x.ai/oauth2/authorize",
@@ -35,7 +37,7 @@ describe("xai/oauth service", () => {
       authorizeUrl: "https://auth.x.ai/oauth2/authorize",
       tokenUrl: "https://auth.x.ai/oauth2/token",
     });
-    expect(fetch).toHaveBeenCalledWith(
+    expect(fetchMock).toHaveBeenCalledWith(
       "https://auth.x.ai/.well-known/openid-configuration",
       expect.objectContaining({ headers: { Accept: "application/json" } })
     );
