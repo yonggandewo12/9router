@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
 
@@ -18,10 +18,12 @@ vi.mock("../../open-sse/utils/proxyFetch.js", () => ({
 import {
   normalizeConversation,
   buildCliArgs,
+  planPrompt,
   runOpenCodeCli,
   isOpenCodeCliAvailable,
   listCliFreeModels,
 } from "../../open-sse/executors/opencode-cli.js";
+import { OPENCODE_CLI_CONFIG } from "../../open-sse/config/runtimeConfig.js";
 import { translateRequest } from "../../open-sse/translator/index.js";
 import "../translator/registerAll.js";
 import { FORMATS } from "../../open-sse/translator/formats.js";
@@ -32,6 +34,9 @@ class FakeChild extends EventEmitter {
     super();
     this.stdout = new EventEmitter();
     this.stderr = new EventEmitter();
+    this.stdin = new EventEmitter();
+    this.stdinWritten = "";
+    this.stdin.end = (data) => { this.stdinWritten += data == null ? "" : String(data); };
     this.killed = false;
   }
   kill() { this.killed = true; }
@@ -49,6 +54,10 @@ beforeEach(() => {
   process.env.OPENCODE_TRANSPORT = "cli";
 });
 
+function countFiles(args) {
+  return args.reduce((n, a) => (a === "--file" ? n + 1 : n), 0);
+}
+
 function lastArgs() {
   return spawnMock.mock.calls[spawnMock.mock.calls.length - 1][1];
 }
@@ -64,7 +73,7 @@ const ASSISTANT = (text) => ({ role: "assistant", content: text });
 const SYS = (text) => ({ role: "system", content: text });
 
 describe("normalizeConversation", () => {
-  it("collects image parts from every wire shape as attachments", () => {
+  it("collects image parts from every wire shape and attributes them to their turn", () => {
     const png = "iVBORw0KGgoAAAANSUhEUg==";
     const chat = normalizeConversation({
       messages: [{ role: "user", content: [
@@ -73,27 +82,65 @@ describe("normalizeConversation", () => {
       ] }],
     });
     expect(chat.turns[0].text).toContain("[image #1]");
-    expect(chat.images).toEqual([{ base64: png, mime: "image/png" }]);
+    expect(chat.images).toEqual([{ base64: png, mime: "image/png", turn: 0 }]);
 
     const claude = normalizeConversation({
       messages: [
         { role: "user", content: [{ type: "image", source: { type: "base64", media_type: "image/jpeg", data: png } }] },
       ],
     });
-    expect(claude.images).toEqual([{ base64: png, mime: "image/jpeg" }]);
+    expect(claude.images).toEqual([{ base64: png, mime: "image/jpeg", turn: 0 }]);
 
     const responses = normalizeConversation({
       input: [{ type: "message", role: "user", content: [{ type: "input_image", image_url: "https://x.test/a.png" }] }],
     });
-    expect(responses.images).toEqual([{ url: "https://x.test/a.png" }]);
+    expect(responses.images).toEqual([{ url: "https://x.test/a.png", turn: 0 }]);
   });
 
-  it("caps attachments and marks the overflow as omitted", () => {
-    const blocks = Array.from({ length: 10 }, () => ({ type: "image_url", image_url: { url: "data:image/png;base64,AA=="} }));
+  it("collects every image but attaches only the newest ones", () => {
+    const blocks = Array.from({ length: 10 }, (_, i) => ({
+      type: "image_url", image_url: { url: `data:image/png;base64,AA0${i}` },
+    }));
     const { turns, images } = normalizeConversation({ messages: [{ role: "user", content: blocks }] });
-    expect(images).toHaveLength(8);
-    expect(turns[0].text.match(/\[image #\d\]/g)).toHaveLength(8);
-    expect(turns[0].text).toContain("[image omitted]");
+    // Collection is bounded but generous; the attachment cap is applied per request
+    // so the image the user just sent can never be crowded out by older ones.
+    expect(images).toHaveLength(10);
+    expect(turns[0].text.match(/\[image #\d+\]/g)).toHaveLength(10);
+
+    const plan = planPrompt({ key: `k-cap-${Math.random()}`, system: "", turns, images });
+    expect(plan.images).toHaveLength(8);
+    expect(plan.images[0].base64).toBe("AA02"); // newest 8, oldest two dropped
+    expect(plan.images.at(-1).base64).toBe("AA09");
+    // The model must be told which markers have no image behind them.
+    expect(plan.prompt).toContain("only the last 8 of 10 images are attached");
+  });
+
+  it("accepts Responses string input, instructions, and Gemini parts", () => {
+    // These shapes arrive intact through passthrough / identity translation; rejecting
+    // them as "no text to send" would fail legitimate client requests.
+    const bare = normalizeConversation({ model: "x", input: "hello world" });
+    expect(bare.turns).toEqual([{ role: "user", text: "hello world" }]);
+
+    const instr = normalizeConversation({ instructions: "be terse", input: "hi" });
+    expect(instr.system).toBe("be terse");
+    expect(instr.turns).toHaveLength(1);
+
+    const gemini = normalizeConversation({ contents: [{ role: "user", parts: [{ text: "gemini says hi" }] }] });
+    expect(gemini.turns).toEqual([{ role: "user", text: "gemini says hi" }]);
+
+    const geminiSys = normalizeConversation({
+      systemInstruction: { parts: [{ text: "sys" }] },
+      contents: [{ role: "user", parts: [{ text: "q" }] }],
+    });
+    expect(geminiSys.system).toBe("sys");
+  });
+
+  it("maps Gemini model turns to the assistant role", () => {
+    const gemini = normalizeConversation({ contents: [
+      { role: "user", parts: [{ text: "hi" }] },
+      { role: "model", parts: [{ text: "yo" }] },
+    ] });
+    expect(gemini.turns.map((t) => t.role)).toEqual(["user", "assistant"]);
   });
 
   it("flattens chat bodies and lifts system messages out", () => {
@@ -108,6 +155,29 @@ describe("normalizeConversation", () => {
     });
     expect(system).toBe("be terse");
     expect(turns.map((t) => t.role)).toEqual(["user", "assistant", "tool", "user"]);
+    expect(turns[2].text).toContain("get_weather");
+    expect(turns[2].text).toContain("sunny");
+  });
+
+  it("keeps an assistant tool_call turn in the history when content is null", () => {
+    // OpenAI chat shape: tool calls live at the message level and content is often
+    // null. Without the call rendered, a tool result would appear in the replayed
+    // history with no assistant turn that requested it.
+    const { turns } = normalizeConversation({
+      messages: [
+        USER("weather?"),
+        { role: "assistant", content: null, tool_calls: [
+          { id: "c1", function: { name: "get_weather", arguments: '{"city":"Paris"}' } },
+          { id: "c2", function: { name: "get_temp", arguments: { city: "Lyon" } } },
+        ] },
+        { role: "tool", tool_call_id: "c1", content: "sunny" },
+        USER("and tomorrow?"),
+      ],
+    });
+    expect(turns.map((t) => t.role)).toEqual(["user", "assistant", "tool", "user"]);
+    expect(turns[1].text).toContain("get_weather");
+    expect(turns[1].text).toContain('{"city":"Paris"}');
+    expect(turns[1].text).toContain("get_temp");
     expect(turns[2].text).toContain("get_weather");
     expect(turns[2].text).toContain("sunny");
   });
@@ -177,6 +247,19 @@ describe("buildCliArgs", () => {
     const off = buildCliArgs({ model: "muse-spark-1.3-contributor-free(none)", body: {}, sid: null, prompt: "p" });
     expect(off).not.toContain("--variant");
   });
+
+  it("reads the effort from the Responses-style reasoning object too", () => {
+    // The HTTP transport's normalizeOpencodeReasoning honors reasoning.effort; the
+    // CLI path must agree or the same client request picks different thinking levels.
+    const viaObject = buildCliArgs({ model: "muse-spark-1.3-contributor-free", body: { reasoning: { effort: "low" } }, sid: null, prompt: "p" });
+    expect(viaObject).toContain("--variant");
+    expect(viaObject).toContain("low");
+
+    // model suffix still wins over the body, as on the HTTP path.
+    const suffixWins = buildCliArgs({ model: "muse-spark-1.3-contributor-free(high)", body: { reasoning: { effort: "low" } }, sid: null, prompt: "p" });
+    expect(suffixWins.filter((a) => a === "high")).toHaveLength(1);
+    expect(suffixWins).not.toContain("low");
+  });
 });
 
 describe("session continuity", () => {
@@ -204,6 +287,53 @@ describe("session continuity", () => {
     expect(second).toContain("-s");
     expect(second[second.indexOf("-s") + 1]).toBe("ses_keep");
     expect(second.at(-1)).toBe("user: two");
+  });
+
+  it("attaches only the new turn's image on a delta continuation", async () => {
+    const ids = { credentials: { connectionId: "conn-imgdelta" }, providerSessionId: "conv-imgdelta" };
+    const withImg = (label, b64) => ({ role: "user", content: [
+      { type: "text", text: label },
+      { type: "image_url", image_url: { url: `data:image/png;base64,${b64}` } },
+    ] });
+    const imgA = Buffer.from("img-A").toString("base64");
+    const imgB = Buffer.from("img-B").toString("base64");
+
+    const first = await takeTurn({ ids, messages: [withImg("look A", imgA)], reply: "replyA", sid: "ses_imgd" });
+    expect(countFiles(first)).toBe(1);
+
+    const second = await takeTurn({
+      ids,
+      messages: [withImg("look A", imgA), ASSISTANT("replyA"), withImg("look B", imgB)],
+      reply: "replyB", sid: "ses_imgd",
+    });
+    expect(second).toContain("-s");
+    // Image A already lives in the opencode session; re-sending it would double-bill
+    // tokens and could crowd the newest attachment out entirely.
+    expect(countFiles(second)).toBe(1);
+  });
+
+  it("notes dropped images on the continuation path too", async () => {
+    const ids = { credentials: { connectionId: "conn-imgnote" }, providerSessionId: "conv-imgnote" };
+    const imgs = Array.from({ length: 10 }, (_, i) => Buffer.from(`pic-${i}`).toString("base64"));
+    const warmup = { role: "user", content: [
+      { type: "text", text: "warmup" },
+      { type: "image_url", image_url: { url: `data:image/png;base64,${imgs[0]}` } },
+    ] };
+
+    await takeTurn({ ids, messages: [warmup], reply: "replyA", sid: "ses_imgn" });
+    // Second user turn carries 10 images; only the newest 8 attach, and the
+    // markers for the other two must be called out or the model invents them.
+    const args = await takeTurn({
+      ids,
+      messages: [structuredClone(warmup), ASSISTANT("replyA"), { role: "user", content: imgs.flatMap((b, i) => [
+        { type: "text", text: `p${i}` },
+        { type: "image_url", image_url: { url: `data:image/png;base64,${b}` } },
+      ]) }],
+      reply: "replyB", sid: "ses_imgn",
+    });
+    expect(args).toContain("-s");
+    expect(countFiles(args)).toBe(8);
+    expect(args.at(-1)).toContain("only the last 8 of 10 images are attached");
   });
 
   it("replays everything when the client edited an earlier turn", async () => {
@@ -256,10 +386,15 @@ describe("runOpenCodeCli", () => {
     expect(result.url).toBe("opencode-cli://run");
     expect(result.response.status).toBe(200);
     expect(lastArgs().slice(0, 5)).toEqual(["run", "--format", "json", "-m", "opencode/nemotron-3.5-lightning-free"]);
+    // Direct-spawn path (mac/linux/.exe): the prompt stays in argv and stdin is left
+    // at /dev/null so opencode's unconditional `Bun.stdin.text()` gets an instant EOF.
+    expect(spawnMock.mock.calls.at(-1)[2].stdio[0]).toBe("ignore");
+    expect(lastArgs().at(-1)).toContain("hi");
 
     const child = children.at(-1);
-    child.stdout.emit("data", Buffer.from(evt({ type: "text", sessionID: "ses_emit", part: { text: "hel" } })));
-    child.stdout.emit("data", Buffer.from(evt({ type: "text", part: { text: "lo" } })));
+    // `--format json` emits one `text` event per COMPLETED part (part.time.end), not
+    // per token, so a simple reply is a single part carrying the whole text.
+    child.stdout.emit("data", Buffer.from(evt({ type: "text", sessionID: "ses_emit", part: { text: "hello" } })));
     child.stdout.emit("data", Buffer.from(evt({ type: "step_finish", part: { tokens: { input: 100, output: 5, reasoning: 2, cache: { read: 40 } }, cost: 0 } })));
     child.stdout.emit("data", Buffer.from("not json at all\n"));
     child.emit("close", 0);
@@ -274,7 +409,35 @@ describe("runOpenCodeCli", () => {
     expect(chunks[0].choices[0].delta.role).toBe("assistant");
     const final = chunks.filter((c) => c.choices?.[0]?.finish_reason).at(-1);
     expect(final.choices[0].finish_reason).toBe("stop");
-    expect(final.usage).toEqual({ prompt_tokens: 100, completion_tokens: 7, total_tokens: 107 });
+    // opencode reports cache.read/write separately from input; the CLI transport
+    // folds them into prompt_tokens so a cache-heavy turn does not read as cheap.
+    expect(final.usage).toEqual({ prompt_tokens: 140, completion_tokens: 7, total_tokens: 147 });
+    // The "(level)" thinking suffix is 9router syntax, not a model id — it must not
+    // leak into the chunk model field that clients echo back.
+    expect(chunks.every((c) => c.model === "nemotron-3.5-lightning-free")).toBe(true);
+    expect(new Set(chunks.map((c) => c.id)).size).toBe(1);
+  });
+
+  it("separates multiple completed text parts so they do not run together", async () => {
+    // A reply split across parts (e.g. text before and after a tool step) arrives as
+    // several whole-part `text` events. Clients concatenate deltas verbatim, so every
+    // part after the first must carry a separator or the parts merge into a run-on.
+    const result = await runOpenCodeCli({
+      model: "big-pickle",
+      body: { messages: [USER("hi")] },
+      credentials: { connectionId: "conn-multipart" },
+      providerSessionId: "conv-multipart",
+    });
+    const child = children.at(-1);
+    child.stdout.emit("data", Buffer.from(evt({ type: "text", sessionID: "ses_mp", part: { text: "First part." } })));
+    child.stdout.emit("data", Buffer.from(evt({ type: "text", sessionID: "ses_mp", part: { text: "Second part." } })));
+    child.emit("close", 0);
+
+    const sse = await readAll(result.response);
+    const contents = sse.split("\n\n").filter((l) => l.startsWith("data: ")).map((l) => l.slice(6))
+      .filter((l) => l !== "[DONE]").map((l) => JSON.parse(l))
+      .filter((c) => c.choices?.[0]?.delta?.content).map((c) => c.choices[0].delta.content);
+    expect(contents.join("")).toBe("First part.\n\nSecond part.");
   });
 
   it("surfaces a CLI error event instead of faking success", async () => {
@@ -384,6 +547,23 @@ describe("runOpenCodeCli", () => {
     expect(fs.existsSync(fileB)).toBe(false);
   });
 
+  it("surfaces a plain-text CLI failure printed on stdout", async () => {
+    // Real case: a broken install (postinstall not run) writes prose to stdout and
+    // exits non-zero — the cause must reach the caller, not just "no assistant text".
+    const result = await runOpenCodeCli({
+      model: "big-pickle",
+      body: { messages: [USER("hi")] },
+      credentials: { connectionId: "conn-prose" },
+      providerSessionId: "conv-prose",
+    });
+    const child = children.at(-1);
+    child.stdout.emit("data", Buffer.from("Error: opencode-ai's postinstall script was not run.\n"));
+    child.emit("close", 1);
+    const sse = await readAll(result.response);
+    expect(sse).toContain("exited with code 1");
+    expect(sse).toContain("postinstall script was not run");
+  });
+
   it("reports a spawn failure as an error frame", async () => {
     const result = await runOpenCodeCli({
       model: "big-pickle",
@@ -405,6 +585,25 @@ describe("runOpenCodeCli", () => {
       providerSessionId: "conv-empty",
     });
     expect(result.response.status).toBe(400);
+    expect(spawnMock).not.toHaveBeenCalled();
+    // chatCore feeds non-ok bodies to parseUpstreamError, which JSON-parses — the
+    // error must come through as clean JSON, not an SSE error frame.
+    expect(result.response.headers.get("content-type")).toContain("application/json");
+    const err = await result.response.json();
+    expect(err.error.message).toContain("no text to send");
+  });
+
+  it("refuses to start a turn for an already-aborted request", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const result = await runOpenCodeCli({
+      model: "big-pickle",
+      body: { messages: [USER("hi")] },
+      credentials: { connectionId: "conn-abort-early" },
+      providerSessionId: "conv-abort-early",
+      signal: controller.signal,
+    });
+    expect(result.response.status).toBe(499);
     expect(spawnMock).not.toHaveBeenCalled();
   });
 });
@@ -468,6 +667,31 @@ describe("CLI free-model whitelist", () => {
     expect([...(await pending)]).toEqual(["big-pickle", "nemotron-3.5-lightning-free"]);
   });
 
+  it("strips non-color CSI sequences like erase-line, not just colors", async () => {
+    // The CLI redraws progress lines with ESC[0K; a color-only strip would leave
+    // the residue glued to the id and silently drop the model from the whitelist.
+    const pending = listCliFreeModels({ ttlMs: 0 });
+    const child = children.at(-1);
+    child.stdout.emit("data", Buffer.from("\u001b[2K\u001b[0mopencode/big-pickle\n\u001b[0K see opencode/not-a-match\n"));
+    child.emit("close", 0);
+    expect([...(await pending)]).toEqual(["big-pickle"]);
+  });
+
+  it("fans out a single probe for concurrent callers", async () => {
+    // `opencode models` is a full CLI boot; two dashboard panels opening at once must
+    // share one spawn, not each pay the boot cost.
+    const before = spawnMock.mock.calls.length;
+    const p1 = listCliFreeModels({ ttlMs: 0 });
+    const p2 = listCliFreeModels({ ttlMs: 0 });
+    expect(spawnMock.mock.calls.length).toBe(before + 1);
+    const child = children.at(-1);
+    child.stdout.emit("data", Buffer.from("opencode/big-pickle\nopencode/nemotron-3.5-lightning-free\n"));
+    child.emit("close", 0);
+    const [r1, r2] = await Promise.all([p1, p2]);
+    expect(r2).toBe(r1); // both callers await the one shared probe
+    expect([...r1]).toEqual(["big-pickle", "nemotron-3.5-lightning-free"]);
+  });
+
   it("returns null on a non-zero exit (caller falls back to suffix filtering)", async () => {
     const pending = listCliFreeModels({ ttlMs: 0 });
     children.at(-1).emit("close", 1);
@@ -479,6 +703,141 @@ describe("CLI free-model whitelist", () => {
     const before = spawnMock.mock.calls.length;
     expect(await listCliFreeModels({ ttlMs: 0 })).toBeNull();
     expect(spawnMock.mock.calls.length).toBe(before);
+  });
+});
+
+describe("oversized transcripts", () => {
+  it("trims a runaway system block but keeps the question and the byte cap", () => {
+    const hugeSystem = "S".repeat(200 * 1024);
+    const plan = planPrompt({ key: `k-hugesys-${Math.random()}`, system: hugeSystem, turns: [{ role: "user", text: "Q?" }], images: [] });
+    expect(Buffer.byteLength(plan.prompt)).toBeLessThanOrEqual(180 * 1024);
+    expect(plan.prompt).toContain("Q?");
+    expect(plan.prompt).toContain("Instructions for your reply:");
+  });
+
+  it("keeps the system instructions and the question, trimming the oldest history", () => {
+    const big = "汉".repeat(20000); // multibyte: byte trimming must never split a code point
+    const turns = [];
+    for (let i = 0; i < 10; i++) {
+      turns.push({ role: "user", text: `${big} q${i}` });
+      turns.push({ role: "assistant", text: `${big} a${i}` });
+    }
+    turns.push({ role: "user", text: "FINAL-QUESTION-MARKER" });
+
+    const plan = planPrompt({ key: "k-big", system: "KEEP-ME-系统指令", turns, images: [] });
+    expect(Buffer.byteLength(plan.prompt)).toBeLessThanOrEqual(180 * 1024);
+    expect(plan.prompt).toContain("KEEP-ME-系统指令");
+    expect(plan.prompt).toContain("FINAL-QUESTION-MARKER");
+    expect(plan.prompt).not.toContain("\uFFFD");
+  });
+});
+
+describe("startup idle vs. silent generation", () => {
+  // opencode `--format json` emits a text part only when it completes, so stdout is
+  // silent for the whole generation. The idle timer must guard ONLY the startup window
+  // (spawn → first byte); killing a silently-generating turn would abort legitimate
+  // slow/reasoning replies.
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it("aborts a CLI that produces no output within the startup grace", async () => {
+    const result = await runOpenCodeCli({
+      model: "big-pickle",
+      body: { messages: [USER("hi")] },
+      credentials: { connectionId: "conn-idle-start" },
+      providerSessionId: "conv-idle-start",
+    });
+    const child = children.at(-1);
+    const drained = readAll(result.response);
+    await vi.advanceTimersByTimeAsync(OPENCODE_CLI_CONFIG.idleMs + 1000);
+    const sse = await drained;
+    expect(child.killed).toBe(true);
+    expect(sse).toContain("produced no output");
+    expect(sse).not.toContain("[DONE]");
+  });
+
+  it("survives a silent generation window after the first event", async () => {
+    const result = await runOpenCodeCli({
+      model: "muse-spark-1.3-contributor-free(xhigh)",
+      body: { messages: [USER("a hard problem")] },
+      credentials: { connectionId: "conn-idle-gen" },
+      providerSessionId: "conv-idle-gen",
+    });
+    const child = children.at(-1);
+    const drained = readAll(result.response);
+    // step_start arrives, then the model reasons in silence for longer than the
+    // startup grace but under the total ceiling.
+    child.stdout.emit("data", Buffer.from(evt({ type: "step_start", sessionID: "ses_gen" })));
+    await vi.advanceTimersByTimeAsync(OPENCODE_CLI_CONFIG.idleMs + 30_000);
+    expect(child.killed).toBe(false);
+    child.stdout.emit("data", Buffer.from(evt({ type: "text", part: { text: "the answer" } })));
+    child.emit("close", 0);
+    const sse = await drained;
+    expect(sse).toContain("the answer");
+    expect(sse).toContain("[DONE]");
+    expect(sse).not.toContain("produced no output");
+  });
+
+  it("hard-stops a turn that exceeds the total ceiling", async () => {
+    const result = await runOpenCodeCli({
+      model: "big-pickle",
+      body: { messages: [USER("hi")] },
+      credentials: { connectionId: "conn-total" },
+      providerSessionId: "conv-total",
+    });
+    const child = children.at(-1);
+    const drained = readAll(result.response);
+    child.stdout.emit("data", Buffer.from(evt({ type: "step_start", sessionID: "ses_total" })));
+    await vi.advanceTimersByTimeAsync(OPENCODE_CLI_CONFIG.totalMs + 1000);
+    const sse = await drained;
+    expect(child.killed).toBe(true);
+    expect(sse).toContain("timed out");
+    expect(sse).not.toContain("[DONE]");
+  });
+});
+
+describe("windows cmd.exe shim (prompt via stdin)", () => {
+  // The only way to launch a bare name or a .cmd/.bat shim on Windows is through
+  // cmd.exe, which parses its command line one line at a time — a multi-line prompt
+  // in argv (every real request) would be truncated/corrupted. That path must pipe
+  // the prompt over stdin instead, leaving argv free of arbitrary user text.
+  const platformDesc = Object.getOwnPropertyDescriptor(process, "platform");
+  beforeEach(async () => {
+    Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+    process.env.CLI_OPENCODE_BIN = "opencode.cmd";
+    process.env.OPENCODE_TRANSPORT = "cli";
+    // Refresh the cached bin so getCliInfo() resolves the .cmd override rather than
+    // a stale absolute .exe path cached by an earlier test (which would skip cmd.exe).
+    await isOpenCodeCliAvailable();
+  });
+  afterEach(() => {
+    Object.defineProperty(process, "platform", platformDesc);
+    delete process.env.CLI_OPENCODE_BIN;
+  });
+
+  it("pipes a multi-line prompt over stdin and keeps it off the cmd.exe argv", async () => {
+    const result = await runOpenCodeCli({
+      model: "big-pickle",
+      body: { messages: [USER("line one\nline two & more | text <x>")] },
+      credentials: { connectionId: "conn-win-stdin" },
+      providerSessionId: "conv-win-stdin",
+    });
+    const child = children.at(-1);
+    const opts = spawnMock.mock.calls.at(-1)[2];
+    const args = lastArgs();
+
+    expect(opts.shell).toBe(true);
+    expect(opts.stdio[0]).toBe("pipe");
+    // The prompt is not a positional argv token, and the `--` guard is gone with it.
+    expect(args.some((a) => a.includes("line one"))).toBe(false);
+    expect(args).not.toContain('"--"');
+    // It reaches the CLI intact over stdin, newlines and shell metacharacters included.
+    expect(child.stdinWritten).toContain("line one\nline two & more | text <x>");
+
+    child.stdout.emit("data", Buffer.from(evt({ type: "text", sessionID: "ses_win", part: { text: "ok" } })));
+    child.emit("close", 0);
+    const sse = await readAll(result.response);
+    expect(sse).toContain("[DONE]");
   });
 });
 

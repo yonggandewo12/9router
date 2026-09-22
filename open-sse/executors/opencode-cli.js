@@ -22,11 +22,22 @@ const CLI_PROVIDER_PREFIX = "opencode/";
 // point that default back at 9router, which would loop. Pin one of our own ids.
 const WORKSPACE_DEFAULT_MODEL = "opencode/nemotron-3.5-lightning-free";
 const CLI_URL = "opencode-cli://run";
-const MAX_PROMPT_BYTES = 180 * 1024;
+// The prompt travels as a single argv string, so the platform per-argument ceiling
+// binds before our own budget: Linux MAX_ARG_STRLEN is 128KB per argument and the
+// CreateProcess command line caps at 32KB on Windows (E2BIG / silent truncation
+// above those). macOS only limits the 1MB total, so the full budget fits.
+const MAX_PROMPT_BYTES = Math.min(
+  180 * 1024,
+  process.platform === "win32" ? 30 * 1024 : process.platform === "linux" ? 120 * 1024 : 180 * 1024
+);
 const MAX_SESSIONS = 1000;
 const ERROR_TYPE = "opencode_cli_error";
 const ATTACHMENTS_DIR_NAME = "attachments";
+// Only the newest MAX_ATTACHMENTS images of the turns actually being sent are
+// attached; MAX_IMAGES_COLLECTED bounds collection so a long image-heavy history
+// cannot balloon memory before that selection.
 const MAX_ATTACHMENTS = 8;
+const MAX_IMAGES_COLLECTED = 32;
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const IMAGE_FETCH_TIMEOUT_MS = 15 * 1000;
 const ATTACHMENT_MAX_AGE_MS = 6 * 60 * 60 * 1000;
@@ -44,6 +55,27 @@ function envFlag(name) {
   return raw == null ? "" : String(raw).trim().toLowerCase();
 }
 
+// ─── Windows spawn safety ────────────────────────────────────────────────────
+
+// Modern Node refuses to spawn .cmd/.bat shims without a shell (EINVAL), and a
+// bare command name can only be PATH-resolved through cmd.exe on Windows.
+function needsShell(bin) {
+  return process.platform === "win32" && (!!bin && (!bin.includes(path.sep) || /\.(cmd|bat)$/i.test(bin)));
+}
+
+// Node joins argv with plain spaces when shell:true and cmd.exe re-parses the
+// result, so every argument must be quoted or a prompt containing & | < > "
+// would break out of the command. "..." + doubled inner quotes is cmd's escape;
+// "%" cannot be neutralized (expansion leaks env text into the prompt but cannot
+// execute).
+function cmdQuote(arg) {
+  return `"${String(arg).replace(/"/g, '""')}"`;
+}
+
+function spawnArgs(bin, args) {
+  return needsShell(bin) ? args.map(cmdQuote) : args;
+}
+
 // ─── Binary discovery / availability ─────────────────────────────────────────
 
 function candidateBins() {
@@ -52,8 +84,12 @@ function candidateBins() {
   const home = os.homedir();
   if (process.platform === "win32") {
     const localAppData = process.env.LOCALAPPDATA || path.join(home, "AppData", "Local");
+    // npm's global prefix on Windows is %APPDATA%\npm (Roaming), not LocalAppData.
+    const appData = process.env.APPDATA || path.join(home, "AppData", "Roaming");
     return [
+      path.join(home, ".opencode", "bin", "opencode.exe"),
       path.join(localAppData, "opencode", "bin", "opencode.exe"),
+      path.join(appData, "npm", "opencode.cmd"),
       path.join(localAppData, "npm", "opencode.cmd"),
       path.join(home, ".bun", "bin", "opencode.exe"),
       "opencode.cmd",
@@ -87,9 +123,9 @@ function spawnVersionProbe(bin) {
     let child;
     const settle = (value) => { if (!settled) { settled = true; resolve(value); } };
     try {
-      child = spawn(bin, ["--version"], {
+      child = spawn(bin, spawnArgs(bin, ["--version"]), {
         stdio: ["ignore", "ignore", "ignore"],
-        shell: process.platform === "win32" && !bin.includes(path.sep),
+        shell: needsShell(bin),
       });
     } catch { settle(false); return; }
     const timer = setTimeout(() => {
@@ -103,6 +139,7 @@ function spawnVersionProbe(bin) {
 }
 
 let availability = null; // { bin, ok, checkedAt }
+let availabilityProbe = null; // in-flight dedupe: a TTL expiry must not fan out one probe per request
 
 /**
  * Cached "is a usable opencode binary installed". Servers/Docker images without
@@ -118,10 +155,18 @@ export async function isOpenCodeCliAvailable({ force = false } = {}) {
   if (!force && availability && Date.now() - availability.checkedAt < OPENCODE_CLI_CONFIG.availabilityTtlMs) {
     return availability.ok;
   }
-  const bin = resolveOpencodeBin();
-  const ok = await spawnVersionProbe(bin);
-  availability = { bin, ok, checkedAt: Date.now() };
-  return ok;
+  if (!force && availabilityProbe) return availabilityProbe;
+  availabilityProbe = (async () => {
+    try {
+      const bin = resolveOpencodeBin();
+      const ok = await spawnVersionProbe(bin);
+      availability = { bin, ok, checkedAt: Date.now() };
+      return ok;
+    } finally {
+      availabilityProbe = null;
+    }
+  })();
+  return availabilityProbe;
 }
 
 export function getCliInfo() {
@@ -129,6 +174,7 @@ export function getCliInfo() {
 }
 
 let freeModelsCache = null; // { ids: Set, at: number }
+let freeModelsProbe = null; // in-flight dedupe: concurrent dashboard loads must not each spawn `opencode models`
 let modelsProbeFailedAt = 0;
 const MODELS_FAILURE_BACKOFF_MS = 60 * 1000;
 
@@ -148,13 +194,22 @@ export async function listCliFreeModels({ ttlMs = OPENCODE_CLI_CONFIG.availabili
   if (Date.now() - modelsProbeFailedAt < MODELS_FAILURE_BACKOFF_MS) {
     return null;
   }
-  const ids = await spawnModelsListing(getCliInfo().bin);
-  if (!ids) {
-    modelsProbeFailedAt = Date.now();
-    return null;
-  }
-  freeModelsCache = { ids, at: Date.now() };
-  return ids;
+  // `opencode models` is a full CLI boot (~1s+); fan out at most one per cache window.
+  if (freeModelsProbe) return freeModelsProbe;
+  freeModelsProbe = (async () => {
+    try {
+      const ids = await spawnModelsListing(getCliInfo().bin);
+      if (!ids) {
+        modelsProbeFailedAt = Date.now();
+        return null;
+      }
+      freeModelsCache = { ids, at: Date.now() };
+      return ids;
+    } finally {
+      freeModelsProbe = null;
+    }
+  })();
+  return freeModelsProbe;
 }
 
 function spawnModelsListing(bin) {
@@ -163,9 +218,9 @@ function spawnModelsListing(bin) {
     let child;
     const settle = (value) => { if (!settled) { settled = true; resolve(value); } };
     try {
-      child = spawn(bin, ["models", "opencode"], {
+      child = spawn(bin, spawnArgs(bin, ["models", "opencode"]), {
         stdio: ["ignore", "pipe", "ignore"],
-        shell: process.platform === "win32" && !bin.includes(path.sep),
+        shell: needsShell(bin),
       });
     } catch { settle(null); return; }
     let out = "";
@@ -181,7 +236,10 @@ function spawnModelsListing(bin) {
       if (code !== 0) return settle(null);
       const ids = new Set();
       for (const line of out.split("\n")) {
-        const clean = line.replace(/\x1b\[[0-9;]*m/g, "").trim();
+        // Strip every CSI sequence (colors, erase-line), not just color codes —
+        // leftover "\x1b[0K" would make a model line unrecognizable and silently
+        // drop that id from the whitelist.
+        const clean = line.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").trim();
         if (clean.startsWith(CLI_PROVIDER_PREFIX)) ids.add(clean.slice(CLI_PROVIDER_PREFIX.length));
       }
       settle(ids.size ? ids : null);
@@ -210,12 +268,14 @@ function sweepStaleAttachments(dir) {
   }
 }
 
-async function materializeAttachments(images, workspaceDir, proxyOptions, log) {
+async function materializeAttachments(images, workspaceDir, proxyOptions, log, signal) {
   if (!images?.length) return [];
   const dir = path.join(workspaceDir, ATTACHMENTS_DIR_NAME);
   fs.mkdirSync(dir, { recursive: true });
-  const written = new Set();
-  for (const image of images) {
+  // Parallel: serial fetches would stack up to 8 × 15s of dead time before the
+  // CLI even spawns. map preserves order, so [image #N] markers stay aligned.
+  const written = await Promise.all(images.map(async (image) => {
+    if (signal?.aborted) return null;
     try {
       let bytes;
       let mime = image.mime || "";
@@ -232,16 +292,32 @@ async function materializeAttachments(images, workspaceDir, proxyOptions, log) {
         const declared = Number(res.headers.get("content-length") || 0);
         if (declared > MAX_IMAGE_BYTES) {
           log?.warn?.("OPENCODE", `image attachment declares ${declared}B > cap → skipped`);
-          continue;
+          return null;
         }
-        bytes = Buffer.from(await res.arrayBuffer());
+        // Read with a cap: without content-length nothing bounded arrayBuffer().
+        const reader = res.body?.getReader();
+        if (!reader) return null;
+        const parts = [];
+        let total = 0;
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          total += value.length;
+          if (total > MAX_IMAGE_BYTES) {
+            await reader.cancel().catch(() => {});
+            log?.warn?.("OPENCODE", "image attachment exceeds cap mid-stream → dropped");
+            return null;
+          }
+          parts.push(Buffer.from(value));
+        }
+        bytes = Buffer.concat(parts);
       } else {
-        continue;
+        return null;
       }
-      if (!bytes?.length) continue;
+      if (!bytes?.length) return null;
       if (bytes.length > MAX_IMAGE_BYTES) {
         log?.warn?.("OPENCODE", `image attachment ${bytes.length}B exceeds cap → dropped`);
-        continue;
+        return null;
       }
       const ext = IMAGE_EXTS[mime] || "png";
       // Unique per write: the attachments dir is shared across conversations (and
@@ -250,12 +326,13 @@ async function materializeAttachments(images, workspaceDir, proxyOptions, log) {
       const hash = crypto.createHash("sha1").update(bytes).digest("hex").slice(0, 16);
       const file = path.join(dir, `${hash}-${crypto.randomUUID().slice(0, 8)}.${ext}`);
       fs.writeFileSync(file, bytes, { flag: "wx" });
-      written.add(file);
+      return file;
     } catch (e) {
       log?.warn?.("OPENCODE", `image attachment failed: ${e.message}`);
+      return null;
     }
-  }
-  return [...written];
+  }));
+  return [...new Set(written.filter(Boolean))];
 }
 
 function removeAttachments(files) {
@@ -311,7 +388,21 @@ function imageFromBlock(block) {
   return null;
 }
 
-function blockText(content, images) {
+// OpenAI chat shape carries tool calls at the message level (content often null);
+// render them like the claude tool_use blocks so a tool result never appears in
+// the replayed history without the assistant turn that requested it.
+function renderToolCalls(toolCalls) {
+  if (!Array.isArray(toolCalls)) return "";
+  return toolCalls
+    .filter((tc) => tc && typeof tc === "object")
+    .map((tc) => {
+      const args = tc.function?.arguments ?? tc.arguments ?? {};
+      return `[assistant called tool ${tc.function?.name || tc.name || "?"} with ${typeof args === "string" ? args : JSON.stringify(args)}]`;
+    })
+    .join("\n");
+}
+
+function blockText(content, images, turnAt) {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
   const parts = [];
@@ -334,19 +425,40 @@ function blockText(content, images) {
       case "image_url":
       case "input_image": {
         const image = imageFromBlock(block);
-        if (image && images.length < MAX_ATTACHMENTS) {
-          images.push(image);
+        if (image && images.length < MAX_IMAGES_COLLECTED) {
+          images.push({ ...image, turn: turnAt });
           parts.push(`[image #${images.length}]`);
         } else {
           parts.push("[image omitted]");
         }
         break;
       }
-      default:
-        break; // thinking/redacted_thinking/etc. are not replayed as prompt text
+      default: {
+        // Gemini parts carry no `type`.
+        if (typeof block.text === "string") parts.push(block.text);
+        else if (block.inlineData) {
+          const image = imageFromBlock({ source: { type: "base64", media_type: block.inlineData.mimeType, data: block.inlineData.data } });
+          if (image && images.length < MAX_IMAGES_COLLECTED) {
+            images.push({ ...image, turn: turnAt });
+            parts.push(`[image #${images.length}]`);
+          } else {
+            parts.push("[image omitted]");
+          }
+        }
+        break;
+      }
     }
   }
   return parts.filter(Boolean).join("\n");
+}
+
+// A system block may arrive as a string, an array of blocks, or a Gemini
+// {parts:[...]} wrapper.
+function systemText(value, images) {
+  if (value == null) return "";
+  const source = Array.isArray(value) ? value : Array.isArray(value?.parts) ? value.parts : value;
+  const rendered = blockText(source, images, 0);
+  return rendered || (typeof source === "string" ? source : "");
 }
 
 /**
@@ -359,7 +471,9 @@ export function normalizeConversation(body) {
   const items = Array.isArray(b.messages) ? b.messages
     : Array.isArray(b.input) ? b.input
       : Array.isArray(b.contents) ? b.contents
-        : [];
+        // The Responses API also accepts a bare string `input`; treat it as one user turn.
+        : typeof b.input === "string" ? [{ role: "user", content: b.input }]
+          : [];
   const systemParts = [];
   const turns = [];
   const images = [];
@@ -368,13 +482,23 @@ export function normalizeConversation(body) {
     if (trimmed) turns.push({ role, text: trimmed });
   };
 
-  if (b.system != null) systemParts.push(blockText(b.system, images) || String(b.system));
+  for (const value of [b.system, b.instructions, b.systemInstruction]) {
+    const rendered = systemText(value, images);
+    if (rendered) systemParts.push(rendered);
+  }
   const toolNames = new Map();
   for (const item of items) {
     if (!item || typeof item !== "object") continue;
     if (item.type === "reasoning" || item.type === "item_reference") continue;
 
-    if (item.role === "system") { systemParts.push(blockText(item.content, images)); continue; }
+    // Index this item's turn will take, so its images can be re-attached only when
+    // that turn is actually part of the prompt being sent.
+    const at = turns.length;
+    if (item.role === "system") {
+      const rendered = systemText(item.content, images);
+      if (rendered) systemParts.push(rendered);
+      continue;
+    }
     if (item.type === "function_call") {
       add("assistant", `[assistant called tool ${item.name || "?"} with ${typeof item.arguments === "string" ? item.arguments : JSON.stringify(item.arguments ?? {})}]`);
       continue;
@@ -391,11 +515,14 @@ export function normalizeConversation(body) {
         if (block?.type === "tool_use" && block.id) toolNames.set(block.id, block.name || "?");
       }
     }
+    const itemBody = item.content ?? item.parts ?? item.text;
     if (item.role === "tool") {
-      add("tool", `[tool result ${toolNames.get(item.tool_call_id) || item.name || "?"}: ${blockText(item.content, images) || JSON.stringify(item.content ?? "")}]`);
+      add("tool", `[tool result ${toolNames.get(item.tool_call_id) || item.name || "?"}: ${blockText(itemBody, images, at) || JSON.stringify(itemBody ?? "")}]`);
       continue;
     }
-    add(item.role === "assistant" ? "assistant" : "user", blockText(item.content ?? item.text, images));
+    const text = blockText(itemBody, images, at);
+    const callText = renderToolCalls(item.tool_calls);
+    add(item.role === "assistant" || item.role === "model" ? "assistant" : "user", callText ? (text ? `${text}\n${callText}` : callText) : text);
   }
 
   return { system: systemParts.filter(Boolean).join("\n\n"), turns, images };
@@ -405,20 +532,59 @@ function renderTurns(turns) {
   return turns.map((t) => `${t.role}: ${t.text}`).join("\n\n");
 }
 
-function renderFirstPrompt(system, turns) {
-  const blocks = [];
-  if (system) blocks.push(`Instructions for your reply:\n${system}`);
-  const history = turns.slice(0, -1);
-  if (history.length) blocks.push(`Conversation so far:\n${renderTurns(history)}`);
-  const last = turns[turns.length - 1];
-  blocks.push(`Reply to this as the assistant, without describing what you would do:\n${last ? last.text : "..."}`);
-  return blocks.join("\n\n");
+// An oversized transcript must never eat the caller's instructions or the question
+// being asked, so bytes are allocated ask → system → history: the final message
+// survives whole, a runaway system block gets tail-trimmed, and history is
+// squeezed from its oldest end. Guarantees the result fits limitBytes.
+function renderFirstPrompt(system, turns, limitBytes) {
+  const headLabel = "Instructions for your reply:";
+  const histLabel = "Conversation so far:";
+  const askLabel = "Reply to this as the assistant, without describing what you would do:";
+  const askText = turns[turns.length - 1]?.text || "...";
+  const history = turns.length > 1 ? renderTurns(turns.slice(0, -1)) : "";
+  // +8 covers the three label newlines and the two "\n\n" block joins exactly (7),
+  // reserved even when a block is absent — the estimate never under-counts.
+  let left = Math.max(1, limitBytes - Buffer.byteLength(headLabel + histLabel + askLabel) - 8);
+
+  const keptAsk = fitTail(askText, left);
+  left -= Buffer.byteLength(keptAsk);
+
+  let head = "";
+  if (system) {
+    const keptSystem = fitTail(system, left);
+    head = `${headLabel}\n${keptSystem}`;
+    left -= Buffer.byteLength(keptSystem);
+  }
+
+  const keptHistory = fitOldestOut(history, left);
+  return [head, keptHistory && `${histLabel}\n${keptHistory}`, `${askLabel}\n${keptAsk}`]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
-function clampBytes(text, limit) {
+// Keep the newest whole lines that fit the budget (a single oversized line is
+// byte-trimmed from its front); linear, never re-measures the remaining text.
+function fitOldestOut(text, budget) {
+  if (!text || budget <= 0) return "";
+  if (Buffer.byteLength(text) <= budget) return text;
+  const lines = text.split("\n");
+  let bytes = 0;
+  let start = lines.length;
+  while (start > 0) {
+    const add = Buffer.byteLength(lines[start - 1]) + (start === lines.length ? 0 : 1);
+    if (bytes + add > budget) break;
+    bytes += add;
+    start--;
+  }
+  return start < lines.length ? lines.slice(start).join("\n") : fitTail(text, budget);
+}
+
+function fitTail(text, limit) {
   const buf = Buffer.from(text, "utf8");
   if (buf.length <= limit) return text;
-  return buf.subarray(buf.length - limit).toString("utf8");
+  let start = buf.length - limit;
+  while (start < buf.length && (buf[start] & 0xc0) === 0x80) start++; // never split a UTF-8 sequence
+  return buf.subarray(start).toString("utf8");
 }
 
 // ─── Conversation → opencode session ─────────────────────────────────────────
@@ -445,26 +611,49 @@ function hashTurns(turns) {
   return crypto.createHash("sha256").update(JSON.stringify(turns.map((t) => [t.role, t.text]))).digest("hex").slice(0, 24);
 }
 
-export function planPrompt({ key, system, turns }) {
+function imageNote(attached, total) {
+  // Say out loud which markers have no bytes behind them, otherwise the model
+  // invents an answer for an image it never received.
+  return `\n\nNote: only the last ${attached} of ${total} images are attached; earlier [image #N] references have no image data.`;
+}
+
+export function planPrompt({ key, system, turns, images = [] }) {
   const entry = sessions.get(key);
   const systemHash = crypto.createHash("sha256").update(system || "").digest("hex").slice(0, 16);
   if (entry?.sid && turns.length > entry.reflected && systemHash === entry.systemHash) {
     const boundary = entry.reflected - 1; // the reply we issued last turn
     if (turns[boundary]?.role === "assistant" && hashTurns(turns.slice(0, boundary)) === entry.prefixHash) {
       const tail = turns.slice(entry.reflected);
-      const prompt = clampBytes(renderTurns(tail), MAX_PROMPT_BYTES);
+      // Images belonging to already-delivered turns live inside the opencode
+      // session; re-sending them double-bills tokens and can crowd out the
+      // attachment the user just added, so only the new tail's images travel.
+      const tailImages = images.filter((image) => image.turn >= entry.reflected);
+      const keptTail = tailImages.slice(-MAX_ATTACHMENTS);
+      const note = keptTail.length < tailImages.length ? imageNote(keptTail.length, tailImages.length) : "";
+      const prompt = fitOldestOut(renderTurns(tail), MAX_PROMPT_BYTES - Buffer.byteLength(note)) + note;
       if (prompt.trim()) {
         sessions.delete(key);
+        entry.lastUsed = Date.now(); // the TTL sweeper must not evict an active conversation
         sessions.set(key, entry); // LRU touch so the cap evicts cold conversations first
-        return { sid: entry.sid, prompt, systemHash, replayed: tail.length };
+        return {
+          sid: entry.sid,
+          prompt,
+          systemHash,
+          replayed: tail.length,
+          images: keptTail,
+        };
       }
     }
   }
+  const kept = images.slice(-MAX_ATTACHMENTS);
+  const note = kept.length < images.length ? imageNote(kept.length, images.length) : "";
+  const prompt = renderFirstPrompt(system, turns, MAX_PROMPT_BYTES - Buffer.byteLength(note)) + note;
   return {
     sid: null,
-    prompt: clampBytes(renderFirstPrompt(system, turns), MAX_PROMPT_BYTES),
+    prompt,
     systemHash,
     replayed: turns.length,
+    images: kept,
   };
 }
 
@@ -482,7 +671,7 @@ function fingerprint(turn) {
   return crypto.createHash("sha256").update(`${turn.role}\0${turn.text}`).digest("hex").slice(0, 16);
 }
 
-function recordSession({ key, plan, turns, sid, replyText, systemHash }) {
+function recordSession({ key, turns, sid, replyText, systemHash }) {
   if (!sid) return;
   if (!replyText) {
     const existing = sessions.get(key);
@@ -525,7 +714,9 @@ export function buildCliArgs({ model, body, sid, prompt, files }) {
   for (const file of files || []) args.push("--file", file);
   // `--file` is an array option: without `--` it swallows the trailing prompt and
   // the CLI then fails with "File not found: <prompt>" (verified against 1.18.31).
-  args.push("--", prompt);
+  // prompt == null means it travels over stdin instead (see startTurn) — the
+  // Windows cmd.exe shim path — so there is no positional argument to guard.
+  if (prompt != null) args.push("--", prompt);
   return args;
 }
 
@@ -535,7 +726,10 @@ export function buildCliArgs({ model, body, sid, prompt, files }) {
 // and drop the flag entirely for unsupported or "none"/"auto" values.
 function resolveVariant(model, body) {
   const { base, variant } = splitThinkingSuffix(model);
-  const requested = variant || (typeof body?.reasoning_effort === "string" ? body.reasoning_effort : "");
+  const fromBody = typeof body?.reasoning_effort === "string" ? body.reasoning_effort
+    : typeof body?.reasoning?.effort === "string" ? body.reasoning.effort
+      : "";
+  const requested = variant || fromBody;
   if (!requested || requested === "auto" || requested === "none") return { base, variant: "" };
   const levels = getThinkingLevels("opencode", base);
   const level = requested.toLowerCase().trim();
@@ -575,22 +769,52 @@ function describeErrorEvent(evt) {
 export function runOpenCodeCli({ model, body, credentials, providerSessionId, signal, log, proxyOptions }) {
   const dir = ensureCliWorkspace();
   const bin = getCliInfo().bin;
+  // cmd.exe (the only way to run a bare name or a .cmd/.bat shim on Windows) parses
+  // its command line one line at a time, so a multi-line prompt in argv — which every
+  // real request is, since the rendered prompt joins labels and turns with newlines —
+  // gets truncated/corrupted. opencode reads the message from stdin when it is not a
+  // TTY (run.ts: `Bun.stdin.text()` → resolveRunInput), so the shell path pipes the
+  // prompt instead. The direct-spawn path (.exe / mac / linux) keeps argv, which is
+  // verified working and preserves newlines through CreateProcess/execve untouched.
+  const useStdin = needsShell(bin);
   const identity = credentials?.connectionId || credentials?.id || "default";
   const queueKey = `${identity}:${providerSessionId || "anon"}`;
   return enqueueTurn(queueKey, async () => {
     const { system, turns, images } = normalizeConversation(body);
     if (!turns.length) return emptyResult("OpenCode CLI: request contained no text to send");
     const key = sessionKey(credentials, providerSessionId, turns);
-    const plan = planPrompt({ key, system, turns });
-    const attachments = await materializeAttachments(images, dir, proxyOptions, log);
-    const args = buildCliArgs({ model, body, sid: plan.sid, prompt: plan.prompt, files: attachments });
-    log?.info?.("OPENCODE", `CLI ${plan.sid ? "continue" : "new"} session model=${model} key=${key.slice(0, 56)} turns=${plan.replayed} images=${attachments.length} prompt=${Buffer.byteLength(plan.prompt)}B`);
-    return startTurn({ bin, args, dir, key, plan, turns, model, signal, log, attachments });
+    const plan = planPrompt({ key, system, turns, images });
+    if (signal?.aborted) return emptyResult("OpenCode CLI: aborted by client", 499);
+    const attachments = await materializeAttachments(plan.images, dir, proxyOptions, log, signal);
+    if (signal?.aborted) {
+      removeAttachments(attachments);
+      return emptyResult("OpenCode CLI: aborted by client", 499);
+    }
+    const args = buildCliArgs({ model, body, sid: plan.sid, prompt: useStdin ? null : plan.prompt, files: attachments });
+    log?.info?.("OPENCODE", `CLI ${plan.sid ? "continue" : "new"} session model=${model} key=${key.slice(0, 56)} turns=${plan.replayed} images=${attachments.length} prompt=${Buffer.byteLength(plan.prompt)}B via=${useStdin ? "stdin" : "argv"}`);
+    return startTurn({ bin, args, dir, key, plan, turns, model, signal, log, attachments, stdinPrompt: useStdin ? plan.prompt : null });
   });
 }
 
-function emptyResult(message) {
-  return jsonResponse(buildStream((emit, close) => { emit(errorFrame(message, "empty_prompt")); close(); }), 400, {
+function emptyResult(message, status = 400) {
+  // A JSON body (not an SSE error frame): chatCore routes non-ok responses through
+  // parseUpstreamError, which JSON-parses the body — an SSE frame would surface as
+  // raw "data: {...}" text to the client.
+  const payload = JSON.stringify({
+    error: {
+      message: String(message || "OpenCode CLI error"),
+      type: ERROR_TYPE,
+      code: status === 499 ? "aborted" : "empty_prompt",
+    },
+  });
+  return Promise.resolve({
+    response: new Response(payload, {
+      status,
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-cache" },
+    }),
+    url: CLI_URL,
+    headers: {},
+    responseFormat: "openai",
     transformedBody: { transport: "opencode-cli", error: message },
   });
 }
@@ -619,20 +843,22 @@ function jsonResponse(stream, status, extra = {}) {
   });
 }
 
-function startTurn({ bin, args, dir, key, plan, turns, model, signal, log, attachments = [] }) {
-  const responseId = `chatcmpl-opencode-${Date.now()}`;
+function startTurn({ bin, args, dir, key, plan, turns, model, signal, log, attachments = [], stdinPrompt = null }) {
+  const replyModel = splitThinkingSuffix(model).base; // the "(level)" suffix is ours, not a model id
+  const responseId = `chatcmpl-opencode-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
   const created = Math.floor(Date.now() / 1000);
   const state = { sid: plan.sid, reply: "", usage: null, roleSent: false, done: false };
   let killChild = () => {};
 
   const stream = buildStream((emit, close) => {
     let stderrTail = "";
+    let strayOut = ""; // non-JSON stdout: a broken CLI reports plain text here
     const chunk = (delta, finishReason = null, usage) => {
       const body = {
         id: responseId,
         object: "chat.completion.chunk",
         created,
-        model: String(model || ""),
+        model: replyModel,
         choices: [{ index: 0, delta, logprobs: null, finish_reason: finishReason }],
       };
       if (usage) body.usage = usage;
@@ -653,28 +879,31 @@ function startTurn({ bin, args, dir, key, plan, turns, model, signal, log, attac
       } else if (!state.reply.trim()) {
         // The CLI can exit 0 without any assistant text when upstream drops the
         // request — that is a failure, not an empty-but-successful reply.
-        const detail = stderrTail.trim() ? `: ${stderrTail.trim().slice(0, 300)}` : "";
-        emit(errorFrame(`OpenCode CLI returned no assistant text${detail}`, "empty_reply"));
+        const detail = (stderrTail.trim() || strayOut.trim()).slice(0, 300);
+        emit(errorFrame(`OpenCode CLI returned no assistant text${detail ? `: ${detail}` : ""}`, "empty_reply"));
       } else {
         if (!state.roleSent) chunk({ role: "assistant", content: "" });
         chunk({}, finishReason, state.usage || undefined);
         emit("data: [DONE]\n\n");
       }
-      recordSession({ key, plan, turns, sid: state.sid, replyText: error ? null : state.reply, systemHash: plan.systemHash });
+      recordSession({ key, turns, sid: state.sid, replyText: error ? null : state.reply, systemHash: plan.systemHash });
       removeAttachments(attachments);
       close();
     };
 
-    let idleTimer = null;
-    const resetIdle = () => {
-      clearTimeout(idleTimer);
-      idleTimer = setTimeout(() => {
-        log?.warn?.("OPENCODE", `CLI silent >${OPENCODE_CLI_CONFIG.idleMs}ms`);
-        killChild();
-        finish({ error: { message: `OpenCode CLI went silent for ${Math.round(OPENCODE_CLI_CONFIG.idleMs / 1000)}s` } });
-      }, OPENCODE_CLI_CONFIG.idleMs);
-      if (idleTimer.unref) idleTimer.unref();
-    };
+    // opencode `--format json` writes a `text` event only once a part completes, so
+    // stdout stays silent for the entire generation. An inter-chunk idle timer would
+    // abort legitimate slow/reasoning turns, so idleMs guards only the startup window
+    // (spawn → first byte, normally step_start); the first output clears it for good
+    // and totalMs becomes the sole ceiling.
+    let idleTimer = setTimeout(() => {
+      idleTimer = null;
+      log?.warn?.("OPENCODE", `CLI produced no output within ${OPENCODE_CLI_CONFIG.idleMs}ms`);
+      killChild();
+      finish({ error: { message: `OpenCode CLI produced no output for ${Math.round(OPENCODE_CLI_CONFIG.idleMs / 1000)}s` } });
+    }, OPENCODE_CLI_CONFIG.idleMs);
+    if (idleTimer.unref) idleTimer.unref();
+    const clearIdle = () => { if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; } };
 
     const totalTimer = setTimeout(() => {
       log?.warn?.("OPENCODE", `CLI exceeded ${Math.round(OPENCODE_CLI_CONFIG.totalMs / 1000)}s`);
@@ -691,18 +920,29 @@ function startTurn({ bin, args, dir, key, plan, turns, model, signal, log, attac
 
     let child;
     try {
-      child = spawn(bin, args, {
+      child = spawn(bin, spawnArgs(bin, args), {
         cwd: dir,
         env: { ...process.env },
-        stdio: ["ignore", "pipe", "pipe"],
-        // A bare command name needs the shell on Windows; an absolute .exe path
-        // must NOT go through cmd.exe — the prompt arg contains arbitrary client
-        // text that cmd metacharacters would reinterpret.
-        shell: process.platform === "win32" && !bin.includes(path.sep),
+        // stdin is a pipe only when the prompt travels over it (Windows cmd.exe shim);
+        // otherwise "ignore" → /dev/null, which gives opencode's unconditional
+        // `Bun.stdin.text()` an immediate EOF so it never blocks waiting for input.
+        stdio: [stdinPrompt != null ? "pipe" : "ignore", "pipe", "pipe"],
+        // Bare names and .cmd shims can only run through cmd.exe on Windows
+        // (args get cmd-quoted above); an absolute .exe path must NOT go through
+        // cmd at all so the prompt's arbitrary text stays a plain argv string.
+        shell: needsShell(bin),
       });
     } catch (e) {
       finish({ error: { message: `Failed to spawn opencode CLI: ${e.message}` } });
       return;
+    }
+
+    if (stdinPrompt != null) {
+      // EPIPE here just means the CLI exited before draining stdin (bad model, broken
+      // install); the close/error handlers already report that, so swallow it rather
+      // than let an unhandled 'error' on the stdin stream take the process down.
+      child.stdin.on("error", () => { /* child gone before it read the prompt */ });
+      try { child.stdin.end(stdinPrompt); } catch { /* spawn already failing; handlers report */ }
     }
 
     const kill = () => {
@@ -715,6 +955,9 @@ function startTurn({ bin, args, dir, key, plan, turns, model, signal, log, attac
 
     child.on("error", (err) => {
       const notFound = String(err?.message || "").includes("ENOENT");
+      // Binary vanished since the probe (or the spawn shape is broken): drop the
+      // cached verdict so the next request re-probes / falls back to HTTP.
+      availability = null;
       finish({
         error: {
           message: notFound
@@ -726,7 +969,10 @@ function startTurn({ bin, args, dir, key, plan, turns, model, signal, log, attac
 
     const onEvent = (line) => {
       let evt;
-      try { evt = JSON.parse(line); } catch { return; } // banner / non-JSON noise
+      try { evt = JSON.parse(line); } catch {
+        strayOut = (strayOut + line + "\n").slice(-600);
+        return; // banner / non-JSON noise
+      }
       if (!evt || typeof evt !== "object") return;
       if (evt.type === "error") {
         const err = describeErrorEvent(evt);
@@ -734,12 +980,20 @@ function startTurn({ bin, args, dir, key, plan, turns, model, signal, log, attac
         finish({ error: err });
         return;
       }
-      if (evt.sessionID && !state.sid) state.sid = String(evt.sessionID);
+      // The CLI's reported session is authoritative: if -s was stale and it
+      // started fresh, adopt the new id instead of re-recording the dead one.
+      if (evt.sessionID) state.sid = String(evt.sessionID);
       if (evt.type === "text") {
+        // `opencode run --format json` emits a `text` event only once a part is
+        // complete (part.time.end), so each event is a whole part — not an
+        // incremental token delta. A reply split across parts (text, tool, text)
+        // must keep its separators or the client sees the parts run together; mirror
+        // opencode's own plain-text rendering, which breaks parts apart.
         const text = evt.part?.text;
         if (typeof text === "string" && text) {
-          state.reply += (state.reply ? "\n\n" : "") + text;
-          delta(text);
+          const sep = state.reply ? "\n\n" : "";
+          state.reply += sep + text;
+          delta(sep + text);
         }
         return;
       }
@@ -747,18 +1001,21 @@ function startTurn({ bin, args, dir, key, plan, turns, model, signal, log, attac
         const t = evt.part.tokens;
         const input = t.input || 0;
         const output = (t.output || 0) + (t.reasoning || 0);
+        // opencode splits cached tokens OUT of input (cache.read/cache.write);
+        // they are still prompt-side context the model processed, so fold them
+        // into prompt_tokens to stay comparable with the HTTP transport's usage.
+        const cached = (t.cache?.read || 0) + (t.cache?.write || 0);
         state.usage = state.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
-        // Cache reads stay inside prompt_tokens: they are still context the model
-        // consumed, and reporting them separately would read as a zero-prompt turn.
-        state.usage.prompt_tokens += input;
+        state.usage.prompt_tokens += input + cached;
         state.usage.completion_tokens += output;
-        state.usage.total_tokens += input + output;
+        state.usage.total_tokens += input + cached + output;
       }
     };
 
     let buf = "";
     child.stdout.on("data", (chunkData) => {
-      resetIdle();
+      if (state.done) return; // trailing output after an error/abort: ignore
+      clearIdle(); // first byte ends the startup-idle phase; generation is silent by design
       buf += chunkData.toString("utf8");
       let nl;
       while ((nl = buf.indexOf("\n")) !== -1) {
@@ -775,18 +1032,22 @@ function startTurn({ bin, args, dir, key, plan, turns, model, signal, log, attac
       if (buf.trim()) onEvent(buf.trim());
       if (state.done) return;
       if (code !== 0 && !state.roleSent) {
-        finish({ error: { message: `opencode CLI exited with code ${code}${stderrTail.trim() ? `: ${stderrTail.trim()}` : ""}` } });
+        // The CLI process itself failed (broken install, missing binary): drop the
+        // cached verdict so the next request re-probes and can fall back to the
+        // HTTP transport instead of hitting the same broken binary for the TTL.
+        availability = null;
+        const detail = stderrTail.trim() || strayOut.trim();
+        finish({ error: { message: `opencode CLI exited with code ${code}${detail ? `: ${detail.slice(0, 300)}` : ""}` } });
       } else {
         finish();
       }
     });
-    resetIdle();
   });
 
   return jsonResponse(stream, 200, {
     transformedBody: {
       transport: "opencode-cli",
-      model: splitThinkingSuffix(model).base,
+      model: replyModel,
       session: plan.sid || "new",
       turns: plan.replayed,
       promptBytes: Buffer.byteLength(plan.prompt),

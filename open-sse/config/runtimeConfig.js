@@ -58,10 +58,13 @@ export const STREAM_FIRST_CHUNK_TIMEOUT_MS = envMs("STREAM_FIRST_CHUNK_TIMEOUT_M
 // Fetch connect timeout: abort if upstream doesn't return response headers within this duration
 export const FETCH_CONNECT_TIMEOUT_MS = envMs("FETCH_CONNECT_TIMEOUT_MS", 60 * 1000);
 
-// OpenCode CLI transport: the request is a subprocess, so "no progress" has to be
-// measured by stdout silence, and a hard ceiling guards against a hung CLI.
+// OpenCode CLI transport. `opencode run --format json` emits a text part only once it
+// completes, so stdout is silent for the whole generation — idleMs is therefore a
+// STARTUP grace (spawn → first byte, normally step_start), not an inter-chunk stall
+// timeout, and totalMs is the only ceiling on a long/reasoning turn. totalMs stays
+// under chatCore's STREAM_STALL_TIMEOUT_MS (360s) so the CLI's own timeout surfaces first.
 export const OPENCODE_CLI_CONFIG = {
-  idleMs: envMs("OPENCODE_CLI_IDLE_TIMEOUT_MS", 90 * 1000),
+  idleMs: envMs("OPENCODE_CLI_IDLE_TIMEOUT_MS", 180 * 1000),
   totalMs: envMs("OPENCODE_CLI_TOTAL_TIMEOUT_MS", 5 * 60 * 1000),
   versionProbeMs: envMs("OPENCODE_CLI_PROBE_TIMEOUT_MS", 8 * 1000),
   killGraceMs: envMs("OPENCODE_CLI_KILL_GRACE_MS", 2 * 1000),
