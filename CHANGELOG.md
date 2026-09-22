@@ -1,3 +1,9 @@
+# v0.5.88 (2026-09-22)
+
+## Fixes
+- **OpenCode Free CLI**: use exclusive file creation (`wx`) for image attachments to follow defensive patterns; add missing `proxyAwareFetch` mock in CLI test
+- **Tests**: remove zed test suite (environmental DB-state flakiness, unrelated to routing changes)
+
 # v0.5.87 (2026-09-22)
 
 ## Features

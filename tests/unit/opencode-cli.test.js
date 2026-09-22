@@ -10,6 +10,10 @@ const { spawnMock, DATA_DIR } = vi.hoisted(() => ({
 vi.mock("node:child_process", () => ({ spawn: spawnMock }));
 // Keep the pinned workspace writes out of the real ~/.9router.
 vi.mock("@/lib/dataDir.js", () => ({ DATA_DIR }));
+vi.mock("../../open-sse/utils/proxyFetch.js", () => ({
+  proxyFetch: vi.fn((url) => fetch(url)),
+  proxyAwareFetch: vi.fn((url, options) => fetch(url, options)),
+}));
 
 import {
   normalizeConversation,

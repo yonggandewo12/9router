@@ -249,7 +249,7 @@ async function materializeAttachments(images, workspaceDir, proxyOptions, log) {
       // let one request's cleanup unlink another's in-flight file.
       const hash = crypto.createHash("sha1").update(bytes).digest("hex").slice(0, 16);
       const file = path.join(dir, `${hash}-${crypto.randomUUID().slice(0, 8)}.${ext}`);
-      fs.writeFileSync(file, bytes);
+      fs.writeFileSync(file, bytes, { flag: "wx" });
       written.add(file);
     } catch (e) {
       log?.warn?.("OPENCODE", `image attachment failed: ${e.message}`);
