@@ -12,6 +12,11 @@
 //
 // The browser login is the CLI's own loopback flow (portal/authorize + PKCE +
 // a 127.0.0.1 callback); 9router reproduces it in src/lib/oauth/providers/codearts.js.
+//
+// URLs are repeated from shared/codearts/auth.js on purpose: the registry barrel
+// is loaded all over (including the browser bundle and every route's import
+// graph), and auth.js pulls proxyFetch.js, which rewrites globalThis.fetch at
+// import time. Keep registry entries side-effect-free.
 const PORTAL_BASE = "https://codearts.huaweicloud.com/portal";
 const STS_BASE = "https://sts.cn-north-4.myhuaweicloud.com";
 const API_BASE = "https://snap-access.cn-north-4.myhuaweicloud.com";
@@ -68,11 +73,15 @@ export default {
   // call is refused with 400 TM.00001041 once the account's 3 concurrent
   // sessions are taken — CodeartsExecutor then resends until one frees
   // (shared/codearts/sessionCap.js).
+  // ids are InferHub ROUTE keys (agent catalog `model_parameters.model_id`),
+  // which the gateway matches case-sensitively — the human-facing
+  // `model_name` ("OpenPangu-2.0-Pro") answers 404 "model is not registered".
+  // Verified live against the CLI's own keys on 2026-09-22.
   models: [
     { id: "GLM-5.2", name: "GLM-5.2", contextLength: 202752 },
-    { id: "GLM-5.2-ArkTS-SPARK", name: "GLM-5.2 ArkTS SPARK" },
-    { id: "OpenPangu-2.0-Pro", name: "OpenPangu 2.0 Pro", contextLength: 524288 },
-    { id: "OpenPangu-2.0-Flash", name: "OpenPangu 2.0 Flash", contextLength: 524288 },
+    { id: "glm-5.2-sft-harmony", name: "GLM-5.2 ArkTS SPARK", contextLength: 202752 },
+    { id: "openpangu-2.0-pro", name: "OpenPangu 2.0 Pro", contextLength: 524288 },
+    { id: "openpangu-2.0-flash", name: "OpenPangu 2.0 Flash", contextLength: 524288 },
   ],
   // No quota/usage endpoint is reachable with a temporary AK/SK.
   features: { usage: false },

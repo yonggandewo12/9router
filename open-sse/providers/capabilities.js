@@ -34,6 +34,18 @@
 
 import { matchPattern } from "./pricing.js";
 import { looksLikeVisionModel } from "./visionPatterns.js";
+import REGISTRY from "./registry/index.js";
+
+// PROVIDER_CAPABILITIES is keyed by provider id, but callers reach this function
+// with whichever handle they have — the id ("codearts") or the short alias the
+// wire format uses ("ca"). Registry is pure data, so resolving here costs one
+// pass at load and keeps the table single-sourced.
+const PROVIDER_ID_BY_ALIAS = new Map();
+for (const entry of REGISTRY) {
+  PROVIDER_ID_BY_ALIAS.set(entry.id, entry.id);
+  if (entry.alias) PROVIDER_ID_BY_ALIAS.set(entry.alias, entry.id);
+  for (const alias of entry.aliases || []) PROVIDER_ID_BY_ALIAS.set(alias, entry.id);
+}
 
 /**
  * Safe floor — every resolved result is merged over this so consumers
@@ -160,8 +172,9 @@ export const PROVIDER_CAPABILITIES = {
   // gateway takes no thinking param — see the codearts rules in paramSupport.js.
   "codearts": {
     "GLM-5.2": { reasoning: true, contextWindow: 202752, maxOutput: 131072 },
-    "OpenPangu-2.0-Pro": { reasoning: true, contextWindow: 524288, maxOutput: 131072 },
-    "OpenPangu-2.0-Flash": { reasoning: true, contextWindow: 524288, maxOutput: 131072 },
+    "glm-5.2-sft-harmony": { reasoning: true, contextWindow: 202752, maxOutput: 131072 },
+    "openpangu-2.0-pro": { reasoning: true, contextWindow: 524288, maxOutput: 131072 },
+    "openpangu-2.0-flash": { reasoning: true, contextWindow: 524288, maxOutput: 131072 },
   },
   // NVIDIA NIM is OpenAI-compatible → rejects MiniMax/GLM native `thinking` field.
   // Force openai reasoning_effort format for its reasoning models. #issue
@@ -581,11 +594,16 @@ export function getCapabilitiesForModel(provider, model) {
     return { ...refine(null, provider, model), vision: false, tools: false, reasoning: true, thinkingCanDisable: false };
   }
 
-  // 1. Provider-specific override
+  // 1. Provider-specific override (id, then the id this handle aliases)
   if (provider) {
-    const providerCaps = PROVIDER_CAPABILITIES[provider];
-    if (providerCaps?.[model]) return { ...DEFAULT_CAPABILITIES, ...providerCaps[model] };
-    if (providerCaps?.[baseModel]) return { ...DEFAULT_CAPABILITIES, ...providerCaps[baseModel] };
+    const canonical = PROVIDER_ID_BY_ALIAS.get(provider);
+    const tables = canonical && canonical !== provider
+      ? [PROVIDER_CAPABILITIES[provider], PROVIDER_CAPABILITIES[canonical]]
+      : [PROVIDER_CAPABILITIES[provider]];
+    for (const caps of tables) {
+      if (caps?.[model]) return { ...DEFAULT_CAPABILITIES, ...caps[model] };
+      if (caps?.[baseModel]) return { ...DEFAULT_CAPABILITIES, ...caps[baseModel] };
+    }
   }
 
   // 2. Canonical exact

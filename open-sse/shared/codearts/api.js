@@ -82,7 +82,9 @@ export async function fetchCodeartsCurrentUser(credentials, { proxyOptions = nul
 /** Map the agent-center catalog entry into a 9router model record. */
 export function mapCodeartsModel(raw) {
   const params = raw?.model_parameters || {};
-  const id = raw?.model_name || params.model_id;
+  // The gateway routes on `model_id` (case-sensitive); `model_name` is only the
+  // display label and answers 404 "model is not registered" on chat calls.
+  const id = params.model_id || raw?.model_name;
   if (!id) return null;
   const model = { id, name: raw.model_alias || raw.model_name || id };
   if (params.context_window > 0) model.contextLength = params.context_window;
@@ -113,6 +115,9 @@ export async function resolveCodeartsModels(credentials, { proxyOptions = null, 
       "Content-Type": "application/json",
       Accept: "application/json",
       "Agent-Type": "AgentCenter",
+      // The gateway 400s the whole control plane without it:
+      // "Request-header: X-Language is validate failed".
+      "x-language": "zh-cn",
       "User-Agent": CODEARTS_USER_AGENT,
     },
     proxyOptions,

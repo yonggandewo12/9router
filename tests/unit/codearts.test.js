@@ -1,7 +1,7 @@
 // 华为云码道 (CodeArts): every snap-access call is signed with Huawei's
 // SDK-HMAC-SHA256 over the temporary AK/SK minted by the DPoP login, so the
 // wiring has to hold together without a bearer token anywhere.
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import crypto from "node:crypto";
 import http from "node:http";
 
@@ -10,7 +10,8 @@ import { getCapabilitiesForModel } from "open-sse/providers/capabilities.js";
 import { getExecutor } from "open-sse/executors/index.js";
 import { stripUnsupportedParams } from "open-sse/translator/concerns/paramSupport.js";
 import { canonicalUri, canonicalQuery, formatSdkDate, signHuaweiRequest, uriEncode } from "open-sse/shared/codearts/signer.js";
-import { capRetryDelayMs, isSessionCapExceeded, sendUntilSessionSlot, sleep } from "open-sse/shared/codearts/sessionCap.js";
+import { capRetryDelayMs, isSessionCapExceeded, isModelQueued, queueRetryDelayMs, sendUntilAdmitted, sleep } from "open-sse/shared/codearts/sessionCap.js";
+import { mapCodeartsModel, resolveCodeartsModels, codeartsKeys } from "open-sse/shared/codearts/api.js";
 import {
   buildAuthorizeUrl,
   buildDpopProof,
@@ -20,6 +21,17 @@ import {
   refreshCodeartsFromCredentials,
   toCodeartsCredentialPatch,
 } from "open-sse/shared/codearts/auth.js";
+
+// Only refreshCodeartsFromCredentials is doubled (its real path is a live STS
+// POST); it delegates to the real implementation by default so the crypto
+// tests below keep working, and individual tests stub one call at a time.
+vi.mock("open-sse/shared/codearts/auth.js", async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    refreshCodeartsFromCredentials: vi.fn((...args) => actual.refreshCodeartsFromCredentials(...args)),
+  };
+});
 
 const URL_INFERENCE = "https://snap-access.cn-north-4.myhuaweicloud.com/api/v2/chat/completions";
 const FIXED_DATE = new Date(Date.UTC(2026, 8, 20, 1, 2, 3));
@@ -40,7 +52,16 @@ describe("codearts registry wiring", () => {
     for (const model of PROVIDER_MODELS.ca) {
       const caps = getCapabilitiesForModel("codearts", model.id);
       expect(caps.maxOutput).toBeGreaterThan(0);
+      expect(caps.contextWindow).toBeGreaterThan(0);
     }
+  });
+
+  it("static ids are InferHub ROUTE keys, not the display model_name", () => {
+    // The gateway 404s "model is not registered" for the pretty names
+    // ("OpenPangu-2.0-Pro"); only model_id values route (live-proven 2026-09-22).
+    expect(PROVIDER_MODELS.ca.map((m) => m.id)).toEqual([
+      "GLM-5.2", "glm-5.2-sft-harmony", "openpangu-2.0-pro", "openpangu-2.0-flash",
+    ]);
   });
 
   it("resolves CodeartsExecutor", () => {
@@ -245,7 +266,7 @@ describe("CodeartsExecutor request shape", () => {
   });
 });
 
-describe("CodeArts concurrent-session cap", () => {
+describe("CodeArts gateway refusals (session cap + model queue)", () => {
   const exec = getExecutor("codearts");
   const credentials = {
     accessToken: "ST",
@@ -267,7 +288,7 @@ describe("CodeArts concurrent-session cap", () => {
         const request = { headers: req.headers, body: Buffer.concat(chunks).toString() };
         const answer = chat(chats.length, request);
         chats.push(request);
-        res.writeHead(answer.status, { "Content-Type": "application/json" });
+        res.writeHead(answer.status, { "Content-Type": "application/json", ...(answer.headers || {}) });
         res.end(answer.body);
       });
     });
@@ -330,13 +351,55 @@ describe("CodeArts concurrent-session cap", () => {
     }
   });
 
+  it("resends a queued turn after the gateway's own Retry-After", async () => {
+    // 429 + `queue-status: queued` is how the gateway says "the model is busy"
+    // for every enable_queue model; the CLI waits and re-POSTs, so the client
+    // must not see a bare 429 the way it would with a straight passthrough.
+    const gw = await startGateway({
+      chat: (n) => (n === 0
+        ? { status: 429, headers: { "queue-status": "Queued", "retry-after": "1" }, body: '{"error":{"message":"queued"}}' }
+        : { status: 200, body: OK_BODY }),
+    });
+    try {
+      const t0 = Date.now();
+      const result = await call(gw.baseUrl);
+      expect(result.response.status).toBe(200);
+      expect(gw.chats.length).toBe(2);
+      expect(Date.now() - t0).toBeGreaterThanOrEqual(1000);
+      expect(gw.chats[1].headers["user-session-id"]).toBe(gw.chats[0].headers["user-session-id"]);
+    } finally {
+      await gw.close();
+    }
+  });
+
+  it("passes through a 429 that is not a queue signal", async () => {
+    const gw = await startGateway({ chat: () => ({ status: 429, body: '{"error":{"message":"rate limited"}}' }) });
+    try {
+      const result = await call(gw.baseUrl);
+      expect(result.response.status).toBe(429);
+      expect(await result.response.text()).toBe('{"error":{"message":"rate limited"}}');
+      expect(gw.chats.length).toBe(1);
+    } finally {
+      await gw.close();
+    }
+  });
+
+  it("reads the queue headers case-insensitively and defaults the wait", () => {
+    const headers = (entries) => ({ get: (k) => entries[String(k).toLowerCase()] ?? null });
+    expect(isModelQueued({ headers: headers({ "queue-status": "QUEUED" }) })).toBe(true);
+    expect(isModelQueued({ headers: headers({ "queue-status": "working" }) })).toBe(false);
+    expect(isModelQueued({ headers: headers({}) })).toBe(false);
+    expect(queueRetryDelayMs({ headers: headers({ "retry-after": "3" }) })).toBe(3000);
+    expect(queueRetryDelayMs({ headers: headers({ "retry-after": "0" }) })).toBe(5000);
+    expect(queueRetryDelayMs({ headers: headers({}) })).toBe(5000);
+  });
+
   it("hands the rejection back once the wait window closes", async () => {
     let attempts = 0;
-    const result = await sendUntilSessionSlot({
-      attempt: async () => ({ capped: true, result: `attempt ${++attempts}` }),
+    const result = await sendUntilAdmitted({
+      attempt: (round) => ({ retryInMs: round === 0 ? 5 : 100, result: `attempt ${++attempts}` }),
       model: "GLM-5.2",
       budgetMs: 30,
-      delayFor: (round) => (round === 0 ? 5 : 100),
       nap: async () => {},
     });
     // One resend still fits in the window, the next would not — the client gets
@@ -359,6 +422,92 @@ describe("CodeArts concurrent-session cap", () => {
     expect(capRetryDelayMs(5)).toBeLessThanOrEqual(10000);
     // Jitter keeps parallel conversations from retrying in lockstep.
     expect(new Set(Array.from({ length: 20 }, () => capRetryDelayMs(2))).size).toBeGreaterThan(1);
+  });
+});
+
+describe("CodeArts agent catalog", () => {
+  const credentials = {
+    accessToken: "ST",
+    providerSpecificData: { accessKeyId: "AK", secretAccessKey: "SK", securityToken: "ST" },
+  };
+
+  it("routes on model_parameters.model_id and keeps model_name as display", () => {
+    const mapped = mapCodeartsModel({
+      model_name: "OpenPangu-2.0-Pro",
+      model_parameters: { model_id: "openpangu-2.0-pro", context_window: 524288, max_tokens: 131072 },
+    });
+    expect(mapped).toMatchObject({ id: "openpangu-2.0-pro", name: "OpenPangu-2.0-Pro", contextLength: 524288, maxOutputTokens: 131072 });
+
+    // Older payloads without model_parameters still resolve via model_name.
+    expect(mapCodeartsModel({ model_name: "GLM-5.2" })).toMatchObject({ id: "GLM-5.2" });
+    expect(mapCodeartsModel({})).toBeNull();
+    expect(mapCodeartsModel({ model_name: "VL", model_parameters: { supports_images: true } }))
+      .toMatchObject({ id: "VL", capabilities: { vision: true } });
+  });
+
+  // A signed GET the gateway either accepts or 400s — assert the exact wire
+  // shape once on a loopback server instead of hitting Huawei per test run.
+  async function startCatalogServer(payload) {
+    const seen = [];
+    const server = http.createServer((req, res) => {
+      seen.push(req.headers);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(payload));
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    return {
+      baseUrl: `http://127.0.0.1:${server.address().port}`,
+      seen,
+      close: () => new Promise((resolve) => server.close(resolve)),
+    };
+  }
+
+  const CATALOG_PAYLOAD = {
+    gpts: {
+      models: [
+        { model_name: "GLM-5.2", model_parameters: { model_id: "GLM-5.2", context_window: 202752, max_tokens: 131072 } },
+        { model_name: "OpenPangu-2.0-Pro", model_parameters: { model_id: "openpangu-2.0-pro", context_window: 524288, max_tokens: 131072 } },
+      ],
+    },
+  };
+
+  it("fetches the catalog signed with the headers the gateway demands, and caches", async () => {
+    const srv = await startCatalogServer(CATALOG_PAYLOAD);
+    // accessKeyId-keyed cache: pick an id no other test could have seeded.
+    const creds = { providerSpecificData: { ...credentials.providerSpecificData, accessKeyId: `TESTAK${Date.now()}` } };
+    try {
+      const first = await resolveCodeartsModels(creds, { baseUrl: srv.baseUrl, forceRefresh: true });
+      expect(first.models.map((m) => m.id)).toEqual(["GLM-5.2", "openpangu-2.0-pro"]);
+
+      const headers = srv.seen[0];
+      expect(String(headers.authorization)).toMatch(/^SDK-HMAC-SHA256 Access=TESTAK/);
+      expect(headers["x-security-token"]).toBe("ST");
+      // Missing/misspelled X-Language makes the whole control plane 400
+      // ("X-Language is validate failed") and silently degrades to static.
+      expect(headers["x-language"]).toBe("zh-cn");
+      expect(headers["agent-type"]).toBe("AgentCenter");
+
+      // Second call rides the 10-minute cache instead of re-fetching.
+      const cached = await resolveCodeartsModels(creds, { baseUrl: srv.baseUrl });
+      expect(cached).toBe(first);
+      expect(srv.seen.length).toBe(1);
+    } finally {
+      await srv.close();
+    }
+  });
+
+  it("returns null (caller falls back to static) for an account with no catalog", async () => {
+    const srv = await startCatalogServer({ gpts: {} });
+    const creds = { providerSpecificData: { ...credentials.providerSpecificData, accessKeyId: `TESTAK${Date.now()}x` } };
+    try {
+      expect(await resolveCodeartsModels(creds, { baseUrl: srv.baseUrl, forceRefresh: true })).toBeNull();
+    } finally {
+      await srv.close();
+    }
+  });
+
+  it("refuses to sign a request without the temporary AK/SK", () => {
+    expect(() => codeartsKeys({ providerSpecificData: {} })).toThrow(/AK\/SK/);
   });
 });
 
@@ -428,5 +577,48 @@ describe("CodeArts login crypto", () => {
       .toMatchObject({ error: "invalid_grant" });
     expect(await refreshCodeartsFromCredentials({ refreshToken: "RT", providerSpecificData: {} }))
       .toMatchObject({ error: "invalid_grant" });
+  });
+});
+
+describe("CodeartsExecutor refresh (401 path)", () => {
+  it("forwards the caller's proxyOptions and keeps the connection's providerSpecificData", async () => {
+    const exec = getExecutor("codearts");
+    const credentials = {
+      connectionId: "conn-refresh-merge",
+      refreshToken: "RT",
+      providerSpecificData: {
+        accessKeyId: "AK", secretAccessKey: "SK", securityToken: "ST",
+        // Refresh never returns these — they must survive chatCore's
+        // Object.assign(credentials, patch) for the rest of the request.
+        connectionProxyEnabled: true,
+        connectionProxyUrl: "http://127.0.0.1:7890",
+        userId: "u-1",
+      },
+    };
+    const proxyOptions = { connectionProxyEnabled: true, connectionProxyUrl: "http://127.0.0.1:7890" };
+    vi.mocked(refreshCodeartsFromCredentials).mockResolvedValueOnce({
+      accessToken: "ST2",
+      refreshToken: "RT2",
+      expiresIn: 3500,
+      providerSpecificData: {
+        authMethod: "oauth",
+        accessKeyId: "AK2", secretAccessKey: "SK2", securityToken: "ST2",
+        accountId: "{}", dpopKeyPair: { privateKeyJwk: {}, publicKeyJwk: {} },
+        tokenExpiresAt: new Date(Date.now() + 3500_000).toISOString(),
+      },
+    });
+
+    const patch = await exec.refreshCredentials(credentials, null, proxyOptions);
+
+    expect(vi.mocked(refreshCodeartsFromCredentials)).toHaveBeenCalledWith(
+      credentials,
+      expect.objectContaining({ proxyOptions }),
+    );
+    expect(patch.providerSpecificData).toMatchObject({
+      accessKeyId: "AK2", // refreshed values win
+      connectionProxyEnabled: true, // connection fields survive the merge
+      connectionProxyUrl: "http://127.0.0.1:7890",
+      userId: "u-1",
+    });
   });
 });

@@ -148,8 +148,18 @@ const REFRESH_HANDLERS = {
   "codebuddy-cn": (c, log) => refreshCodebuddyToken(c.refreshToken, log),
   "codebuddy-intl": (c, log) => refreshCodebuddyIntlToken(c.refreshToken, log),
   // CodeArts mints a temporary Huawei AK/SK, not a bearer token: the DPoP proof
-  // and x-agent-user-account it needs live with the stored credentials.
-  codearts: (c, log) => refreshCodeartsFromCredentials(c, { log }),
+  // and x-agent-user-account it needs live with the stored credentials. The
+  // refresh POST rides the connection proxy when one is configured (same field
+  // mapping chatCore builds for the request path).
+  codearts: (c, log) => refreshCodeartsFromCredentials(c, {
+    log,
+    proxyOptions: {
+      connectionProxyEnabled: c?.providerSpecificData?.connectionProxyEnabled === true,
+      connectionProxyUrl: c?.providerSpecificData?.connectionProxyUrl || "",
+      connectionNoProxy: c?.providerSpecificData?.connectionNoProxy || "",
+      vercelRelayUrl: c?.providerSpecificData?.vercelRelayUrl || "",
+    },
+  }),
   trae: (c, log) => refreshTraeToken(c.refreshToken, c, log, "trae"),
   "trae-enterprise": (c, log) => refreshTraeToken(c.refreshToken, c, log, "trae-enterprise"),
   cline: (c, log) => refreshClineToken(c.refreshToken, log),

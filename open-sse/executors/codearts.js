@@ -14,7 +14,7 @@ import { DefaultExecutor } from "./default.js";
 import { HTTP_STATUS } from "../config/runtimeConfig.js";
 import { withCredentialRefreshLock } from "../services/oauthCredentialManager.js";
 import { signHuaweiRequest } from "../shared/codearts/signer.js";
-import { isSessionCapExceeded, sendUntilSessionSlot } from "../shared/codearts/sessionCap.js";
+import { isSessionCapExceeded, capRetryDelayMs, isModelQueued, queueRetryDelayMs, sendUntilAdmitted } from "../shared/codearts/sessionCap.js";
 import { CODEARTS_USER_AGENT, refreshCodeartsFromCredentials } from "../shared/codearts/auth.js";
 
 // The gateway treats max_tokens as mandatory-ish; this is what the CLI sends
@@ -101,13 +101,23 @@ function withBody(result, text) {
   };
 }
 
-// The session cap is reported in the response body only, and reading that body
-// consumes the stream — so every 400 comes back replayable.
-async function classifyRejection(result) {
+// Both gateway refusals report themselves in the response only, and reading that
+// body consumes the stream — so every refused 400/429 comes back replayable.
+// `round` feeds the session-cap backoff; a queued turn waits out the gateway's own
+// Retry-After instead.
+async function classifyRejection(result, round) {
   const response = result?.response;
-  if (!response || response.status !== HTTP_STATUS.BAD_REQUEST) return { capped: false, result };
+  const status = response?.status;
+  if (status !== HTTP_STATUS.BAD_REQUEST && status !== HTTP_STATUS.RATE_LIMITED) {
+    return { result };
+  }
   const text = await response.text().catch(() => "");
-  return { capped: isSessionCapExceeded(text), result: withBody(result, text) };
+  const replayed = withBody(result, text);
+  if (isSessionCapExceeded(text)) return { retryInMs: capRetryDelayMs(round), result: replayed };
+  if (status === HTTP_STATUS.RATE_LIMITED && isModelQueued(response)) {
+    return { retryInMs: queueRetryDelayMs(response), result: replayed };
+  }
+  return { result: replayed };
 }
 
 export class CodeartsExecutor extends DefaultExecutor {
@@ -118,8 +128,8 @@ export class CodeartsExecutor extends DefaultExecutor {
   async execute(args) {
     const session = sessionSlug(args?.providerSessionId);
     const request = !session || !args ? args : { ...args, credentials: { ...(args.credentials || {}), [SESSION_FIELD]: session } };
-    return sendUntilSessionSlot({
-      attempt: async () => classifyRejection(await super.execute(request)),
+    return sendUntilAdmitted({
+      attempt: async (round) => classifyRejection(await super.execute(request), round),
       model: args?.model,
       signal: args?.signal,
       log: args?.log,
@@ -177,11 +187,21 @@ export class CodeartsExecutor extends DefaultExecutor {
   async refreshCredentials(credentials, log, proxyOptions = null) {
     // STS rotates the refresh token, so concurrent 401s on one connection must
     // not replay the same RT (the loser would come back invalid_grant and mark
-    // healthy credentials dead — same lock codex/grok-cli use). chatCore omits
-    // proxyOptions, so fall back to the connection-scoped proxy on credentials.
-    return withCredentialRefreshLock(this.provider, credentials, () =>
+    // healthy credentials dead — same lock codex/grok-cli use). chatCore passes
+    // the request's proxyOptions; the credentials fallback covers other callers.
+    const patch = await withCredentialRefreshLock(this.provider, credentials, () =>
       refreshCodeartsFromCredentials(credentials, { log, proxyOptions: proxyOptions || credentials?.proxyOptions || null })
     );
+    // chatCore Object.assign()s this patch over the live credentials object, and
+    // its providerSpecificData would wholesale replace the connection's — keep
+    // fields the refresh never returns (proxy config, user ids, …).
+    if (patch?.providerSpecificData) {
+      patch.providerSpecificData = {
+        ...(credentials?.providerSpecificData || {}),
+        ...patch.providerSpecificData,
+      };
+    }
+    return patch;
   }
 }
 

@@ -113,4 +113,18 @@ describe("getCapabilitiesForModel", () => {
       thinkingEffortSupported: true,
     });
   });
+
+  it("resolves provider overrides through the short alias, not just the id", () => {
+    // /api/models and the dashboard hand us the wire alias ("ca"); a table keyed
+    // by id alone silently degraded every CodeArts model to the 200K/64K floor.
+    for (const model of ["GLM-5.2", "openpangu-2.0-pro", "glm-5.2-sft-harmony"]) {
+      expect(getCapabilitiesForModel("ca", model))
+        .toEqual(getCapabilitiesForModel("codearts", model));
+    }
+    expect(getCapabilitiesForModel("ca", "openpangu-2.0-flash")).toMatchObject({
+      reasoning: true,
+      contextWindow: 524288,
+      maxOutput: 131072,
+    });
+  });
 });
