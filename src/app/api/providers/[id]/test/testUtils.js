@@ -7,6 +7,7 @@ import { traeEnterpriseConfig } from "open-sse/shared/trae/enterprise.js";
 import { fetchCodeartsCurrentUser } from "open-sse/shared/codearts/api.js";
 import { resolveOllamaLocalHost, PROVIDERS } from "open-sse/config/providers.js";
 import { CODEX_CLI_VERSION } from "open-sse/config/appConstants.js";
+import { isOpenCodeCliAvailable, runOpenCodeCli } from "open-sse/executors/opencode-cli.js";
 import {
   refreshProviderCredentials,
   shouldRefreshCredentials,
@@ -527,6 +528,39 @@ async function fetchWithConnectionProxy(url, options = {}, effectiveProxy = null
   });
 }
 
+// Probe model: a chat-capable id from the CLI's curated free list. getDefaultModel("oc")
+// would pick a Muse Spark id, which upstream region-gates independently of the free tier.
+const OPENCODE_CLI_PROBE_MODEL = "nemotron-3.5-lightning-free";
+const OPENCODE_CLI_PROBE_TIMEOUT_MS = 45000;
+
+async function testOpencodeCliTurn() {
+  try {
+    const { response } = await runOpenCodeCli({
+      model: OPENCODE_CLI_PROBE_MODEL,
+      body: { messages: [{ role: "user", content: "Reply with exactly: ok" }] },
+      credentials: { connectionId: "connection-test" },
+      providerSessionId: "connection-test",
+    });
+    const streamed = response.text();
+    // If the timeout wins the race, a later stream failure must not surface as an
+    // unhandled rejection (fatal in the Next server process).
+    streamed.catch(() => {});
+    const sse = await Promise.race([
+      streamed,
+      new Promise((_, reject) => {
+        const timer = setTimeout(() => reject(new Error(`no reply within ${OPENCODE_CLI_PROBE_TIMEOUT_MS / 1000}s`)), OPENCODE_CLI_PROBE_TIMEOUT_MS);
+        if (timer.unref) timer.unref();
+      }),
+    ]);
+    const errorMatch = sse.match(/"error":\{"message":"([^"]+)"/);
+    if (errorMatch) return { valid: false, error: `OpenCode CLI: ${errorMatch[1]}` };
+    if (!sse.includes("data: [DONE]")) return { valid: false, error: "OpenCode CLI returned no reply" };
+    return { valid: true, error: null };
+  } catch (e) {
+    return { valid: false, error: `OpenCode CLI probe failed: ${e.message}` };
+  }
+}
+
 async function testApiKeyConnection(connection, effectiveProxy = null) {
   if (isOpenAICompatibleProvider(connection.provider)) {
     const modelsBase = connection.providerSpecificData?.baseUrl;
@@ -807,6 +841,12 @@ async function testApiKeyConnection(connection, effectiveProxy = null) {
         return { valid, error: valid ? null : "Session expired — re-paste cookie" };
       }
       case "opencode": {
+        // The free tier is gated to genuine OpenCode clients, so when the CLI is
+        // installed this provider is served by it. Probing /zen/v1/models would then
+        // report "connected" while every chat call fails — exercise a real turn.
+        if (await isOpenCodeCliAvailable()) {
+          return testOpencodeCliTurn();
+        }
         const res = await fetchWithConnectionProxy("https://opencode.ai/zen/v1/models", {
           headers: { Authorization: "Bearer public", "User-Agent": "opencode/1.18.31" },
         }, effectiveProxy);

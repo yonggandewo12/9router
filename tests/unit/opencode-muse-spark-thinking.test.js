@@ -63,37 +63,17 @@ describe("OpenCode Free Muse Spark thinking", () => {
     expect(out.max_tokens).toBeUndefined();
   });
 
-  it("routes Union Alpha through Anthropic Messages", () => {
-    const caps = getCapabilitiesForModel(PROVIDER, "union-alpha");
-    expect(caps.vision).toBe(true);
-    expect(caps.contextWindow).toBe(262144);
-    expect(caps.maxOutput).toBe(131072);
-
+  it("keeps every model off the Messages API (Union Alpha retired upstream)", () => {
     const executor = new OpenCodeExecutor();
 
-    expect(getModelTargetFormat("oc", "union-alpha")).toBe(FORMATS.CLAUDE);
-    const url = executor.buildUrl("union-alpha");
-    expect(url).toBe("https://opencode.ai/zen/v1/messages");
-    expect(executor.buildHeaders({}, true, url)).toMatchObject({
-      "anthropic-version": "2023-06-01",
-    });
-    expect(executor.buildHeaders({}, true, executor.buildUrl("big-pickle")))
-      .not.toHaveProperty("anthropic-version");
-
-    const translated = translateRequest(
-      FORMATS.OPENAI,
-      FORMATS.CLAUDE,
-      "union-alpha",
-      { messages: [{ role: "user", content: "ping" }], max_tokens: 1 },
-      false,
-      {},
-      PROVIDER,
-    );
-    expect(translated).toMatchObject({
-      model: "union-alpha",
-      messages: [{ role: "user", content: [{ type: "text", text: "ping" }] }],
-      max_tokens: 1,
-    });
+    // Upstream dropped union-alpha ("Model is not supported", absent from /zen/v1/models),
+    // so no request may be routed to /zen/v1/messages anymore.
+    expect(PROVIDER_MODELS.oc?.some((m) => m.id === "union-alpha")).toBe(false);
+    expect(getModelTargetFormat("oc", "union-alpha")).toBeNull();
+    for (const model of ["union-alpha", "big-pickle", MODEL, "muse-spark-1.3-contributor-free"]) {
+      expect(executor.buildUrl(model)).not.toContain("/messages");
+    }
+    expect(executor.buildHeaders({}, true)).not.toHaveProperty("anthropic-version");
   });
 
   it("leaves the other free models on Chat Completions", () => {

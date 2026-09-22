@@ -1,3 +1,13 @@
+# v0.5.87 (2026-09-22)
+
+## Features
+- **OpenCode Free**: add a CLI subprocess transport. Upstream now gates the zen free tier to genuine OpenCode clients, so when an `opencode` binary is installed locally 9router drives `opencode run` instead of spoofing the HTTP handshake: it pins a tool-denied workspace under `DATA_DIR`, reuses one opencode session per downstream conversation (sending only the new turns), and bridges image parts through `--file`. Machines without the CLI (Docker, headless servers) keep the HTTP transport; force either one with `OPENCODE_TRANSPORT=cli|http`.
+
+## Fixes
+- **OpenCode Free**: retire `union-alpha` (dropped upstream) along with its `/zen/v1/messages` routing; mark `jev-1.13-free` unavailable in suggested models; report a text-less CLI exit as an error instead of an empty success; emit real token usage; the provider connection test now exercises a real turn rather than only listing models, so it no longer passes while every chat call fails
+- **OpenCode Free suggested models**: intersect the import list with the official CLI's own free listing (upstream began advertising ids the CLI refuses, e.g. `mimo-v2.6-flash-free`), backed off when no CLI is present; dashboard suggested-model chips no longer render `NaNk ctx`
+- **Provider connections**: reorder is deterministic when priorities tie at the same millisecond (tie-break falls through `updatedAt` → `createdAt` → id), removing an intermittent ordering failure
+
 # v0.5.82 (unreleased)
 
 ## Features

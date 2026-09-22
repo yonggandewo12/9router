@@ -58,6 +58,16 @@ export const STREAM_FIRST_CHUNK_TIMEOUT_MS = envMs("STREAM_FIRST_CHUNK_TIMEOUT_M
 // Fetch connect timeout: abort if upstream doesn't return response headers within this duration
 export const FETCH_CONNECT_TIMEOUT_MS = envMs("FETCH_CONNECT_TIMEOUT_MS", 60 * 1000);
 
+// OpenCode CLI transport: the request is a subprocess, so "no progress" has to be
+// measured by stdout silence, and a hard ceiling guards against a hung CLI.
+export const OPENCODE_CLI_CONFIG = {
+  idleMs: envMs("OPENCODE_CLI_IDLE_TIMEOUT_MS", 90 * 1000),
+  totalMs: envMs("OPENCODE_CLI_TOTAL_TIMEOUT_MS", 5 * 60 * 1000),
+  versionProbeMs: envMs("OPENCODE_CLI_PROBE_TIMEOUT_MS", 8 * 1000),
+  killGraceMs: envMs("OPENCODE_CLI_KILL_GRACE_MS", 2 * 1000),
+  availabilityTtlMs: envMs("OPENCODE_CLI_PROBE_TTL_MS", 10 * 60 * 1000),
+};
+
 // Ceiling for the pre-first-frame SSE peek that looks for provider error
 // envelopes. Only comment/heartbeat lines can accumulate here (a data line ends
 // the peek), so exceeding it means upstream keeps emitting a heartbeat stream —

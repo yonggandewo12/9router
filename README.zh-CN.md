@@ -866,9 +866,15 @@ PORT=20128 HOSTNAME=0.0.0.0 NEXT_PUBLIC_BASE_URL=http://localhost:20128 npm run 
 
 ```bash
 控制面板 → 连接 OpenCode Free
-→ 无需登录（直连代理）
+→ 无需登录
 → 模型从 opencode.ai/zen/v1/models 自动获取
 ```
+
+**两种传输方式。** 上游把这个免费层限定为真正的 OpenCode 客户端，因此检测到本机
+装有 `opencode` CLI 时，9router 会直接驱动该 CLI（并禁用其全部文件/命令权限）；
+没有 CLI 的环境（如 Docker）则回退为直连 `opencode.ai/zen/v1`。可用
+`OPENCODE_TRANSPORT=cli|http` 强制指定。两种方式的免费层都会被上游限流且时好时坏，
+请预期偶发 403。
 
 **专业提示：** 最快的设置。连接后即可开始编码。
 

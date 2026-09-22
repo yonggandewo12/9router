@@ -1053,9 +1053,16 @@ Models:
 
 ```bash
 Dashboard → Connect OpenCode Free
-→ No login required (passthrough proxy)
+→ No login required
 → Models auto-fetched from opencode.ai/zen/v1/models
 ```
+
+**Two transports.** Upstream restricts this free tier to genuine OpenCode
+clients, so 9router drives a locally installed `opencode` CLI when one is found
+(that agent is denied all file/shell permissions); without the CLI — e.g. in
+Docker — it calls `opencode.ai/zen/v1` directly instead. Force one with
+`OPENCODE_TRANSPORT=cli|http`. Either way upstream rate-limits the free tier and
+availability is intermittent, so expect occasional 403s rather than uptime.
 
 **Pro Tip:** Fastest setup. Just connect and start coding.
 

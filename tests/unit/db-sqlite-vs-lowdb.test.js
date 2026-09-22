@@ -76,10 +76,13 @@ describe("DB SQLite layer — public API parity", () => {
     expect(list[1].priority).toBe(2);
     expect(list[2].priority).toBe(3);
 
-    // Update priority and reorder
-    await sqliteDb.updateProviderConnection(c3.id, { priority: 1 });
+    // Update priority and reorder. Use a non-tied priority — a tie would make the
+    // first position depend on millisecond-resolution updatedAt, which is
+    // exactly what made this assertion flaky on fast machines.
+    await sqliteDb.updateProviderConnection(c3.id, { priority: 0 });
     const reordered = await sqliteDb.getProviderConnections({ provider: "test" });
     expect(reordered[0].name).toBe("c");
+    expect(reordered[1].name).toBe("a");
 
     // Delete reorders remaining
     await sqliteDb.deleteProviderConnection(c1.id);

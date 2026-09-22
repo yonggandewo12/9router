@@ -7,6 +7,10 @@ vi.mock("../../open-sse/utils/proxyFetch.js", () => ({
   proxyAwareFetch: vi.fn(async () => ({ ok: true, status: 200, headers: { get: () => "" } })),
 }));
 
+// Pin the HTTP transport: execute() delegates to a locally installed opencode CLI,
+// which would make these assertions depend on the host.
+process.env.OPENCODE_TRANSPORT = "http";
+
 // Break caught: opencode/muse-spark-1.3-contributor-free 400 vì upstream
 // chỉ nhận tool_choice "auto"; named/required/none phải demote sang "auto".
 const FREE_13 = "muse-spark-1.3-contributor-free";

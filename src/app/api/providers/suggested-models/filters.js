@@ -2,7 +2,9 @@
 const KNOWN_FREE_OPENCODE_MODELS = ["big-pickle"];
 
 // Upstream returns "Model is unavailable" for this id (2026-09-02) — re-enable when fixed
-const DEAD_FREE_OPENCODE_MODELS = new Set(["deepseek-v4-flash-free"]);
+// jev-1.13-free is still listed by /models but every call 500s with "Internal server error"
+// (2026-09-22), and the official CLI's own free list omits both of these.
+const DEAD_FREE_OPENCODE_MODELS = new Set(["deepseek-v4-flash-free", "jev-1.13-free"]);
 
 export const FILTERS = {
   "openrouter-free": (models) =>

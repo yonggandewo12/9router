@@ -9,6 +9,11 @@ vi.mock("../../open-sse/utils/proxyFetch.js", () => ({
 }));
 
 import { getExecutor } from "../../open-sse/executors/index.js";
+
+// Pin the HTTP transport: execute() delegates to a locally installed opencode CLI,
+// which would make these assertions depend on the host.
+process.env.OPENCODE_TRANSPORT = "http";
+
 import {
   OPENCODE_SESSION_RE,
   OPENCODE_REQUEST_RE,

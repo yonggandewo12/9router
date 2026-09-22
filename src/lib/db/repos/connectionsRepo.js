@@ -114,7 +114,14 @@ function reorderInTx(db, providerId) {
   list.sort((a, b) => {
     const pDiff = (a.priority || 0) - (b.priority || 0);
     if (pDiff !== 0) return pDiff;
-    return new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0);
+    // updatedAt/createdAt only have millisecond precision, so batch writes inside
+    // one millisecond tie. Keep the chain total so reorders stay deterministic —
+    // storage row order must never decide connection priority.
+    const uDiff = new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0);
+    if (uDiff !== 0) return uDiff;
+    const cDiff = new Date(b.createdAt || 0) - new Date(a.createdAt || 0);
+    if (cDiff !== 0) return cDiff;
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
   });
   list.forEach((c, i) => {
     db.run(`UPDATE providerConnections SET priority = ? WHERE id = ?`, [i + 1, c.id]);
