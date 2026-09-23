@@ -186,7 +186,7 @@ function getEnvProxyUrl(targetUrl) {
 /**
  * Normalize proxy URL (allow host:port)
  */
-function normalizeProxyUrl(proxyUrl) {
+export function normalizeProxyUrl(proxyUrl) {
   const normalizedInput = normalizeString(proxyUrl);
   if (!normalizedInput) return null;
 

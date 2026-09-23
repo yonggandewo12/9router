@@ -533,13 +533,14 @@ async function fetchWithConnectionProxy(url, options = {}, effectiveProxy = null
 const OPENCODE_CLI_PROBE_MODEL = "nemotron-3.5-lightning-free";
 const OPENCODE_CLI_PROBE_TIMEOUT_MS = 45000;
 
-async function testOpencodeCliTurn() {
+async function testOpencodeCliTurn(proxyOptions = null) {
   try {
     const { response } = await runOpenCodeCli({
       model: OPENCODE_CLI_PROBE_MODEL,
       body: { messages: [{ role: "user", content: "Reply with exactly: ok" }] },
       credentials: { connectionId: "connection-test" },
       providerSessionId: "connection-test",
+      proxyOptions,
     });
     const streamed = response.text();
     // If the timeout wins the race, a later stream failure must not surface as an
@@ -845,7 +846,7 @@ async function testApiKeyConnection(connection, effectiveProxy = null) {
         // installed this provider is served by it. Probing /zen/v1/models would then
         // report "connected" while every chat call fails — exercise a real turn.
         if (await isOpenCodeCliAvailable()) {
-          return testOpencodeCliTurn();
+          return testOpencodeCliTurn(effectiveProxy);
         }
         const res = await fetchWithConnectionProxy("https://opencode.ai/zen/v1/models", {
           headers: { Authorization: "Bearer public", "User-Agent": "opencode/1.18.31" },

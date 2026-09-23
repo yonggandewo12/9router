@@ -13,11 +13,17 @@ vi.mock("@/lib/dataDir.js", () => ({ DATA_DIR }));
 vi.mock("../../open-sse/utils/proxyFetch.js", () => ({
   proxyFetch: vi.fn((url) => fetch(url)),
   proxyAwareFetch: vi.fn((url, options) => fetch(url, options)),
+  normalizeProxyUrl: (proxyUrl) => {
+    const s = String(proxyUrl || "").trim();
+    if (!s) return null;
+    try { new URL(s); return s; } catch { return `http://${s}`; }
+  },
 }));
 
 import {
   normalizeConversation,
   buildCliArgs,
+  buildCliEnv,
   planPrompt,
   runOpenCodeCli,
   isOpenCodeCliAvailable,
@@ -850,5 +856,79 @@ describe("transport selection", () => {
   it("OPENCODE_TRANSPORT=cli forces it on", async () => {
     process.env.OPENCODE_TRANSPORT = "cli";
     expect(await isOpenCodeCliAvailable()).toBe(true);
+  });
+});
+
+describe("CLI child egress proxy (buildCliEnv)", () => {
+  const kept = { ...process.env };
+  afterEach(() => {
+    for (const k of Object.keys(process.env)) if (!(k in kept)) delete process.env[k];
+    Object.assign(process.env, kept);
+  });
+
+  it("injects the connection proxy into upper- and lower-case env vars, overwriting stale values", () => {
+    process.env.https_proxy = "http://old-direct:8080";
+    const env = buildCliEnv({
+      connectionProxyEnabled: true,
+      connectionProxyUrl: "http://127.0.0.1:6696",
+      connectionNoProxy: "localhost,127.0.0.1",
+    });
+    expect(env.HTTPS_PROXY).toBe("http://127.0.0.1:6696");
+    expect(env.HTTP_PROXY).toBe("http://127.0.0.1:6696");
+    expect(env.ALL_PROXY).toBe("http://127.0.0.1:6696");
+    expect(env.https_proxy).toBe("http://127.0.0.1:6696");
+    expect(env.http_proxy).toBe("http://127.0.0.1:6696");
+    expect(env.all_proxy).toBe("http://127.0.0.1:6696");
+    expect(env.NO_PROXY).toBe("localhost,127.0.0.1");
+    expect(env.no_proxy).toBe("localhost,127.0.0.1");
+    // the caller's env is never mutated
+    expect(process.env.https_proxy).toBe("http://old-direct:8080");
+  });
+
+  it("normalizes a bare host:port pool value the way the HTTP transport does", () => {
+    const env = buildCliEnv({ connectionProxyEnabled: true, connectionProxyUrl: "127.0.0.1:6696" });
+    expect(env.HTTPS_PROXY).toBe("http://127.0.0.1:6696");
+    expect(env.https_proxy).toBe("http://127.0.0.1:6696");
+  });
+
+  it("a socks5:// pool value must not break the child (HTTP path degrades to direct)", () => {
+    const env = buildCliEnv({ connectionProxyEnabled: true, connectionProxyUrl: "socks5://127.0.0.1:6696" });
+    expect(env.HTTPS_PROXY ?? null).toBe(process.env.HTTPS_PROXY ?? null);
+    expect(env.https_proxy ?? null).toBe(process.env.https_proxy ?? null);
+  });
+
+  it("accepts the generic enabled/url alias shape like proxyAwareFetch does", () => {
+    const env = buildCliEnv({ enabled: true, url: "127.0.0.1:6696" });
+    expect(env.HTTPS_PROXY).toBe("http://127.0.0.1:6696");
+    expect(env.https_proxy).toBe("http://127.0.0.1:6696");
+  });
+
+  it("leaves env untouched when no connection proxy is configured", () => {
+    delete process.env.HTTPS_PROXY;
+    delete process.env.HTTP_PROXY;
+    const env = buildCliEnv({ connectionProxyEnabled: false, connectionProxyUrl: "" });
+    expect(env.HTTPS_PROXY).toBeUndefined();
+    expect(env.HTTP_PROXY).toBeUndefined();
+  });
+
+  it("a disabled flag must not leak the configured URL into the child", () => {
+    const env = buildCliEnv({ connectionProxyEnabled: false, connectionProxyUrl: "http://127.0.0.1:6696" });
+    expect(env.HTTPS_PROXY ?? null).toBe(process.env.HTTPS_PROXY ?? null);
+  });
+
+  it("runOpenCodeCli passes the connection proxy to the spawned CLI", async () => {
+    process.env.OPENCODE_TRANSPORT = "cli";
+    const result = await runOpenCodeCli({
+      model: "nemotron-3.5-lightning-free",
+      body: { messages: [USER("hi")] },
+      credentials: { connectionId: "conn-proxy" },
+      proxyOptions: { connectionProxyEnabled: true, connectionProxyUrl: "http://127.0.0.1:6696", connectionNoProxy: "" },
+    });
+    expect(result.response.status).toBe(200);
+    const spawnEnv = spawnMock.mock.calls.at(-1)[2].env;
+    expect(spawnEnv.HTTPS_PROXY).toBe("http://127.0.0.1:6696");
+    children.at(-1).stdout.emit("data", Buffer.from(evt({ type: "text", sessionID: "ses_p", part: { text: "ok" } })));
+    children.at(-1).emit("close", 0);
+    await readAll(result.response);
   });
 });

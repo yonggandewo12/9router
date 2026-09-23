@@ -12,7 +12,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { DATA_DIR } from "@/lib/dataDir.js";
-import { proxyAwareFetch } from "../utils/proxyFetch.js";
+import { proxyAwareFetch, normalizeProxyUrl } from "../utils/proxyFetch.js";
 import { getThinkingLevels } from "../providers/thinkingLevels.js";
 import { MEMORY_CONFIG, OPENCODE_CLI_CONFIG } from "../config/runtimeConfig.js";
 
@@ -171,6 +171,37 @@ export async function isOpenCodeCliAvailable({ force = false } = {}) {
 
 export function getCliInfo() {
   return { bin: availability?.bin || resolveOpencodeBin(), ok: availability?.ok ?? null };
+}
+
+// The child must egress through the same proxy the HTTP transport would use:
+// upstream region-gates the zen free tier by source IP, and the server process
+// is typically started WITHOUT proxy env, so `{ ...process.env }` alone sends the
+// CLI out the server's own region-blocked IP. Mirror proxyAwareFetch precedence
+// (connection proxy beats env) and its URL normalization (pools store raw
+// "host:port" values, so they must be normalized before reaching the child).
+export function buildCliEnv(proxyOptions) {
+  const env = { ...process.env };
+  const enabled = proxyOptions?.connectionProxyEnabled === true || proxyOptions?.enabled === true;
+  const raw = enabled
+    ? String(proxyOptions?.connectionProxyUrl ?? proxyOptions?.url ?? "").trim()
+    : "";
+  const url = normalizeProxyUrl(raw) || "";
+  // Bun rejects non-http(s) proxy env (UnsupportedProxyProtocol) while undici's
+  // ProxyAgent is http(s)-only too — a socks5:// pool value degrades to a direct
+  // connection on the HTTP path, so mirror that instead of failing the child.
+  if (!url || !/^https?:\/\//i.test(url)) return env;
+  env.HTTPS_PROXY = url;
+  env.HTTP_PROXY = url;
+  env.ALL_PROXY = url;
+  env.https_proxy = url;
+  env.http_proxy = url;
+  env.all_proxy = url;
+  const noProxy = String(proxyOptions?.connectionNoProxy ?? proxyOptions?.noProxy ?? "").trim();
+  if (noProxy) {
+    env.NO_PROXY = noProxy;
+    env.no_proxy = noProxy;
+  }
+  return env;
 }
 
 let freeModelsCache = null; // { ids: Set, at: number }
@@ -792,7 +823,7 @@ export function runOpenCodeCli({ model, body, credentials, providerSessionId, si
     }
     const args = buildCliArgs({ model, body, sid: plan.sid, prompt: useStdin ? null : plan.prompt, files: attachments });
     log?.info?.("OPENCODE", `CLI ${plan.sid ? "continue" : "new"} session model=${model} key=${key.slice(0, 56)} turns=${plan.replayed} images=${attachments.length} prompt=${Buffer.byteLength(plan.prompt)}B via=${useStdin ? "stdin" : "argv"}`);
-    return startTurn({ bin, args, dir, key, plan, turns, model, signal, log, attachments, stdinPrompt: useStdin ? plan.prompt : null });
+    return startTurn({ bin, args, dir, key, plan, turns, model, signal, log, attachments, proxyOptions, stdinPrompt: useStdin ? plan.prompt : null });
   });
 }
 
@@ -843,7 +874,7 @@ function jsonResponse(stream, status, extra = {}) {
   });
 }
 
-function startTurn({ bin, args, dir, key, plan, turns, model, signal, log, attachments = [], stdinPrompt = null }) {
+function startTurn({ bin, args, dir, key, plan, turns, model, signal, log, attachments = [], proxyOptions = null, stdinPrompt = null }) {
   const replyModel = splitThinkingSuffix(model).base; // the "(level)" suffix is ours, not a model id
   const responseId = `chatcmpl-opencode-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
   const created = Math.floor(Date.now() / 1000);
@@ -922,7 +953,7 @@ function startTurn({ bin, args, dir, key, plan, turns, model, signal, log, attac
     try {
       child = spawn(bin, spawnArgs(bin, args), {
         cwd: dir,
-        env: { ...process.env },
+        env: buildCliEnv(proxyOptions),
         // stdin is a pipe only when the prompt travels over it (Windows cmd.exe shim);
         // otherwise "ignore" → /dev/null, which gives opencode's unconditional
         // `Bun.stdin.text()` an immediate EOF so it never blocks waiting for input.
