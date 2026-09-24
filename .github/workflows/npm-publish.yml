@@ -2,7 +2,8 @@ name: Publish CLI to npm
 
 # Release = bump "version" in cli/package.json, then:
 #   git tag cli-v<version> && git push fork cli-v<version>
-# The `cli-v` prefix keeps this clear of docker-publish.yml, which watches `v*`.
+# The `cli-v` prefix keeps npm releases separate from the app's bare `v*`
+# semver tags.
 
 on:
   push:
