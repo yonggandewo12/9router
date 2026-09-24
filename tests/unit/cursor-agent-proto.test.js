@@ -12,15 +12,15 @@ import {
 } from "../../open-sse/utils/cursorProtobuf.js";
 import {
   buildAgentRunFrame,
+  isAgentCapableRequest,
   CursorExecutor,
 } from "../../open-sse/executors/cursor.js";
 
 // Cursor protocol codec tests — validate what the production code actually speaks:
-//   * ChatService (api2.cursor.sh): StreamUnifiedChat* protos in cursorProtobuf.js,
-//     which is the only path that carries MCP tools today.
-//   * AgentService (agent.v1): the run frame built by cursor.js. Its tool protocol is
-//     NOT implemented (see cursor.js `isAgentTextRequest` comment), so requests that
-//     contain tool calls/results stay on the ChatService path.
+//   * ChatService (api2.cursor.sh): StreamUnifiedChat* protos in cursorProtobuf.js.
+//   * AgentService (agent.v1): the run frame built by cursor.js. It carries text,
+//     declared MCP tool schemas (field 4) and tool-call history; only image parts
+//     still need the legacy protobuf path (see cursor.js isAgentCapableRequest).
 // Field numbers verified against the encoders themselves and Cursor's protos.
 // Pure round-trip, no network.
 
@@ -228,81 +228,109 @@ describe("Cursor ChatService tool-result codec (cursorProtobuf.js)", () => {
 
 // ==================== AgentService (agent.v1) run frame ====================
 
-describe("Cursor AgentService run frame (cursor.js buildAgentRunFrame)", () => {
-  const unwrap = (frame) => {
-    const parsed = parseConnectRPCFrame(Buffer.from(frame));
-    expect(parsed.flags).toBe(0x00);
-    expect(parsed.consumed).toBe(frame.length);
-    return parsed.payload;
-  };
-  const runOf = (frame) => {
-    const clientMsg = decodeMessage(unwrap(frame));
-    expect(clientMsg.has(1)).toBe(true); // AgentClientMessage.run_request
-    return decodeMessage(clientMsg.get(1)[0].value);
-  };
-  const userActionOf = (run) => {
-    expect(run.has(2)).toBe(true); // action
-    return decodeMessage(decodeMessage(run.get(2)[0].value).get(1)[0].value);
-  };
+describe("Cursor AgentService executor helpers (cursor.js)", () => {
+  describe("isAgentCapableRequest", () => {
+    it("accepts plain text content", () => {
+      expect(isAgentCapableRequest({ messages: [{ role: "user", content: "hi" }] })).toBe(true);
+    });
 
-  it("encodes a text-only run request with system prompt and requested model", () => {
-    const run = runOf(buildAgentRunFrame(
-      [{ role: "system", content: "be brief" }, { role: "user", content: "hi" }],
-      "gpt-5.2",
-    ));
-    expect(run.has(1)).toBe(true); // empty ConversationStateStructure = fresh session
-    expect(bytes(run.get(1)[0].value)).toEqual(Buffer.alloc(0));
-    expect(str(run.get(8)[0].value)).toBe("be brief"); // system prompt folded in
-    const requestedModel = decodeMessage(run.get(9)[0].value);
-    expect(str(requestedModel.get(1)[0].value)).toBe("gpt-5.2");
-    expect(requestedModel.get(7)[0].value).toBe(1);
+    it("accepts array text content", () => {
+      expect(isAgentCapableRequest({ messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] })).toBe(true);
+    });
 
-    const userAction = userActionOf(run);
-    const userMessage = decodeMessage(userAction.get(1)[0].value);
-    expect(str(userMessage.get(1)[0].value)).toBe("hi");
-    expect(str(userMessage.get(2)[0].value)).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    it("accepts request with tools declared", () => {
+      expect(isAgentCapableRequest({ messages: [{ role: "user", content: "hi" }], tools: [{ function: { name: "t" } }] })).toBe(true);
+    });
+
+    it("accepts history with assistant tool_calls + tool results", () => {
+      expect(isAgentCapableRequest({
+        messages: [
+          { role: "user", content: "weather?" },
+          { role: "assistant", content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "get_weather", arguments: "{}" } }] },
+          { role: "tool", tool_call_id: "c1", content: "sunny" },
+          { role: "user", content: "thanks" },
+        ],
+      })).toBe(true);
+    });
+
+    it("rejects non-text (image) content", () => {
+      expect(isAgentCapableRequest({ messages: [{ role: "user", content: [{ type: "image_url" }] }] })).toBe(false);
+    });
+
+    it("rejects missing messages", () => {
+      expect(isAgentCapableRequest({})).toBe(false);
+      expect(isAgentCapableRequest(null)).toBe(false);
+    });
   });
 
-  it("omits the system field when no system message is present", () => {
-    const run = runOf(buildAgentRunFrame([{ role: "user", content: "hi" }], "gpt-5.2"));
-    expect(run.has(8)).toBe(false);
-  });
+  describe("buildAgentRunFrame", () => {
+    // buildAgentRunFrame returns a wrapped Connect-RPC frame (5-byte header + AgentClientMessage).
+    const unwrap = (frame) => frame.subarray(5);
+    const runOf = (frame) => decodeMessage(decodeMessage(frame).get(1)[0].value);
+    const userActionOf = (run) => decodeMessage(decodeMessage(run.get(2)[0].value).get(1)[0].value);
 
-  it("carries no mcp_tools: the AgentService tool protocol is not implemented", () => {
-    // Tools are intentionally absent from the agent.v1 frame; `isAgentTextRequest`
-    // keeps conversations that actually use tools on the ChatService path.
-    const run = runOf(buildAgentRunFrame([{ role: "user", content: "weather?" }], "gpt-5.2"));
-    expect(run.has(4)).toBe(false);
-  });
+    it("encodes a text-only run request with system + model", () => {
+      const frame = unwrap(buildAgentRunFrame(
+        [{ role: "system", content: "be brief" }, { role: "user", content: "hi" }],
+        "gpt-5.2",
+      ));
+      const clientMsg = decodeMessage(frame);
+      expect(clientMsg.has(1)).toBe(true); // run_request
+      const run = runOf(frame);
+      expect(run.has(2)).toBe(true); // action
+      expect(run.has(9)).toBe(true); // requested_model
+      // custom_system_prompt (field 8) makes AgentService return an empty turn.
+      expect(run.has(8)).toBe(false);
+      expect(run.has(3)).toBe(true); // ModelDetails — required for thinking variants
+      const userMessage = decodeMessage(userActionOf(run).get(1)[0].value);
+      const userText = Buffer.from(userMessage.get(1)[0].value).toString("utf8");
+      expect(userText).toContain("be brief");
+      expect(userText).toContain("hi");
+    });
 
-  it("encodes conversation_history(7) from prior turns", () => {
-    const messages = [
-      { role: "user", content: "weather in Tokyo?" },
-      { role: "assistant", content: "checking", tool_calls: [{ id: "c1", type: "function", function: { name: "get_weather", arguments: '{"city":"Tokyo"}' } }] },
-      { role: "tool", tool_call_id: "c1", content: "18C cloudy" },
-      { role: "user", content: "thanks" },
-    ];
-    const userAction = userActionOf(runOf(buildAgentRunFrame(messages, "gpt-5.2")));
-    expect(userAction.has(7)).toBe(true);
-    const history = decodeMessage(userAction.get(7)[0].value);
-    expect(history.get(1).length).toBeGreaterThanOrEqual(2); // prior turns, oldest first
+    it("encodes mcp_tools (field 4) when tools are provided", () => {
+      const tools = [{ function: { name: "get_weather", description: "weather", parameters: { type: "object", properties: { city: { type: "string" } } } } }];
+      const run = runOf(unwrap(buildAgentRunFrame([{ role: "user", content: "weather?" }], "gpt-5.2", tools)));
+      expect(run.has(4)).toBe(true); // mcp_tools
+      const mcpTools = decodeMessage(run.get(4)[0].value);
+      expect(mcpTools.get(1).length).toBe(1);
+    });
 
-    // ConversationHistoryMessage.user vs .assistant variants (field 1 vs field 2).
-    expect(decodeMessage(history.get(1)[0].value).has(1)).toBe(true);
-    expect(decodeMessage(history.get(1)[1].value).has(2)).toBe(true);
+    it("omits mcp_tools when no tools provided", () => {
+      const run = runOf(unwrap(buildAgentRunFrame([{ role: "user", content: "hi" }], "gpt-5.2", [])));
+      expect(run.has(4)).toBe(false);
+    });
 
-    const historyBytes = Buffer.concat(history.get(1).map((entry) => Buffer.from(entry.value)));
-    const carries = (text) => historyBytes.includes(Buffer.from(text, "utf8"));
-    expect(carries("weather in Tokyo?")).toBe(true);
-    expect(carries("checking")).toBe(true);
-    expect(carries("thanks")).toBe(false); // the current turn is not duplicated
-  });
+    it("encodes conversation_history(7) from prior turns, user/assistant variants, oldest first", () => {
+      const messages = [
+        { role: "user", content: "weather in Tokyo?" },
+        { role: "assistant", content: "checking", tool_calls: [{ id: "c1", type: "function", function: { name: "get_weather", arguments: '{"city":"Tokyo"}' } }] },
+        { role: "tool", tool_call_id: "c1", content: "18C cloudy" },
+        { role: "user", content: "thanks" },
+      ];
+      const userAction = userActionOf(runOf(unwrap(buildAgentRunFrame(messages, "gpt-5.2", []))));
+      expect(userAction.has(7)).toBe(true);
+      const history = decodeMessage(userAction.get(7)[0].value);
+      expect(history.get(1).length).toBeGreaterThanOrEqual(2); // prior turns, oldest first
 
-  it("sends a placeholder user text when the current turn is empty", () => {
-    const userAction = userActionOf(runOf(buildAgentRunFrame([{ role: "user", content: "" }], "gpt-5.2")));
-    expect(str(decodeMessage(userAction.get(1)[0].value).get(1)[0].value)).toBe("Continue.");
+      // ConversationHistoryMessage.user vs .assistant variants (field 1 vs field 2).
+      expect(decodeMessage(history.get(1)[0].value).has(1)).toBe(true);
+      expect(decodeMessage(history.get(1)[1].value).has(2)).toBe(true);
+
+      const historyBytes = Buffer.concat(history.get(1).map((entry) => Buffer.from(entry.value)));
+      const carries = (text) => historyBytes.includes(Buffer.from(text, "utf8"));
+      expect(carries("weather in Tokyo?")).toBe(true);
+      expect(carries("checking")).toBe(true);
+      expect(carries("thanks")).toBe(false); // the current turn is not duplicated
+    });
+
+    it("sends a placeholder user text when the current turn is empty", () => {
+      const userAction = userActionOf(runOf(unwrap(buildAgentRunFrame([{ role: "user", content: "" }], "gpt-5.2"))));
+      expect(str(decodeMessage(userAction.get(1)[0].value).get(1)[0].value)).toBe("Continue.");
+    });
   });
 });
+
 
 // ==================== AgentService routing decision ====================
 
@@ -343,7 +371,9 @@ describe("CursorExecutor agent.v1 vs ChatService routing (cursor.js)", () => {
     })).toBe(true);
   });
 
-  it("keeps a conversation with assistant tool_calls on ChatService", async () => {
+  it("sends a conversation with assistant tool_calls to AgentService", async () => {
+    // The agent.v1 frame carries mcp_tools and tool-call history now, so full
+    // tool conversations ride the agent path too (isAgentCapableRequest).
     expect(await agentPathTaken({
       messages: [
         { role: "user", content: "weather?" },
@@ -351,16 +381,16 @@ describe("CursorExecutor agent.v1 vs ChatService routing (cursor.js)", () => {
         { role: "tool", tool_call_id: "c1", content: "sunny" },
         { role: "user", content: "thanks" },
       ],
-    })).toBe(false);
+    })).toBe(true);
   });
 
-  it("keeps a bare tool-result message on ChatService", async () => {
+  it("sends a bare tool-result message to AgentService", async () => {
     expect(await agentPathTaken({
       messages: [
         { role: "user", content: "weather?" },
         { role: "tool", tool_call_id: "c1", content: "sunny" },
       ],
-    })).toBe(false);
+    })).toBe(true);
   });
 
   it("keeps non-text (image) content on ChatService", async () => {

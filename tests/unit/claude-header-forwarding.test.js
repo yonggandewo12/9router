@@ -21,7 +21,7 @@ describe("DefaultExecutor.buildHeaders() — claude provider", () => {
     DefaultExecutor = mod.DefaultExecutor || mod.default;
   });
 
-  it("uses static provider defaults when no model is given", () => {
+  it("uses static provider defaults when no model is given", async () => {
     const executor = new DefaultExecutor("claude");
     const headers = executor.buildHeaders({ apiKey: "sk-test" }, true);
 
@@ -29,7 +29,9 @@ describe("DefaultExecutor.buildHeaders() — claude provider", () => {
       headers["Anthropic-Version"] === "2023-06-01" ||
       headers["anthropic-version"] === "2023-06-01";
     expect(hasVersion).toBe(true);
-    expect(headers["User-Agent"]).toBe("claude-cli/2.1.258 (external, sdk-cli)");
+    // Derive from the shared constant so a version bump does not break the pin.
+    const { CLAUDE_CLI_VERSION } = await import("open-sse/providers/shared.js");
+    expect(headers["User-Agent"]).toBe(`claude-cli/${CLAUDE_CLI_VERSION} (external, sdk-cli)`);
   });
 
   it("includes heavy-agent beta flags for claude-opus-5", () => {
