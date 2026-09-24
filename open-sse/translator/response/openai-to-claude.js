@@ -198,13 +198,20 @@ export function openaiToClaudeResponse(chunk, state) {
     for (const tc of delta.tool_calls) {
       const idx = tc.index ?? 0;
 
-      // GLM/fireworks repeats id+null-name on every arg chunk; open block once per idx
-      if (tc.id && !state.toolCalls.has(idx)) {
+      // Open one block per idx on its FIRST chunk. Gating on tc.id (as this
+      // used to) drops the block entirely for upstreams whose first tool-call
+      // chunk carries only name/arguments (no id), which leaves the client
+      // with a content_block_stop for an index that never got a
+      // content_block_start. id/name may also arrive on later chunks and are
+      // filled in below.
+      let toolInfo = state.toolCalls.get(idx);
+      if (!toolInfo) {
         stopThinkingBlock(state, results);
         stopTextBlock(state, results);
 
         const toolBlockIndex = state.nextBlockIndex++;
-        state.toolCalls.set(idx, { id: tc.id, name: tc.function?.name || "", blockIndex: toolBlockIndex });
+        toolInfo = { id: tc.id || "", name: tc.function?.name || "", blockIndex: toolBlockIndex };
+        state.toolCalls.set(idx, toolInfo);
 
         // Strip prefix from tool name for response
         let toolName = tc.function?.name || "";
@@ -217,26 +224,34 @@ export function openaiToClaudeResponse(chunk, state) {
           index: toolBlockIndex,
           content_block: {
             type: CLAUDE_BLOCK.TOOL_USE,
-            id: tc.id,
+            id: tc.id || `call_${idx}`,
             name: toolName,
             input: {}
           }
         });
       }
 
+      if (tc.id && !toolInfo.id) toolInfo.id = tc.id;
+      if (tc.function?.name && !toolInfo.name) toolInfo.name = tc.function.name;
+
       if (tc.function?.arguments) {
-        const toolInfo = state.toolCalls.get(idx);
-        if (toolInfo) {
-          // Buffer args instead of streaming — sanitize at finish to fix bad params
-          if (!state.toolArgBuffers) state.toolArgBuffers = new Map();
-          state.toolArgBuffers.set(idx, (state.toolArgBuffers.get(idx) || "") + tc.function.arguments);
-        }
+        // Buffer args instead of streaming — sanitize at finish to fix bad params
+        if (!state.toolArgBuffers) state.toolArgBuffers = new Map();
+        state.toolArgBuffers.set(idx, (state.toolArgBuffers.get(idx) || "") + tc.function.arguments);
       }
     }
   }
 
   // Finish
   if (choice.finish_reason) {
+    // Some upstreams emit finish_reason on multiple chunks; re-processing
+    // would duplicate tool stops / message_delta / message_stop in the SSE.
+    // NOT state.finishReasonSent: on the responses→openai→claude pivot both
+    // stages share one state object and the upstream stage sets that flag on
+    // the SAME chunk, which would skip this stage's arg flush.
+    if (state.claudeFinishSent) return null;
+    state.claudeFinishSent = true;
+
     stopThinkingBlock(state, results);
     stopTextBlock(state, results);
 

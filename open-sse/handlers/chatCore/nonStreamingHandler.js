@@ -153,6 +153,14 @@ export function translateNonStreamingResponse(responseBody, targetFormat, source
   if (targetFormat === FORMATS.OPENAI && sourceFormat === FORMATS.CLAUDE) {
     return openAICompletionToClaudeMessage(responseBody);
   }
+  // Claude client on an openai-responses upstream: the forced-streaming
+  // executor still returns chat-shaped data (parseSSEToOpenAIResponse above
+  // normalizes SSE to a chat.completion body), so the same conversion
+  // applies. Without this branch the raw OpenAI body (no `content` array)
+  // reached Anthropic clients and crashed them.
+  if (targetFormat === FORMATS.OPENAI_RESPONSES && sourceFormat === FORMATS.CLAUDE) {
+    return openAICompletionToClaudeMessage(responseBody);
+  }
   if (targetFormat === FORMATS.OPENAI) return responseBody;
 
   // Gemini / Antigravity
