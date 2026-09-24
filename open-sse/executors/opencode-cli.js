@@ -737,10 +737,24 @@ function splitThinkingSuffix(model) {
   return { base: (m ? m[1] : raw).trim(), variant: m ? m[2].trim() : "" };
 }
 
-export function buildCliArgs({ model, body, sid, prompt, files }) {
+// opencode titles a session from the first user turn; leading dashes would be
+// eaten as CLI flags, so flatten to one line and drop them. Cap by code points —
+// a UTF-16-unit slice could split a surrogate pair and ship a lone surrogate,
+// which execve encodes as U+FFFD in the title. NUL flattens to a space: execve
+// rejects NUL bytes in argv outright.
+export function sessionTitle(turns) {
+  const first = (turns || []).find((t) => t?.role === "user")?.text || "";
+  const flat = first.replace(/[\0\s]+/g, " ").replace(/^[-\s]+/, "").trim();
+  return Array.from(flat).slice(0, 60).join("");
+}
+
+export function buildCliArgs({ model, body, sid, prompt, files, title }) {
   const { base, variant } = resolveVariant(model, body);
   const args = ["run", "--format", "json", "-m", `${CLI_PROVIDER_PREFIX}${base}`];
   if (variant) args.push("--variant", variant);
+  // A fresh `run` otherwise spends an extra LLM call minting a session title;
+  // supplying one skips it (verified: agent=title calls 1 → 0 per turn).
+  if (title) args.push("--title", title);
   if (sid) args.push("-s", sid);
   for (const file of files || []) args.push("--file", file);
   // `--file` is an array option: without `--` it swallows the trailing prompt and
@@ -815,13 +829,28 @@ export function runOpenCodeCli({ model, body, credentials, providerSessionId, si
     if (!turns.length) return emptyResult("OpenCode CLI: request contained no text to send");
     const key = sessionKey(credentials, providerSessionId, turns);
     const plan = planPrompt({ key, system, turns, images });
+    // NUL bytes make spawn throw ERR_INVALID_ARG_VALUE (execve forbids them in
+    // argv); stripping at this single choke point keeps the argv, stdin, and
+    // promptBytes views of the prompt identical.
+    plan.prompt = plan.prompt.replace(/\0/g, "");
     if (signal?.aborted) return emptyResult("OpenCode CLI: aborted by client", 499);
     const attachments = await materializeAttachments(plan.images, dir, proxyOptions, log, signal);
     if (signal?.aborted) {
       removeAttachments(attachments);
       return emptyResult("OpenCode CLI: aborted by client", 499);
     }
-    const args = buildCliArgs({ model, body, sid: plan.sid, prompt: useStdin ? null : plan.prompt, files: attachments });
+    // A prompt-derived title would put user text back into argv, undoing the
+    // cmd.exe path's deliberate stdin-only hardening, so skip it there; an
+    // existing session already carries its title.
+    const cliTitle = (plan.sid || useStdin) ? "" : sessionTitle(turns);
+    const args = buildCliArgs({
+      model,
+      body,
+      sid: plan.sid,
+      prompt: useStdin ? null : plan.prompt,
+      files: attachments,
+      title: cliTitle,
+    });
     log?.info?.("OPENCODE", `CLI ${plan.sid ? "continue" : "new"} session model=${model} key=${key.slice(0, 56)} turns=${plan.replayed} images=${attachments.length} prompt=${Buffer.byteLength(plan.prompt)}B via=${useStdin ? "stdin" : "argv"}`);
     return startTurn({ bin, args, dir, key, plan, turns, model, signal, log, attachments, proxyOptions, stdinPrompt: useStdin ? plan.prompt : null });
   });
@@ -964,7 +993,10 @@ function startTurn({ bin, args, dir, key, plan, turns, model, signal, log, attac
         shell: needsShell(bin),
       });
     } catch (e) {
-      finish({ error: { message: `Failed to spawn opencode CLI: ${e.message}` } });
+      // Node's argument-validation errors embed the rejected argv value verbatim
+      // (up to the whole prompt); keep the error frame bounded like every other
+      // detail path here (300/600 chars).
+      finish({ error: { message: `Failed to spawn opencode CLI: ${String(e?.message || e).slice(0, 300)}` } });
       return;
     }
 

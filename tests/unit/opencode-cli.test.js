@@ -24,6 +24,7 @@ import {
   normalizeConversation,
   buildCliArgs,
   buildCliEnv,
+  sessionTitle,
   planPrompt,
   runOpenCodeCli,
   isOpenCodeCliAvailable,
@@ -219,6 +220,20 @@ describe("buildCliArgs", () => {
     expect(args.at(-1)).toBe("hi");
   });
 
+  it("passes an explicit --title so the CLI skips its title LLM call", () => {
+    const args = buildCliArgs({ model: "big-pickle", body: {}, sid: null, prompt: "hi", title: "介绍宁波" });
+    const i = args.indexOf("--title");
+    expect(i).toBeGreaterThan(-1);
+    expect(args[i + 1]).toBe("介绍宁波");
+    // the title is a value option: the prompt must still sit behind `--`
+    expect(args.indexOf("--")).toBeLessThan(args.length - 1);
+    expect(args.at(-1)).toBe("hi");
+  });
+
+  it("omits --title entirely when no title is given", () => {
+    expect(buildCliArgs({ model: "big-pickle", body: {}, sid: "ses_x", prompt: "hi" })).not.toContain("--title");
+  });
+
   it("separates the prompt with -- so the array-valued --file cannot swallow it", () => {
     // Live failure being guarded: without `--`, opencode consumes the prompt as a
     // second --file value and dies with "File not found: <prompt>".
@@ -268,6 +283,27 @@ describe("buildCliArgs", () => {
   });
 });
 
+describe("sessionTitle", () => {
+  it("flattens the first user turn onto one line and caps it", () => {
+    const long = "x".repeat(120);
+    expect(sessionTitle([{ role: "system", text: "s" }, { role: "user", text: "你好\n世界  呀" }])).toBe("你好 世界 呀");
+    expect(sessionTitle([{ role: "user", text: long }])).toHaveLength(60);
+  });
+
+  it("caps by code points, never splitting a surrogate pair", () => {
+    // A UTF-16-unit slice would end on the high surrogate of an emoji and ship a
+    // lone surrogate → U+FFFD once execve encodes argv.
+    expect(sessionTitle([{ role: "user", text: "a".repeat(59) + "😀".repeat(10) }])).toBe("a".repeat(59) + "😀");
+    expect(sessionTitle([{ role: "user", text: "😀".repeat(70) }])).toBe("😀".repeat(60));
+  });
+
+  it("never lets the title look like a CLI flag, and returns empty without a user turn", () => {
+    expect(sessionTitle([{ role: "user", text: "--variant max 帮我" }])).toBe("variant max 帮我");
+    expect(sessionTitle([{ role: "assistant", text: "hi" }])).toBe("");
+    expect(sessionTitle([])).toBe("");
+  });
+});
+
 describe("session continuity", () => {
   // Drives one full turn through the public API and returns the spawn argv.
   async function takeTurn({ ids, messages, model = "big-pickle", reply = "the reply", sid = "ses_keep" }) {
@@ -292,6 +328,8 @@ describe("session continuity", () => {
     });
     expect(second).toContain("-s");
     expect(second[second.indexOf("-s") + 1]).toBe("ses_keep");
+    // The session already carries its title; re-sending one would retitle it.
+    expect(second).not.toContain("--title");
     expect(second.at(-1)).toBe("user: two");
   });
 
@@ -380,6 +418,41 @@ describe("session continuity", () => {
 });
 
 describe("runOpenCodeCli", () => {
+  it("supplies a session title on a fresh session so the CLI skips its title call", async () => {
+    process.env.OPENCODE_TRANSPORT = "cli";
+    const result = await runOpenCodeCli({
+      model: "big-pickle",
+      body: { messages: [USER("介绍一下宁波")] },
+      credentials: { connectionId: "conn-title", providerSpecificData: {} },
+      providerSessionId: "conv-title-" + Math.random().toString(36).slice(2),
+    });
+    const args = lastArgs();
+    const i = args.indexOf("--title");
+    expect(i).toBeGreaterThan(-1);
+    expect(args[i + 1]).toBe("介绍一下宁波");
+    children.at(-1).stdout.emit("data", Buffer.from(evt({ type: "text", sessionID: "ses_t", part: { text: "ok" } })));
+    children.at(-1).emit("close", 0);
+    await readAll(result.response);
+  });
+
+  it("strips NUL bytes from prompt and title before they reach argv", async () => {
+    // execve forbids NUL in argv: Node spawn throws ERR_INVALID_ARG_VALUE and the
+    // whole turn would die (verified live) instead of just losing a stray \0.
+    process.env.OPENCODE_TRANSPORT = "cli";
+    const result = await runOpenCodeCli({
+      model: "big-pickle",
+      body: { messages: [USER("ha\u0000ha the question"), ASSISTANT("r"), USER("next\u0000turn")] },
+      credentials: { connectionId: "conn-nul", providerSpecificData: {} },
+      providerSessionId: "conv-nul-" + Math.random().toString(36).slice(2),
+    });
+    const args = lastArgs();
+    expect(args.some((a) => String(a).includes("\0"))).toBe(false);
+    expect(args[args.indexOf("--title") + 1]).toBe("ha ha the question");
+    children.at(-1).stdout.emit("data", Buffer.from(evt({ type: "text", sessionID: "ses_n", part: { text: "ok" } })));
+    children.at(-1).emit("close", 0);
+    await readAll(result.response);
+  });
+
   it("re-emits CLI events as OpenAI SSE with real token usage", async () => {
     process.env.OPENCODE_TRANSPORT = "cli";
     const result = await runOpenCodeCli({
@@ -837,6 +910,8 @@ describe("windows cmd.exe shim (prompt via stdin)", () => {
     // The prompt is not a positional argv token, and the `--` guard is gone with it.
     expect(args.some((a) => a.includes("line one"))).toBe(false);
     expect(args).not.toContain('"--"');
+    // The prompt-derived --title is dropped here too: it would be user text in argv.
+    expect(args).not.toContain("--title");
     // It reaches the CLI intact over stdin, newlines and shell metacharacters included.
     expect(child.stdinWritten).toContain("line one\nline two & more | text <x>");
 
