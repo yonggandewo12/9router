@@ -167,6 +167,9 @@ export default function ProviderDetailPage() {
   const isOAuth = !!OAUTH_PROVIDERS[providerId] || !!FREE_PROVIDERS[providerId] || authModes.includes("oauth");
   const supportsApiKeyAuth = !!APIKEY_PROVIDERS[providerId] || authModes.includes("apikey");
   const isFreeNoAuth = !!FREE_PROVIDERS[providerId]?.noAuth;
+  // Google-backed OAuth providers hit Google endpoints during the connect flow
+  // itself, so the pool has to be selectable before any connection exists.
+  const needsPreConnectProxy = providerId === "antigravity" || providerId === "gemini-cli";
   const staticModels = getModelsByProviderId(providerId);
   const models = (providerId === "cursor" || providerId === "zed") && liveModels.length > 0
     ? liveModels
@@ -1524,6 +1527,13 @@ export default function ProviderDetailPage() {
       )}
 
       {/* Connections */}
+      {needsPreConnectProxy && (
+        <NoAuthProxyCard
+          providerId={providerId}
+          title="Proxy pool for connecting"
+          description="The OAuth connect flow itself calls Google endpoints. Route it through the selected proxy pool; the pool is then saved onto the new connection."
+        />
+      )}
       {isFreeNoAuth ? (
         <NoAuthProxyCard providerId={providerId} />
       ) : (

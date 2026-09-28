@@ -13,7 +13,7 @@ const STRATEGIES = [
   { value: "random", label: "Random" },
 ];
 
-export default function NoAuthProxyCard({ providerId }) {
+export default function NoAuthProxyCard({ providerId, title = "No authentication required", description = "This provider is ready to use. Optionally route requests through a proxy pool to bypass IP-based limits." }) {
   const [proxyPools, setProxyPools] = useState([]);
   const [proxyPoolId, setProxyPoolId] = useState(NONE_PROXY_POOL_VALUE);
   const [rotateStrategy, setRotateStrategy] = useState("none");
@@ -83,8 +83,8 @@ export default function NoAuthProxyCard({ providerId }) {
           <span className="material-symbols-outlined text-[20px]">lock_open</span>
         </div>
         <div className="flex-1">
-          <p className="text-sm font-medium">No authentication required</p>
-          <p className="text-xs text-text-muted">This provider is ready to use. Optionally route requests through a proxy pool to bypass IP-based limits.</p>
+          <p className="text-sm font-medium">{title}</p>
+          <p className="text-xs text-text-muted">{description}</p>
         </div>
         {savedFlash && <Badge variant="success" size="sm">Saved</Badge>}
       </div>
@@ -131,4 +131,6 @@ export default function NoAuthProxyCard({ providerId }) {
 
 NoAuthProxyCard.propTypes = {
   providerId: PropTypes.string.isRequired,
+  title: PropTypes.string,
+  description: PropTypes.string,
 };

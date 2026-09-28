@@ -7,7 +7,10 @@ import {
   requestDeviceCode,
   pollForToken
 } from "@/lib/oauth/providers";
-import { createProviderConnection } from "@/models";
+import { createProviderConnection, updateProviderConnection } from "@/models";
+import { getSettings, getProxyPools } from "@/lib/localDb";
+import { resolveConnectionProxyConfig, pickProxyPoolId } from "@/lib/network/connectionProxy";
+import { resolveProviderId } from "@/shared/constants/providers.js";
 import { readDesktopPassToken } from "open-sse/shared/mimoAccount.js";
 import {
   startCodexProxy,
@@ -481,12 +484,43 @@ export async function POST(request, { params }) {
       // Exchange code for tokens (meta carries provider-specific params, e.g. gitlab clientId/baseUrl).
       // systemId (Zed) is merged into meta so the login attempt's own id is
       // used instead of a freshly prepared one. Ignored by other providers.
+      // Antigravity/gemini-cli reach Google endpoints during the exchange itself,
+      // so the pool must resolve before a connection row exists to bind one to.
+      // Same store the noAuth free providers use: settings.providerStrategies
+      // (NoAuthProxyCard on the provider page). Alias-safe lookup ("ag" etc.).
+      let proxyPoolId = null;
+      try {
+        const settingsData = await getSettings();
+        const override = (settingsData.providerStrategies || {})[resolveProviderId(provider)] || {};
+        if (override.rotateStrategy && override.rotateStrategy !== "none") {
+          const pools = await getProxyPools({ isActive: true });
+          proxyPoolId = pickProxyPoolId(pools.filter(p => p.proxyUrl).map(p => p.id), override.rotateStrategy, provider) || null;
+        } else {
+          proxyPoolId = override.proxyPoolId || null;
+        }
+      } catch {
+        proxyPoolId = null;
+      }
+
+      let proxyOptions = null;
+      if (proxyPoolId) {
+        const cfg = await resolveConnectionProxyConfig({ proxyPoolId });
+        proxyOptions = {
+          connectionProxyEnabled: cfg.connectionProxyEnabled === true,
+          connectionProxyUrl: cfg.connectionProxyUrl || "",
+          connectionNoProxy: cfg.connectionNoProxy || "",
+          vercelRelayUrl: cfg.vercelRelayUrl || "",
+          strictProxy: cfg.strictProxy === true,
+        };
+      }
+
       const tokenData = await exchangeTokens(provider, code, redirectUri, codeVerifier, state, {
         ...(meta || {}),
         ...(systemId ? { systemId } : {}),
         // CodeArts: the login attempt's ticket_id, needed only for the
         // secret-callback variant of its loopback flow.
         ...(ticketId ? { ticketId } : {}),
+        ...(proxyOptions ? { proxyOptions } : {}),
       });
 
       // Save to database
@@ -499,6 +533,20 @@ export async function POST(request, { params }) {
           : null,
         testStatus: "active",
       });
+
+      // Persist the pool so inference after this connect uses it too. Merged onto
+      // the stored row because createProviderConnection replaces (not extends)
+      // providerSpecificData when an existing connection is re-authenticated.
+      // Tokens are already saved at this point — never fail the connect over this.
+      if (proxyPoolId && connection?.id) {
+        try {
+          await updateProviderConnection(connection.id, {
+            providerSpecificData: { ...(connection.providerSpecificData || {}), proxyPoolId },
+          });
+        } catch (e) {
+          console.log("Failed to persist proxy pool on new connection:", e?.message);
+        }
+      }
 
       return NextResponse.json({ 
         success: true, 

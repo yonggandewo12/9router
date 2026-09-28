@@ -1,4 +1,5 @@
 import { ANTIGRAVITY_CONFIG, getOAuthClientMetadata } from "../constants/oauth.js";
+import { proxyAwareFetch } from "open-sse/utils/proxyFetch.js";
 
 const antigravity = {
   config: ANTIGRAVITY_CONFIG,
@@ -15,8 +16,8 @@ const antigravity = {
     });
     return `${config.authorizeUrl}?${params.toString()}`;
   },
-  exchangeToken: async (config, code, redirectUri) => {
-    const response = await fetch(config.tokenUrl, {
+  exchangeToken: async (config, code, redirectUri, codeVerifier, state, meta = {}) => {
+    const response = await proxyAwareFetch(config.tokenUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
@@ -29,7 +30,7 @@ const antigravity = {
         code: code,
         redirect_uri: redirectUri,
       }),
-    });
+    }, meta.proxyOptions || null);
 
     if (!response.ok) {
       const error = await response.text();
@@ -38,7 +39,8 @@ const antigravity = {
 
     return await response.json();
   },
-  postExchange: async (tokens) => {
+  postExchange: async (tokens, meta = {}) => {
+    const proxyOptions = meta.proxyOptions || null;
     const loadHeaders = {
       "Authorization": `Bearer ${tokens.access_token}`,
       "Content-Type": "application/json",
@@ -48,23 +50,23 @@ const antigravity = {
     const metadata = getOAuthClientMetadata();
 
     // Fetch user info
-    const userInfoRes = await fetch(`${ANTIGRAVITY_CONFIG.userInfoUrl}?alt=json`, {
+    const userInfoRes = await proxyAwareFetch(`${ANTIGRAVITY_CONFIG.userInfoUrl}?alt=json`, {
       headers: {
         Authorization: `Bearer ${tokens.access_token}`,
         "x-request-source": "local",
       },
-    });
+    }, proxyOptions);
     const userInfo = userInfoRes.ok ? await userInfoRes.json() : {};
 
     // Load Code Assist to get project ID and tier
     let projectId = "";
     let tierId = "legacy-tier";
     try {
-      const loadRes = await fetch(ANTIGRAVITY_CONFIG.loadCodeAssistEndpoint, {
+      const loadRes = await proxyAwareFetch(ANTIGRAVITY_CONFIG.loadCodeAssistEndpoint, {
         method: "POST",
         headers: loadHeaders,
         body: JSON.stringify({ metadata }),
-      });
+      }, proxyOptions);
       if (loadRes.ok) {
         const data = await loadRes.json();
         projectId = data.cloudaicompanionProject?.id || data.cloudaicompanionProject || "";
@@ -86,11 +88,11 @@ const antigravity = {
       const doOnboard = async () => {
         for (let i = 0; i < 10; i++) {
           try {
-            const onboardRes = await fetch(ANTIGRAVITY_CONFIG.onboardUserEndpoint, {
+            const onboardRes = await proxyAwareFetch(ANTIGRAVITY_CONFIG.onboardUserEndpoint, {
               method: "POST",
               headers: loadHeaders,
               body: JSON.stringify({ tierId, metadata }),
-            });
+            }, proxyOptions);
             if (onboardRes.ok) {
               const result = await onboardRes.json();
               if (result.done === true) break;

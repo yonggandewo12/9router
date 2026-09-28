@@ -143,7 +143,7 @@ export async function exchangeTokens(providerName, code, redirectUri, codeVerifi
 
   let extra = null;
   if (provider.postExchange) {
-    extra = await provider.postExchange(tokens);
+    extra = await provider.postExchange(tokens, meta || {});
   }
 
   return provider.mapTokens(tokens, extra);

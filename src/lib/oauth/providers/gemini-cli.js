@@ -1,4 +1,5 @@
 import { GEMINI_CONFIG, getOAuthClientMetadata } from "../constants/oauth.js";
+import { proxyAwareFetch } from "open-sse/utils/proxyFetch.js";
 
 const geminiCli = {
   config: GEMINI_CONFIG,
@@ -15,8 +16,8 @@ const geminiCli = {
     });
     return `${config.authorizeUrl}?${params.toString()}`;
   },
-  exchangeToken: async (config, code, redirectUri) => {
-    const response = await fetch(config.tokenUrl, {
+  exchangeToken: async (config, code, redirectUri, codeVerifier, state, meta = {}) => {
+    const response = await proxyAwareFetch(config.tokenUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
@@ -29,7 +30,7 @@ const geminiCli = {
         code: code,
         redirect_uri: redirectUri,
       }),
-    });
+    }, meta.proxyOptions || null);
 
     if (!response.ok) {
       const error = await response.text();
@@ -38,17 +39,18 @@ const geminiCli = {
 
     return await response.json();
   },
-  postExchange: async (tokens) => {
+  postExchange: async (tokens, meta = {}) => {
+    const proxyOptions = meta.proxyOptions || null;
     // Fetch user info
-    const userInfoRes = await fetch(`${GEMINI_CONFIG.userInfoUrl}?alt=json`, {
+    const userInfoRes = await proxyAwareFetch(`${GEMINI_CONFIG.userInfoUrl}?alt=json`, {
       headers: { Authorization: `Bearer ${tokens.access_token}` },
-    });
+    }, proxyOptions);
     const userInfo = userInfoRes.ok ? await userInfoRes.json() : {};
 
     // Fetch project ID
     let projectId = "";
     try {
-      const projectRes = await fetch(
+      const projectRes = await proxyAwareFetch(
         "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist",
         {
           method: "POST",
@@ -60,7 +62,8 @@ const geminiCli = {
             metadata: getOAuthClientMetadata(),
             mode: 1,
           }),
-        }
+        },
+        proxyOptions
       );
       if (projectRes.ok) {
         const data = await projectRes.json();
