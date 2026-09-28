@@ -23,6 +23,13 @@ export const FILTERS = {
       .filter((m) => (m.id?.endsWith("-free") || KNOWN_FREE_OPENCODE_MODELS.includes(m.id)) && !DEAD_FREE_OPENCODE_MODELS.has(m.id))
       .map((m) => ({ id: m.id, name: m.id })),
 
+  // Go subscription catalogue — every /models id is selectable; the endpoint lane
+  // per model is resolved by the family regex (see open-sse/providers/models/helpers.js)
+  "opencode-go": (models) =>
+    (Array.isArray(models) ? models : [])
+      .filter((m) => typeof m?.id === "string")
+      .map((m) => ({ id: m.id, name: m.id })),
+
   "airforce-free": (models) =>
     (Array.isArray(models) ? models : [])
       .filter((m) => (m.tier === "free" || m.id?.endsWith(":free")) && m.supports_chat === true && (!m.media_type || m.media_type === "chat" || m.media_type === "text"))
