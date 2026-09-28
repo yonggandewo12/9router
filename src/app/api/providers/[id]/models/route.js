@@ -74,13 +74,21 @@ const appendCodexReviewModels = (models) => models.flatMap((model) => {
 
 const parseCodexModels = (data) => appendCodexReviewModels(parseOpenAIStyleModels(data));
 
-const createOpenAIModelsConfig = (url) => ({
+// providerPrefix emits the canonical "<providerId>/<id>" the chat router expects,
+// like the Qoder resolver; bare ids would parse as aliases and fall back to "openai".
+const createOpenAIModelsConfig = (url, providerPrefix = null) => ({
   url,
   method: "GET",
   headers: { "Content-Type": "application/json" },
   authHeader: "Authorization",
   authPrefix: "Bearer ",
-  parseResponse: parseOpenAIStyleModels
+  parseResponse: (data) => parseOpenAIStyleModels(data).map((model) => {
+    const id = model?.id;
+    if (!id) return model;
+    return providerPrefix
+      ? { ...model, id: `${providerPrefix}/${id}`, name: model.name || model.display_name || id }
+      : model;
+  })
 });
 
 const getStaticProviderModels = (providerId) =>
@@ -284,6 +292,11 @@ const PROVIDER_MODELS_CONFIG = {
   byteplus: createOpenAIModelsConfig("https://ark.ap-southeast.bytepluses.com/api/coding/v3/models"),
 
   // OpenAI-compatible API key providers
+  // Live-verified 2026-09-28: /v1/models only accepts `Authorization: Bearer`
+  // (x-api-key alone is 401 1004), and a CN key is rejected by api.minimax.io
+  // (401 2049) — the two regions keep separate catalogs.
+  minimax: createOpenAIModelsConfig("https://api.minimax.io/v1/models", "minimax"),
+  "minimax-cn": createOpenAIModelsConfig("https://api.minimaxi.com/v1/models", "minimax-cn"),
   deepseek: createOpenAIModelsConfig("https://api.deepseek.com/models"),
   groq: createOpenAIModelsConfig("https://api.groq.com/openai/v1/models"),
   xai: createOpenAIModelsConfig("https://api.x.ai/v1/models"),

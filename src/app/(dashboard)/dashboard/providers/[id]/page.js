@@ -31,14 +31,17 @@ const AUTO_PING_SETTINGS_KEYS = {
   codex: "codexAutoPing",
 };
 
-// Providers whose real catalog lives in the connected account (Qoder publishes
-// per-plan models, Trae Enterprise per tenant), so the registry list is only a
-// fallback and one click imports the live catalog.
+// Providers whose real catalog is worth reading off the connected account (Qoder
+// publishes per-plan models, Trae Enterprise per tenant, MiniMax lists the
+// -highspeed tiers only upstream), so the registry list is only a fallback and
+// one click imports the live catalog.
 const LIVE_CATALOG_IMPORT_PROVIDERS = {
   qoder: "Fetch Qoder Models",
   "qoder-cn": "Fetch Qoder Models",
   "trae-enterprise": "Fetch Trae Enterprise Models",
   codearts: "Fetch CodeArts Models",
+  minimax: "Fetch MiniMax Models",
+  "minimax-cn": "Fetch MiniMax Models",
 };
 
 function sleep(ms) {
@@ -618,6 +621,9 @@ export default function ProviderDetailPage() {
       }
 
       let importedCount = 0;
+      // Built-in registry ids are already usable — importing them again would
+      // only write hidden duplicate custom rows.
+      const builtInIds = new Set(staticModels.map((m) => m.id));
       for (const model of models) {
         const modelId = model.id || model.name;
         if (!modelId) continue;
@@ -628,7 +634,8 @@ export default function ProviderDetailPage() {
         const cleanModelId = modelId.startsWith(prefix) ? modelId.slice(prefix.length) : modelId;
         const alreadyExists = customModels.some(
           (entry) => entry.providerAlias === providerStorageAlias && entry.id === cleanModelId && (entry.kind || entry.type || "llm") === "llm"
-        ) || Object.values(modelAliases).includes(`${providerStorageAlias}/${cleanModelId}`);
+        ) || Object.values(modelAliases).includes(`${providerStorageAlias}/${cleanModelId}`)
+          || builtInIds.has(cleanModelId);
         if (alreadyExists) {
           continue;
         }
@@ -1257,7 +1264,7 @@ export default function ProviderDetailPage() {
           Add Model
         </button>
 
-        {/* Import the account's live model catalog — Qoder / Qoder CN / Trae Enterprise */}
+        {/* Import the account's live model catalog — see LIVE_CATALOG_IMPORT_PROVIDERS */}
         {LIVE_CATALOG_IMPORT_PROVIDERS[providerId] && connections.some((conn) => conn.isActive !== false) && (
           <button
             onClick={handleImportLiveModels}

@@ -54,11 +54,17 @@ export default {
       auth: { combined: true, header: "x-api-key", scheme: "raw" },
     },
   ],
+  // Mirrors GET /v1/models on api.minimaxi.com (checked 2026-09-28). The
+  // -highspeed tiers were missing here and only reachable via the live catalog.
   models: [
     { id: "MiniMax-M3", name: "MiniMax M3", targetFormat: "claude" },
     { id: "MiniMax-M2.7", name: "MiniMax M2.7" },
+    { id: "MiniMax-M2.7-highspeed", name: "MiniMax M2.7 Highspeed" },
     { id: "MiniMax-M2.5", name: "MiniMax M2.5" },
+    { id: "MiniMax-M2.5-highspeed", name: "MiniMax M2.5 Highspeed" },
     { id: "MiniMax-M2.1", name: "MiniMax M2.1" },
+    { id: "MiniMax-M2.1-highspeed", name: "MiniMax M2.1 Highspeed" },
+    { id: "MiniMax-M2", name: "MiniMax M2" },
     { id: "speech-2.8-hd", name: "Speech 2.8 HD", kind: "tts" },
     { id: "speech-2.8-turbo", name: "Speech 2.8 Turbo", kind: "tts" },
     { id: "speech-2.6-hd", name: "Speech 2.6 HD", kind: "tts" },
