@@ -5,6 +5,7 @@
 import { getCapabilitiesForModel } from "../../providers/capabilities.js";
 import { getThinkingLevels } from "../../providers/thinkingLevels.js";
 import { PROVIDERS } from "../../providers/index.js";
+import { FORMATS } from "../formats.js";
 import { LEVEL_TO_BUDGET, budgetToLevel, effortToBudget, effortToThinkingLevel } from "./thinking.js";
 
 // Map a target wire-format to its native thinking format (when capability has none).
@@ -374,9 +375,21 @@ export function applyThinking(targetFormat, model, body, provider = null, intent
     stripAll(body);
     return body;
   }
+  // MiniMax /v1/chat/completions streams reasoning inline in delta.content as
+  // `<think>…` unless the request asks for a split; live-captured 2026-09-28:
+  // with reasoning_split the same call returns reasoning_content +
+  // reasoning_details[] and a clean content field. The field is accepted (and
+  // inert) on the Claude endpoint, so scope it to the OpenAI wire.
+  const fmt = resolveFormat(targetFormat, cleanModel, provider);
+  if (fmt === "minimax") {
+    if (targetFormat === FORMATS.OPENAI) body.reasoning_split = true;
+    // A client that expresses no intent gets no `thinking` field, and MiniMax
+    // M3 then answers with its reasoning inside text_delta (3/3 live samples).
+    // Ask for the thinking channel explicitly; M2.x already thinks by default.
+    if (!cfg) body.thinking = { type: "adaptive" };
+  }
   if (!cfg) return body;
 
-  const fmt = resolveFormat(targetFormat, cleanModel, provider);
   const supportedLevels = getThinkingLevels(provider, cleanModel);
   // Anthropic's `display` (summarized | omitted) decides whether thinking text
   // comes back at all; keep what the client asked for instead of resetting it.

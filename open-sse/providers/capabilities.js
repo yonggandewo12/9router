@@ -387,9 +387,13 @@ export const PATTERN_CAPABILITIES = [
   { pattern: "*deepseek-chat*", caps: { contextWindow: 128000 } },
   { pattern: "*deepseek*",      caps: { reasoning: true, thinkingFormat: "deepseek", contextWindow: 128000 } },
 
-  // ── MiniMax (M3 = adaptive; M2.x cannot disable) ─────────────────
+  // ── MiniMax (no model can truly turn reasoning off — see M3 note below) ──
   { pattern: "*minimax*image*", caps: { imageOutput: true } },
-  { pattern: "*minimax-m3*",    caps: { vision: true, reasoning: true, thinkingFormat: "minimax", contextWindow: 1000000, maxOutput: 131072 } },
+  // M3 "disabled" is not a real off switch: live-captured 2026-09-28 on
+  // api.minimaxi.com/anthropic/v1/messages, thinking:{type:"disabled"} (and an
+  // absent thinking field) returns zero thinking blocks and the whole step-by-step
+  // reasoning inside text_delta. Clamp like M2.x so reasoning stays in its block.
+  { pattern: "*minimax-m3*",    caps: { vision: true, reasoning: true, thinkingFormat: "minimax", thinkingCanDisable: false, contextWindow: 1000000, maxOutput: 131072 } },
   { pattern: "*minimax-m2.7*",  caps: { vision: true, reasoning: true, thinkingFormat: "minimax", thinkingCanDisable: false, contextWindow: 204800, maxOutput: 131072 } },
   { pattern: "*minimax-m2.5*",  caps: { vision: true, reasoning: true, thinkingFormat: "minimax", thinkingCanDisable: false, contextWindow: 204800, maxOutput: 131072 } },
   { pattern: "*minimax*",       caps: { reasoning: true, thinkingFormat: "minimax", thinkingCanDisable: false, contextWindow: 200000, maxOutput: 131072 } },
