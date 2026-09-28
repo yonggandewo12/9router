@@ -121,7 +121,9 @@ describe("decloakStreamChunk", () => {
 
   it("tolerates null chunks and missing maps (stream flush path)", () => {
     expect(decloakStreamChunk(null, toolNameMap)).toBeNull();
-    expect(decloakStreamChunk(toolUseStart("run_code" + CLAUDE_TOOL_SUFFIX), null).content_block.name).toBe("run_code" + CLAUDE_TOOL_SUFFIX);
-    expect(decloakStreamChunk(toolUseStart("run_code" + CLAUDE_TOOL_SUFFIX), new Map()).content_block.name).toBe("run_code" + CLAUDE_TOOL_SUFFIX);
+    // With no map the name is still recovered from the suffix itself (same-format
+    // streaming passthrough never sees the request-side map).
+    expect(decloakStreamChunk(toolUseStart("run_code" + CLAUDE_TOOL_SUFFIX), null).content_block.name).toBe("run_code");
+    expect(decloakStreamChunk(toolUseStart("run_code" + CLAUDE_TOOL_SUFFIX), new Map()).content_block.name).toBe("run_code");
   });
 });

@@ -46,13 +46,15 @@ describe("AUDIT-002: API key masking", () => {
     expect(livePath.length).toBeGreaterThanOrEqual(1);
   });
 
-  it("byApiKey object keys should use masked key, not raw key", () => {
-    const source = readSrc("src/lib/db/repos/usageRepo.js");
-    // The 24h path should use apiKeyMasked in the akKey template
-    expect(source).toContain("${apiKeyMasked}|${r.model}|${r.provider");
-    // Should NOT use raw r.apiKey in the key
-    expect(source).not.toContain("${r.apiKey}|${r.model}|${r.provider");
-  });
+  // NOTE: byApiKey is intentionally keyed by the FULL api key. That key is the join
+  // key shared by the daily rollup (aggregateEntryToDay), the lastUsed overlay and
+  // the live 24h path — masking it collapsed every key minted from the same machine
+  // id (team keys share the prefix) into a single bucket, mis-attributing usage
+  // between holders (upstream 4a57df8b). The display-safe identity travels on the
+  // value as apiKeyMasked / keyName (asserted above), and the dashboard reads only
+  // those. Residual: the raw key still appears as the response object key of
+  // /api/usage/{stats,stream,history} — accepted risk, do not re-add the masked-key
+  // template assertion.
 });
 
 // ============================================================
