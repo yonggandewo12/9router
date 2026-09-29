@@ -76,7 +76,7 @@ const parseCodexModels = (data) => appendCodexReviewModels(parseOpenAIStyleModel
 
 // providerPrefix emits the canonical "<providerId>/<id>" the chat router expects,
 // like the Qoder resolver; bare ids would parse as aliases and fall back to "openai".
-const createOpenAIModelsConfig = (url, providerPrefix = null) => ({
+export const createOpenAIModelsConfig = (url, providerPrefix = null) => ({
   url,
   method: "GET",
   headers: { "Content-Type": "application/json" },
@@ -181,7 +181,7 @@ function buildQoderModelsResolver(providerId) {
 }
 
 // Provider models endpoints configuration
-const PROVIDER_MODELS_CONFIG = {
+export const PROVIDER_MODELS_CONFIG = {
   claude: {
     url: "https://api.anthropic.com/v1/models",
     method: "GET",

@@ -1,3 +1,59 @@
+# v0.5.98 (2026-09-28)
+
+## Features
+- **OAuth Proxy Pools**: Antigravity and Gemini CLI connect flows resolve the pool from `settings.providerStrategies` before a connection row exists — exchange, postExchange and the executor token refresh all run through `proxyAwareFetch`, and the picked pool is persisted onto the new connection.
+- **Upstream v0.5.91 merge**: Token Harbor provider, four aggregator providers (dahl/atria/agnes/bai), Claude streaming decloak with suffix-stripping fallback, Codex GPT-6 Sol/Luna + image aliases, OpenCode Go catalog, Gemini Live STT transport.
+
+## Fixes
+- **Registry**: duplicate import vars (p125/p126) had silently dropped trae-enterprise and codearts while registering tokenharbor/dahl twice; renamed to p131/p132 (126 entries / 126 unique ids).
+- **Proxy**: `strictProxy` now reaches runtime `proxyOptions` (auth.js + chatCore) — a strict pool fails hard instead of silently falling back to direct at inference/refresh time.
+- **Tests**: golden snapshots for the five new providers; decloak and codex-image tests aligned with implementations; `provider-priority-insert-cost` runs in a temp DATA_DIR (it leaked ~130 seed connections into the real DB per suite run); new `oauth-proxy-pool` suite locks the proxy threading.
+
+# v0.5.97 (2026-09-28)
+
+- CLI release bump (tag `cli-v0.5.97`); no functional changes beyond 0.5.96.
+
+# v0.5.96 (2026-09-28)
+
+## Features
+- **MiniMax**: one-click import of the account's live `/v1/models` catalog (regions keep separate catalogs; Bearer-only); built-in ids are skipped so no duplicate custom rows are written. `-highspeed` tiers + MiniMax-M2 added to the registry.
+
+## Fixes
+- **MiniMax M3**: "disabled" thinking is not a real off switch — clamp `thinkingCanDisable`, ask for the thinking channel when the client expresses no intent, and request `reasoning_split` on the OpenAI wire so reasoning stays in its block.
+- **CI**: dropped the GitBook pages pipeline from this fork.
+
+# v0.5.95 (2026-09-24)
+
+- **CI**: dropped the docker publish pipeline from this fork.
+
+# v0.5.94 (2026-09-24)
+
+- **OpenCode**: translate claude-client responses on non-streaming and no-id tool-call paths; removed a `resolveQoderLiveModels` duplicate introduced by the v0.5.86 merge.
+
+# v0.5.93 (2026-09-24)
+
+## Features
+- **Upstream v0.5.85–0.5.86 merge**: Xiaomi MiMo server-assisted desktop login with five account clusters and v2.6 models; Claude Opus 5.5 support.
+
+## Fixes
+- **Proxy pools**: lossless header forwarding for relay pools.
+
+# v0.5.92 (2026-09-24)
+
+- **OpenCode CLI**: session title via `--title`, NUL-safe argv passing, bounded spawn-error payloads.
+
+# v0.5.91 (2026-09-23)
+
+- **OpenCode CLI**: route transport egress through the connection proxy.
+
+# v0.5.90 (2026-09-22)
+
+- **CodeArts**: model-queue resend, `model_id` route keys, refresh proxy hardening.
+
+# v0.5.89 (2026-09-22)
+
+- **OpenCode CLI transport**: hardening pass — parts handling, idle detection, probes, `cmd.exe` stdin on Windows.
+
 # v0.5.88 (2026-09-22)
 
 ## Fixes
