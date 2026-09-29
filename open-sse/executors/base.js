@@ -160,7 +160,9 @@ export class BaseExecutor {
           continue;
         }
 
-        return { response, url, headers, transformedBody };
+        // bodyStr rides along so executors that need the wire size (e.g. deveco's
+        // overflow gate) don't re-stringify a multi-MB body on every request.
+        return { response, url, headers, transformedBody, bodyStr };
       } catch (error) {
         clearTimeout(connectTimer);
         lastError = error;

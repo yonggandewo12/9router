@@ -1,6 +1,6 @@
 import http from "http";
 import { URL } from "url";
-import { CODEARTS_CONFIG, CODEX_CONFIG, WINDSURF_CONFIG, ZED_HOSTED_CONFIG } from "../constants/oauth.js";
+import { CODEARTS_CONFIG, CODEX_CONFIG, DEVECO_CONFIG, WINDSURF_CONFIG, ZED_HOSTED_CONFIG } from "../constants/oauth.js";
 import { codeartsCallbackUrl } from "open-sse/shared/codearts/auth.js";
 
 // Loopback origin guard for local callback proxies.
@@ -1163,4 +1163,205 @@ export function stopCodeartsProxy() {
     codeartsSession.codeVerifier = null;
     codeartsSession.ticketId = null;
   }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// DevEco Code (华为) loopback callback proxy — mirrors the official CLI's own
+// 127.0.0.1 login server: the authorize URL carries `port=`, the portal's page
+// then completes the loopback on THAT port, and the echoed `code` is bound to
+// the pending login (CSRF). The browser is sent back to the portal's
+// loginSuccess/loginFailed page, exactly like the CLI does.
+// Callback (live-captured): POST /callback with code/tempToken/siteId in the
+// x-www-form-urlencoded body; a query-string GET is kept as a tolerant alias.
+// ───────────────────────────────────────────────────────────────────────────
+
+let devecoProxyServer = null;
+let devecoProxyTimeout = null;
+let devecoProxyPort = null;
+// Singleton pending session — the callback carries no server-side secret beyond
+// the loginState echo, so one flow at a time (same constraint as CodeArts).
+let devecoSession = null;
+
+export function registerDevecoSession({ state }) {
+  if (!state) return false;
+  devecoSession = { state, status: "pending", createdAt: Date.now() };
+  return true;
+}
+
+export function getDevecoSessionStatus(state) {
+  if (!devecoSession) return null;
+  if (state && devecoSession.state !== state) return null;
+  return {
+    state: devecoSession.state,
+    status: devecoSession.status,
+    connectionId: devecoSession.connectionId || null,
+    email: devecoSession.email || null,
+    error: devecoSession.error || null,
+  };
+}
+
+export function clearDevecoSession(state) {
+  if (!state || (devecoSession && devecoSession.state === state)) devecoSession = null;
+}
+
+// The portal POSTs the callback from its own (Huawei) page, so Origin is always
+// set. Accept Huawei domains + loopback + a bare navigation (no Origin); reject
+// anything else. The real CSRF defense remains the `code`↔loginState binding.
+function isDevecoCallbackOrigin(origin) {
+  if (!origin) return true;
+  if (isLoopbackOrigin(origin)) return true;
+  try {
+    const host = new URL(origin).hostname.toLowerCase();
+    return host === "huawei.com" || host.endsWith(".huawei.com");
+  } catch {
+    return false;
+  }
+}
+
+function devecoPortalRedirect(success) {
+  const path = success ? DEVECO_CONFIG.successRedirectPath : DEVECO_CONFIG.failedRedirectPath;
+  return `${DEVECO_CONFIG.baseUrl}/${path}`;
+}
+
+export function startDevecoProxy() {
+  return new Promise((resolve) => {
+    if (devecoProxyServer) {
+      if (devecoProxyTimeout) clearTimeout(devecoProxyTimeout);
+      devecoProxyTimeout = setTimeout(() => {
+        console.log("[DevEco proxy] timeout, stopping");
+        stopDevecoProxy();
+      }, DEVECO_CONFIG.oauthTimeoutMs);
+      resolve({ success: true, port: devecoProxyPort, callbackUrl: `http://127.0.0.1:${devecoProxyPort}${DEVECO_CONFIG.callbackPath}` });
+      return;
+    }
+    const server = http.createServer(async (req, res) => {
+      const url = new URL(req.url, "http://localhost");
+      // Presence log first: a callback that dies on the path guard must still show up.
+      console.log("[DevEco proxy]", req.method, url.pathname);
+      // The portal lands on /callback; "/" is kept as a tolerant alias.
+      if (url.pathname !== DEVECO_CONFIG.callbackPath && url.pathname !== "/") {
+        res.writeHead(404);
+        res.end("Not found");
+        return;
+      }
+      // The HUAWEI portal completes the loopback with a form **POST** — code /
+      // tempToken / siteId ride in the request body, not the query string (the
+      // official server reads the POST body and prefers it over the query).
+      let qp = url.searchParams;
+      if (req.method === "POST") {
+        let raw = "";
+        try {
+          req.setEncoding("utf8");
+          for await (const chunk of req) {
+            raw += chunk;
+            // Answer before killing the socket — a response written to a
+            // destroyed request would throw asynchronously.
+            if (raw.length > 65536) {
+              res.writeHead(413, { "Content-Type": "text/plain" });
+              res.end("Payload too large");
+              req.destroy();
+              return;
+            }
+          }
+        } catch { raw = ""; }
+        if (raw.trim()) {
+          const bodyParams = new URLSearchParams(raw.trim());
+          if ([...bodyParams.keys()].length > 0) qp = bodyParams;
+        }
+      }
+      console.log("[DevEco proxy] params", JSON.stringify({
+        hasTempToken: qp.has("tempToken"), hasCode: qp.has("code"), siteId: qp.get("siteId") || null, origin: req.headers.origin || null,
+      }));
+      if (!qp.has("tempToken") && !qp.has("access_denied") && qp.get("quit") !== "true") {
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(renderCodexResultPage(false, "Waiting for HUAWEI ID sign-in — this request carried no login data."));
+        return;
+      }
+      // CSRF model: the portal completes the loopback with a cross-site form
+      // POST, so an Origin is ALWAYS present (unlike a GET redirect) — a
+      // loopback-only Origin guard would reject every real login, which is what
+      // the first live attempt proved. The binding check is the echoed `code`
+      // against the pending loginState (exactly what the official server does);
+      // the Origin is only narrowed to Huawei's own domains as defense-in-depth.
+      if (!isDevecoCallbackOrigin(req.headers.origin)) {
+        res.writeHead(403, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(renderCodexResultPage(false, "Foreign-origin callback rejected"));
+        return;
+      }
+      const session = devecoSession;
+      if (!session) {
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(renderCodexResultPage(false, "No active DevEco login session"));
+        return;
+      }
+      if (session.status !== "pending") {
+        res.writeHead(302, { Location: devecoPortalRedirect(session.status === "done") });
+        res.end();
+        return;
+      }
+      // The CLI rejects a callback whose echoed `code` is not its pending
+      // loginState; same rule here.
+      if (!qp.has("code") || qp.get("code") !== session.state) {
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(renderCodexResultPage(false, "DevEco callback state mismatch"));
+        return;
+      }
+      if (qp.get("access_denied") === "true" || qp.get("quit") === "true") {
+        session.status = "error";
+        session.error = "Login cancelled by user";
+        res.writeHead(302, { Location: devecoPortalRedirect(false) });
+        res.end();
+        return;
+      }
+      try {
+        const { exchangeTokens } = await import("../providers.js");
+        const { createProviderConnection } = await import("@/models");
+        const rawCallback = `${url.pathname}?${qp.toString()}`;
+        const tokenData = await exchangeTokens("deveco", rawCallback, `http://127.0.0.1:${devecoProxyPort}${DEVECO_CONFIG.callbackPath}`, null, session.state);
+        const connection = await createProviderConnection({
+          provider: "deveco",
+          authType: "oauth",
+          ...tokenData,
+          expiresAt: tokenData.expiresIn
+            ? new Date(Date.now() + tokenData.expiresIn * 1000).toISOString()
+            : null,
+          testStatus: "active",
+        });
+        session.status = "done";
+        session.connectionId = connection.id;
+        session.email = connection.email;
+        res.writeHead(302, { Location: devecoPortalRedirect(true) });
+        res.end();
+        stopDevecoProxy();
+      } catch (err) {
+        session.status = "error";
+        session.error = err.message;
+        res.writeHead(302, { Location: devecoPortalRedirect(false) });
+        res.end();
+      }
+    });
+    server.listen(0, "127.0.0.1", () => {
+      devecoProxyServer = server;
+      devecoProxyPort = server.address().port;
+      devecoProxyTimeout = setTimeout(() => {
+        console.log("[DevEco proxy] timeout, stopping");
+        stopDevecoProxy();
+      }, DEVECO_CONFIG.oauthTimeoutMs);
+      console.log(`[DevEco proxy] listening on port ${devecoProxyPort}`);
+      resolve({ success: true, port: devecoProxyPort, callbackUrl: `http://127.0.0.1:${devecoProxyPort}${DEVECO_CONFIG.callbackPath}` });
+    });
+    server.on("error", (err) => {
+      console.log(`[DevEco proxy] listen error: ${err.message}`);
+      resolve({ success: false, reason: err.message });
+    });
+  });
+}
+
+export function stopDevecoProxy() {
+  console.log(`[DevEco proxy] stopping (port ${devecoProxyPort || "-"})`);
+  if (devecoProxyTimeout) { clearTimeout(devecoProxyTimeout); devecoProxyTimeout = null; }
+  if (devecoProxyServer) { devecoProxyServer.close(); devecoProxyServer = null; }
+  devecoProxyPort = null;
+  // The session record must outlive the listener (poll-status reads the result),
+  // but drop nothing else — DevEco holds no per-flow secret beyond the state.
 }

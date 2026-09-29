@@ -43,6 +43,11 @@ import {
   registerCodeartsSession,
   getCodeartsSessionStatus,
   clearCodeartsSession,
+  startDevecoProxy,
+  stopDevecoProxy,
+  registerDevecoSession,
+  getDevecoSessionStatus,
+  clearDevecoSession,
   startXiaomiMimoProxy,
   stopXiaomiMimoProxy,
   registerXiaomiMimoSession,
@@ -164,6 +169,10 @@ export async function GET(request, { params }) {
         const result = await startCodeartsProxy();
         return NextResponse.json(result);
       }
+      if (provider === "deveco") {
+        const result = await startDevecoProxy();
+        return NextResponse.json(result);
+      }
       if (provider === "zed") {
         // Prefer ZED_HOSTED_CONFIG.defaultNativeAppPort (58443) so the browser redirect
         // matches what Zed expects; falls back to a random port if it's busy.
@@ -175,7 +184,7 @@ export async function GET(request, { params }) {
         return NextResponse.json(result);
       }
       if (!["codex", "xai"].includes(provider)) {
-        return NextResponse.json({ error: "Proxy only supported for codex/xai/trae/windsurf/zed/codearts" }, { status: 400 });
+        return NextResponse.json({ error: "Proxy only supported for codex/xai/trae/windsurf/zed/codearts/deveco" }, { status: 400 });
       }
       const appPort = searchParams.get("app_port");
       if (!appPort) {
@@ -206,10 +215,11 @@ export async function GET(request, { params }) {
       else if (provider === "windsurf") session = getWindsurfSessionStatus(state);
       else if (provider === "zed") session = getZedSessionStatus(state);
       else if (provider === "codearts") session = getCodeartsSessionStatus(state);
+      else if (provider === "deveco") session = getDevecoSessionStatus(state);
       else if (provider === "xai") session = getXaiSessionStatus(state);
       else if (provider === "codex") session = getCodexSessionStatus(state);
       else if (provider === "xiaomi-mimo") session = getXiaomiMimoSessionStatus(state);
-      else return NextResponse.json({ error: "Poll only supported for codex/xai/trae/windsurf/zed/codearts/xiaomi-mimo" }, { status: 400 });
+      else return NextResponse.json({ error: "Poll only supported for codex/xai/trae/windsurf/zed/codearts/deveco/xiaomi-mimo" }, { status: 400 });
       if (!session) return NextResponse.json({ status: "unknown" });
       if (session.status === "done" || session.status === "error") {
         const payload = { ...session };
@@ -227,6 +237,7 @@ export async function GET(request, { params }) {
         else if (provider === "windsurf") clearWindsurfSession(state);
         else if (provider === "zed") clearZedSession(state);
         else if (provider === "codearts") clearCodeartsSession(state);
+        else if (provider === "deveco") clearDevecoSession(state);
         else if (provider === "xai") clearXaiSession(state);
         else clearCodexSession(state);
         return NextResponse.json(payload);
@@ -239,10 +250,11 @@ export async function GET(request, { params }) {
       else if (provider === "windsurf") stopWindsurfProxy();
       else if (provider === "zed") stopZedProxy();
       else if (provider === "codearts") stopCodeartsProxy();
+      else if (provider === "deveco") stopDevecoProxy();
       else if (provider === "xai") stopXaiProxy();
       else if (provider === "codex") stopCodexProxy();
       else if (provider === "xiaomi-mimo") stopXiaomiMimoProxy();
-      else return NextResponse.json({ error: "Proxy only supported for codex/xai/trae/windsurf/zed/codearts/xiaomi-mimo" }, { status: 400 });
+      else return NextResponse.json({ error: "Proxy only supported for codex/xai/trae/windsurf/zed/codearts/deveco/xiaomi-mimo" }, { status: 400 });
       return NextResponse.json({ success: true });
     }
 
@@ -332,7 +344,8 @@ export async function POST(request, { params }) {
       else if (provider === "windsurf") ok = registerWindsurfSession({ state });
       else if (provider === "zed") ok = registerZedSession({ state, codeVerifier: body?.codeVerifier, systemId: body?.systemId });
       else if (provider === "codearts") ok = registerCodeartsSession({ state, codeVerifier: body?.codeVerifier, ticketId: body?.ticketId });
-      else return NextResponse.json({ error: "register-session only supported for trae/windsurf/zed/codearts" }, { status: 400 });
+      else if (provider === "deveco") ok = registerDevecoSession({ state });
+      else return NextResponse.json({ error: "register-session only supported for trae/windsurf/zed/codearts/deveco" }, { status: 400 });
       return NextResponse.json({ success: ok });
     }
 

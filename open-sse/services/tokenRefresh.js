@@ -20,6 +20,7 @@ import {
   classifyOAuthRefreshError,
 } from "./tokenRefresh/providers.js";
 import { refreshCodeartsFromCredentials } from "../shared/codearts/auth.js";
+import { refreshDevecoFromCredentials } from "../shared/deveco/auth.js";
 
 // Re-export all provider refresh functions (preserves public API for all consumers)
 export {
@@ -152,6 +153,15 @@ const REFRESH_HANDLERS = {
   // refresh POST rides the connection proxy when one is configured (same field
   // mapping chatCore builds for the request path).
   codearts: (c, log) => refreshCodeartsFromCredentials(c, {
+    log,
+    proxyOptions: {
+      connectionProxyEnabled: c?.providerSpecificData?.connectionProxyEnabled === true,
+      connectionProxyUrl: c?.providerSpecificData?.connectionProxyUrl || "",
+      connectionNoProxy: c?.providerSpecificData?.connectionNoProxy || "",
+      vercelRelayUrl: c?.providerSpecificData?.vercelRelayUrl || "",
+    },
+  }),
+  deveco: (c, log) => refreshDevecoFromCredentials(c, {
     log,
     proxyOptions: {
       connectionProxyEnabled: c?.providerSpecificData?.connectionProxyEnabled === true,

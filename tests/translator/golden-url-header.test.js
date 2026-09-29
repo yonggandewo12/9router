@@ -21,6 +21,10 @@ const SPECIALIZED = new Set([
   "codex", "cursor", "vertex", "vertex-partner", "opencode",
   "opencode-go", "grok-web", "perplexity-web", "ollama-local", "commandcode",
   "xiaomi-tokenplan",
+  // DevEco Code: pins a session-stable Chat-Id and rebuilds the gateway's
+  // 200-with-error-body auth refusals into real 401s — DefaultExecutor's
+  // golden headers would snapshot the wrong contract.
+  "deveco",
   // Signs every request with a Huawei SDK-HMAC-SHA256 signature instead of
   // carrying a bearer key — locking it here would freeze DefaultExecutor's
   // output and call it the contract. Locked in tests/unit/codearts.test.js.

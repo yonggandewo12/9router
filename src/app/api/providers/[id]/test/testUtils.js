@@ -5,6 +5,7 @@ import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider } from "@/sha
 import { getDefaultModel } from "open-sse/config/providerModels.js";
 import { traeEnterpriseConfig } from "open-sse/shared/trae/enterprise.js";
 import { fetchCodeartsCurrentUser } from "open-sse/shared/codearts/api.js";
+import { refreshDevecoFromCredentials } from "open-sse/shared/deveco/auth.js";
 import { resolveOllamaLocalHost, PROVIDERS } from "open-sse/config/providers.js";
 import { CODEX_CLI_VERSION } from "open-sse/config/appConstants.js";
 import { isOpenCodeCliAvailable, runOpenCodeCli } from "open-sse/executors/opencode-cli.js";
@@ -99,6 +100,10 @@ const OAUTH_TEST_CONFIG = {
   // signature, which the generic probe cannot express — see the codearts branch
   // in testOAuthConnection.
   codearts: { refreshable: true },
+  // DevEco's MaaS gateway answers a dead Bearer with HTTP 200 + in-band
+  // errorCode:4016, so no status-code probe can classify it — see the deveco
+  // branch in testOAuthConnection (the 30-day jwtToken is the real credential).
+  deveco: { refreshable: true },
   kimi: { checkExpiry: true, refreshable: true },
   "kimi-coding": { checkExpiry: true, refreshable: true },
   cursor: { tokenExists: true },
@@ -351,6 +356,17 @@ async function testOAuthConnection(connection, effectiveProxy = null) {
   // Cursor uses protobuf API - can only verify token exists, not test endpoint
   if (config.tokenExists) {
     return { valid: true, error: null, refreshed: false, newTokens: null };
+  }
+
+  // DevEco: prove the stored 30-day jwtToken against the endpoint that minted
+  // it (a refresh call). A patch means the connection is live AND the short-lived
+  // accessToken has just been rotated; error/null means dead — reconnect.
+  if (connection.provider === "deveco") {
+    const patch = await refreshDevecoFromCredentials(connection, { proxyOptions: effectiveProxy });
+    if (patch?.accessToken && !patch.error) {
+      return { valid: true, error: null, refreshed: true, newTokens: patch };
+    }
+    return { valid: false, error: patch?.message || "DevEco token rejected — reconnect the account", refreshed: false };
   }
 
   let accessToken = connection.accessToken;

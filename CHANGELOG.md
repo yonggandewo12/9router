@@ -1,3 +1,16 @@
+# v0.6.0 (2026-09-29)
+
+## Features
+- **DevEco Code (华为)**: new OAuth provider `deveco` (alias `dv`) — HUAWEI ID browser login reproduced (loopback `POST /callback` form-body → tempToken → 30-day jwtToken → 30-min accessToken), MaaS gateway served by a dedicated `DevEcoExecutor` (OpenAI SSE, session-stable `Chat-Id`, 200-with-errorBody auth refusals rebuilt into real 401s so refresh-and-retry fires, `stream:false`/bare-`tool_choice` traps guarded). Free unlimited GLM-5.1/5.3 + Qwen3_VL vision. Dashboard connect wired through all four proxy actions + OAuthModal + connection test (jwtToken refresh as the probe — status-code probes can't see this gateway's 200 refusals).
+- **Overflow → compaction**: over-window DevEco prompts (answered with the gateway's misleading "currently overloaded" 200-in-SSE refusal) are sniffed and relabelled to a 400 `prompt is too long:` so Claude Code auto-compacts instead of hammering the retry loop. The gate never touches traffic that could fit (O(1) UTF-16 char bounds, base64 image blobs excluded, per-model declared window) and refusals split over multiple SSE frames are still caught.
+- **BaseExecutor**: success result now carries the already-serialized `bodyStr` so executors can measure wire size without re-stringifying multi-MB bodies per request.
+
+## Fixes
+- **DevEco stream sniffing**: a timed-out sniff dropped the first post-sniff chunk (abandoned raced `reader.read()` vs fresh read in replay) — the pending read is now stashed and replayed first; sniff timer cleared; rejections propagate through the replay.
+- **Registry hygiene**: DevEco dead oauth config keys removed (single source in `shared/deveco/auth.js`); callback-proxy stale GET-root comments corrected to the live-verified POST form-body shape; oversized proxy POSTs answered 413 before socket destroy.
+- **DevEco per-model limits**: default `max_tokens` follows each registry model's `maxOutputTokens` (Qwen3_VL 8192) instead of a flat 32000.
+- **Tests**: `deveco` added to golden-url-header SPECIALIZED (DefaultExecutor golden would snapshot the wrong contract); new `tests/unit/deveco.test.js` + `deveco-proxy.test.js` (48 cases) incl. stream-replay regression; one flaky `expiresIn` equality assertion replaced with bounds.
+
 # v0.5.98 (2026-09-28)
 
 ## Features

@@ -29,6 +29,7 @@ import traeEnterprise from "./trae-enterprise.js";
 import windsurf from "./windsurf.js";
 import zed from "./zed.js";
 import codearts from "./codearts.js";
+import deveco from "./deveco.js";
 
 // Provider configurations
 const PROVIDERS = {
@@ -57,6 +58,7 @@ const PROVIDERS = {
   windsurf,
   zed,
   codearts,
+  deveco,
 };
 
 export { PROVIDERS };

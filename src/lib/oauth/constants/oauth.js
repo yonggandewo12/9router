@@ -234,6 +234,9 @@ export const ZED_HOSTED_CONFIG = {
 // see open-sse/shared/codearts/auth.js for the proof/ticket helpers.
 export const CODEARTS_CONFIG = { ...PROVIDER_OAUTH["codearts"] };
 
+// DevEco Code (华为) — HUAWEI ID browser login, simple tempToken→jwtToken→accessToken chain.
+export const DEVECO_CONFIG = { ...PROVIDER_OAUTH["deveco"] };
+
 // OAuth timeout (5 minutes)
 export const OAUTH_TIMEOUT = 300000;
 
