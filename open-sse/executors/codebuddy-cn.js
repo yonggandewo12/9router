@@ -62,6 +62,17 @@ export class CodeBuddyExecutor extends DefaultExecutor {
     // No reasoning requested: leave both unset. Forcing reasoning_effort:"medium"
     // + reasoning_summary on plain requests makes CodeBuddy trip its content
     // filter and return an error (#2071).
+
+    // tool_choice is a plain string field on the gateway's Go struct, so the
+    // OpenAI object form — which translator/formats/openai.js emits when a client
+    // forces a specific tool — is refused outright (400, code 11101 "cannot
+    // unmarshal object into Go struct field Request.tool_choice of type string").
+    // Downgrade to "required": it keeps the must-call-a-tool intent, the named
+    // tool is lost (probed 2026-10: "auto" and "required" both 200 + tool_calls,
+    // the object form 400s on every model including the auto/default routers).
+    if (transformed.tool_choice && typeof transformed.tool_choice === "object") {
+      transformed.tool_choice = "required";
+    }
     return transformed;
   }
 }

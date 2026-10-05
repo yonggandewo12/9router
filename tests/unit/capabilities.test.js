@@ -258,24 +258,32 @@ describe("getCapabilitiesForModel — codebuddy-cn provider overrides", () => {
     expect(caps.thinkingCanDisable).toBe(false);
   });
 
-  it("auto/default routers stay text-only at the payload ceilings", () => {
-    // Live probe: the gateway answers both, echoes the chosen backend in the
-    // streamed model field, and rejects image parts with 400 — so vision:false
-    // wins over the product-config supportsImages flag on auto.
-    expect(getCapabilitiesForModel("codebuddy-cn", "auto")).toMatchObject({
-      vision: false,
-      reasoning: true,
-      thinkingFormat: "openai",
-      contextWindow: 168000,
-      maxOutput: 32000,
-    });
-    expect(getCapabilitiesForModel("codebuddy-cn", "default")).toMatchObject({
-      vision: false,
-      reasoning: true,
-      thinkingFormat: "openai",
-      contextWindow: 200000,
-      maxOutput: 24000,
-    });
+  it("gateway routers are vision-capable at their published ceilings", () => {
+    // Live probe 2026-10: every router answers image parts, and echoes the
+    // backend it chose in the streamed model field (the pick is not stable —
+    // mimo-v2.6-flash-free, glm-5.3-flash and kimi-k3 all showed up). auto keeps
+    // the server's product-config numbers for the id; `default` publishes no row,
+    // so it borrows auto's floor. The three WorkBuddy picker tiers publish 300K/48K.
+    for (const id of ["auto", "default"]) {
+      expect(getCapabilitiesForModel("codebuddy-cn", id)).toMatchObject({
+        vision: true,
+        reasoning: true,
+        thinkingFormat: "openai",
+        thinkingCanDisable: false,
+        contextWindow: 256000,
+        maxOutput: 32000,
+      });
+    }
+    for (const id of ["fast-model", "balanced-model", "deep-model"]) {
+      expect(getCapabilitiesForModel("codebuddy-cn", id)).toMatchObject({
+        vision: true,
+        reasoning: true,
+        thinkingFormat: "openai",
+        thinkingCanDisable: false,
+        contextWindow: 300000,
+        maxOutput: 48000,
+      });
+    }
   });
 
   it("unknown provider falls through to pattern matching", () => {

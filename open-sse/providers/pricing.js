@@ -152,9 +152,6 @@ export const MODEL_PRICING = {
   // === Grok ===
   "grok-code-fast-1":             { input: 0.50,  output: 2.00,  cached: 0.25,  reasoning: 3.00,   cache_creation: 0.50  },
 
-  // === OpenRouter fallback ===
-  "auto":                         { input: 2.00,  output: 8.00,  cached: 1.00,  reasoning: 12.00,  cache_creation: 2.00  },
-
   // === Misc ===
   "oswe-vscode-prime":            { input: 1.00,  output: 4.00,  cached: 0.50,  reasoning: 6.00,   cache_creation: 1.00  },
   "gpt-oss-120b-medium":          { input: 0.50,  output: 2.00,  cached: 0.25,  reasoning: 3.00,   cache_creation: 0.50  },
@@ -168,6 +165,17 @@ export const MODEL_PRICING = {
  * Keyed by provider alias (cc, cx, gc, gh, ...) or provider id (openai, anthropic, ...).
  */
 export const PROVIDER_PRICING = {
+  // OpenRouter (openrouter) — its `auto` router pseudo-model bills at the price
+  // of whichever model it lands on, so the table carries an average. This used
+  // to sit in MODEL_PRICING, where the unscoped step-3 lookup handed the same
+  // $2/$8 to every provider that exposes a bare `auto` router (codebuddy-cn,
+  // qoder, qoder-cn, trae, trae-enterprise) — all credit/subscription billed,
+  // so they now resolve to null like their sibling pseudo-models do.
+  openrouter: {
+    "auto": { input: 2.00, output: 8.00, cached: 1.00, reasoning: 12.00, cache_creation: 2.00 },
+    // Same router id arrives namespaced from the live catalog.
+    "openrouter/auto": { input: 2.00, output: 8.00, cached: 1.00, reasoning: 12.00, cache_creation: 2.00 },
+  },
   // GitHub Copilot (gh) — explicit override, matches canonical gpt-5.3-codex rate
   gh: {
     "gpt-5.3-codex": { input: 1.75, output: 14.00, cached: 0.175, reasoning: 14.00, cache_creation: 1.75 },

@@ -29,31 +29,41 @@ const PROVIDER_ALIAS_NAMES = {
   gemini: "Gemini"
 };
 
+// Provider id -> the short alias /v1/models reports as `owned_by` (the registry
+// `alias`, everything else keeps alias = id and needs no entry here). Mirrors
+// PROVIDER_ID_TO_ALIAS in open-sse/config/providerModels.js — the CLI package is
+// CJS and does not import open-sse, so this copy has to be kept in sync. Stale
+// values silently hide a connected provider's models from the picker, because
+// the group filter below matches on owned_by, not on the provider id.
 const PROVIDER_ID_TO_ALIAS = {
+  antigravity: "ag",
+  "api-airforce": "af",
+  baidu: "qianfan",
+  bazaarlink: "bzl",
+  bluesminds: "bm",
   claude: "cc",
+  cline: "cl",
+  codearts: "ca",
+  "codebuddy-cn": "cbcn",
+  "codebuddy-intl": "cbai",
   codex: "cx",
+  cursor: "cu",
+  deveco: "dv",
   "gemini-cli": "gc",
   github: "gh",
-  antigravity: "ag",
+  "grok-cli": "gcli",
   iflow: "if",
-  qwen: "qw",
+  "kilo-gateway": "kgw",
+  kilocode: "kc",
   kiro: "kr",
-  cursor: "cu",
-  cline: "cline",
-  clinepass: "clinepass",
-  qoder: "qd",
-  "qoder-cn": "qd",
-  gitlab: "gitlab",
-  "codebuddy-cn": "cb",
-  "codebuddy-intl": "cbai",
-  kimchi: "kimchi",
-  "grok-cli": "grok-cli",
-  trae: "trae",
-  windsurf: "windsurf",
-  zed: "zed",
   opencode: "oc",
-  "opencode-go": "ocg",
   "opencode-zen": "ocz",
+  qoder: "qd",
+  "qoder-cn": "qdcn",
+  sambanova: "samba",
+  tencent: "hunyuan",
+  "trae-enterprise": "te",
+  zed: "zd",
 };
 
 // Providers usable without stored credentials

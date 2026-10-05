@@ -259,13 +259,23 @@ export const PROVIDER_CAPABILITIES = {
     // the old endpoint still answers 200 but the published list is the
     // contract). maxOutput 128000 per the server's product-config payload.
     "deepseek-v4.1-flash": { vision: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: true, contextWindow: 1000000, maxOutput: 128000 },
-    // Routers: the ceiling is whatever the gateway routes to, so keep the
-    // product-config numbers (auto 168K/32K, default 200K/24K) — the narrowest
-    // of the candidate backends is the safe bound. vision:false is the live
-    // probe result (image parts are refused with 400), which overrides the
-    // payload's supportsImages:true on auto.
-    "auto":                 { vision: false, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false, contextWindow: 168000, maxOutput: 32000 },
-    "default":              { vision: false, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false, contextWindow: 200000, maxOutput: 24000 },
+    // Gateway-side routers. contextWindow/maxOutput come from the server's own
+    // product-config row for the id (auto 256K/32K, the three WorkBuddy tiers
+    // 300K/48K); `default` publishes no row at all, so it borrows auto's
+    // conservative floor. vision:true is probed, not inferred: every router
+    // answers image parts, whatever backend it happens to choose that turn
+    // (seen serving images: mimo-v2.6-flash-free, deepseek-v4.1-flash,
+    // glm-5.3-flash, kimi-k3 — the routing is not stable, so no per-backend
+    // ceiling is knowable and the published row is the only honest number).
+    // thinkingCanDisable is false for all five — the router rows publish no
+    // canDisableThinking, and executors/codebuddy-cn.js drops
+    // reasoning_effort:"none" on the way out (the gateway has no "none"), so
+    // thinking cannot actually be switched off.
+    "auto":           { vision: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false, contextWindow: 256000, maxOutput: 32000 },
+    "default":        { vision: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false, contextWindow: 256000, maxOutput: 32000 },
+    "fast-model":     { vision: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false, contextWindow: 300000, maxOutput: 48000 },
+    "balanced-model": { vision: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false, contextWindow: 300000, maxOutput: 48000 },
+    "deep-model":     { vision: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false, contextWindow: 300000, maxOutput: 48000 },
   },
   // Poolside Laguna — OpenAI-compatible, all reasoning-capable (32K max output).
   "poolside": {
