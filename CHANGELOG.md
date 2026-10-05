@@ -1,4 +1,4 @@
-# v0.6.1 (2026-10-05)
+# v0.6.2 (2026-10-05)
 
 ## Features
 - **CodeBuddy CN gateway routers**: five router ids added to the registry — `auto` (→ `hy4-preview-f`), `default` (`glm-5.3`), and the WorkBuddy picker tiers 快速/均衡/极致: `fast-model` (`deepseek-v4.1-flash`), `balanced-model` (`hy4-preview-f`), `deep-model` (`kimi-k3`, x0.35 credit; the other four bill x0.00). The backend comes back in the streamed `model` field, not the request, and the pick is not stable — the same router served `mimo-v2.6-flash-free`, `glm-5.3-flash` and `kimi-k3` on different calls. All five take tool calls and all five answer images, so `capabilities.js` marks them `vision:true` (the first pass read an image refusal as a hard 400 and had them text-only, which would have silently stripped every picture a Claude-format client sent; corrected). `auto` keeps its published 256K/32K ceiling and the tiers theirs 300K/48K; `default` publishes no product-config row, so it borrows auto's floor. Provider default model stays `glm-5.2`.
