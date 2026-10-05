@@ -15,15 +15,12 @@ import { resolveZedModels } from "open-sse/shared/zedAuth.js";
 import { resolveTraeEnterpriseModels } from "open-sse/shared/trae/enterprise.js";
 import { resolveCodeartsModels } from "open-sse/shared/codearts/api.js";
 import { resolveClineModels, resolveClinepassModels } from "open-sse/services/clinepassModels.js";
+import codexProvider from "open-sse/providers/registry/codex.js";
 
 const GEMINI_CLI_MODELS_URL = "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
 
-// The /codex/models endpoint gates each entry by minimal_client_version against this
-// value, and codex CLI's own manifest (openai/codex codex-rs/models-manager/models.json)
-// already requires 0.144.0 for its newest models, so a stale client_version here comes
-// back 200 with those entries quietly missing instead of erroring.
-const CODEX_CLIENT_VERSION = "0.144.6";
-const CODEX_MODELS_URL = `https://chatgpt.com/backend-api/codex/models?client_version=${CODEX_CLIENT_VERSION}`;
+// Model discovery must identify as the same Codex CLI version as inference.
+const CODEX_MODELS_URL = `https://chatgpt.com/backend-api/codex/models?client_version=${codexProvider.transport.cliVersion}`;
 
 const parseOpenAIStyleModels = (data) => {
   if (Array.isArray(data)) return data;
@@ -182,6 +179,14 @@ function buildQoderModelsResolver(providerId) {
 
 // Provider models endpoints configuration
 export const PROVIDER_MODELS_CONFIG = {
+  "muse": {
+    url: "https://api.meta.ai/v1/models",
+    method: "GET",
+    headers: { "Content-Type": "application/json", "x-api-version": "1.0.0" },
+    authHeader: "Authorization",
+    authPrefix: "Bearer ",
+    parseResponse: (data) => data.data || [],
+  },
   claude: {
     url: "https://api.anthropic.com/v1/models",
     method: "GET",

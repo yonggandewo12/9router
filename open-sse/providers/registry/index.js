@@ -131,6 +131,9 @@ import p132 from "./dahl.js";
 import p127 from "./atria.js";
 import p129 from "./agnes.js";
 import p130 from "./bai.js";
+import p134 from "./tinyfish.js";
+import p135 from "./v1m.js";
+import p136 from "./muse.js";
 export default [
   p0,
   p1,
@@ -262,4 +265,7 @@ export default [
   p127,
   p129,
   p130,
+  p134,
+  p135,
+  p136,
 ];

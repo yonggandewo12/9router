@@ -94,6 +94,20 @@ if (args[0] === "start" || args[0] === "stop" || args[0] === "status") {
   return;
 }
 
+// `9router-proxy connect <url>` configures local CLI tools against a remote
+// server — no local server, no runtime deps. Usable via
+// `npx 9router-proxy connect …`.
+if (args[0] === "connect") {
+  const { run } = require("./src/cli/commands/connect");
+  run(args.slice(1))
+    .then((code) => process.exit(code))
+    .catch((err) => {
+      console.error(`❌ ${err?.message || err}`);
+      process.exit(1);
+    });
+  return;
+}
+
 // Self-heal SQLite runtime deps (sql.js + better-sqlite3) into ~/.9router/runtime
 // so the server can resolve them via NODE_PATH. Best-effort — sql.js is required,
 // better-sqlite3 is optional. Logs to stderr only on failure.
@@ -171,6 +185,8 @@ Commands:
   start               Start the server in the background (headless)
   stop                Stop the background server
   status              Show background server status
+  connect <server-url> Configure Claude Code for a remote 9router server
+                      (npx 9router-proxy connect http://host:20128 — no install needed)
   xai video --prompt "..." --output video.mp4
                       Generate a Grok Imagine video via the running gateway
                       (see: ${APP_NAME} xai video --help)
