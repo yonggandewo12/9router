@@ -1,3 +1,12 @@
+# v0.6.1 (2026-10-05)
+
+## Features
+- **CodeBuddy CN routers**: two server-side router ids added to the registry — `auto` (gateway resolves it to `hy4-preview-f`, x0.00 credits) and `default` (resolves to `glm-5.3`). The chosen backend comes back in the streamed `model` field, not the request. Both speak the usual OpenAI SSE with tool calling, and both are text-only: image parts are refused with 400 "replace the image" even though the product-config payload marks `auto` as `supportsImages:true`, so the live probe wins over the payload in `capabilities.js`. Provider default model stays `glm-5.2`.
+
+## Notes
+- **WorkBuddy (`www.workbuddy.cn`) assessed, deliberately not added**: it is the same Tencent gateway as CodeBuddy CN. A live token minted through WorkBuddy's `/v2/plugin/auth/state|token|token/refresh` works unmodified on `copilot.tencent.com`, both hosts expose one model table (a server-side removal, e.g. `glm-5.0`, 400s with 11102 on both), and `/v2/billing/meter/get-user-resource` returns the identical credit packages — so a `workbuddy` provider would be a hostname clone with no extra quota. Its only unique surface (`auto`/`default` routers) landed above on the existing provider.
+- **Tests**: `auto`/`default` capability rows pinned in `tests/unit/capabilities.test.js`; `providers-baseline.json` + `alias-baseline.json` refreshed — they still carried the v0.6.0 DevEco registration (`deveco`/`dv`) and the Codex 0.155.0 User-Agent bump, which had left the regression gate red since that release.
+
 # v0.6.0 (2026-09-29)
 
 ## Features

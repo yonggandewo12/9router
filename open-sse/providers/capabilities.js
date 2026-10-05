@@ -259,6 +259,13 @@ export const PROVIDER_CAPABILITIES = {
     // the old endpoint still answers 200 but the published list is the
     // contract). maxOutput 128000 per the server's product-config payload.
     "deepseek-v4.1-flash": { vision: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: true, contextWindow: 1000000, maxOutput: 128000 },
+    // Routers: the ceiling is whatever the gateway routes to, so keep the
+    // product-config numbers (auto 168K/32K, default 200K/24K) — the narrowest
+    // of the candidate backends is the safe bound. vision:false is the live
+    // probe result (image parts are refused with 400), which overrides the
+    // payload's supportsImages:true on auto.
+    "auto":                 { vision: false, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false, contextWindow: 168000, maxOutput: 32000 },
+    "default":              { vision: false, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false, contextWindow: 200000, maxOutput: 24000 },
   },
   // Poolside Laguna — OpenAI-compatible, all reasoning-capable (32K max output).
   "poolside": {

@@ -69,6 +69,14 @@ export default {
     { id: "kimi-k3-1", name: "Kimi-K3" },
     { id: "deepseek-v4-pro", name: "DeepSeek-V4-Pro" },
     { id: "deepseek-v4.1-flash", name: "DeepSeek-V4.1-Flash" },
+    // Server-side routers rather than fixed models: the gateway picks the backend
+    // per request and echoes it in the streamed `model` field. Probed 2026-10 on
+    // both copilot.tencent.com and www.workbuddy.cn (same gateway, same credit
+    // pool): auto → hy4-preview-f at x0.00 credits, default → glm-5.3. Both take
+    // tools, both reject image parts (400 "…replace the image…") even though the
+    // product-config payload marks auto as supportsImages:true — see the caps note.
+    { id: "auto", name: "Auto" },
+    { id: "default", name: "Default" },
   ],
   oauth: {
     baseUrl: "https://copilot.tencent.com",

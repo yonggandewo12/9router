@@ -258,6 +258,26 @@ describe("getCapabilitiesForModel — codebuddy-cn provider overrides", () => {
     expect(caps.thinkingCanDisable).toBe(false);
   });
 
+  it("auto/default routers stay text-only at the payload ceilings", () => {
+    // Live probe: the gateway answers both, echoes the chosen backend in the
+    // streamed model field, and rejects image parts with 400 — so vision:false
+    // wins over the product-config supportsImages flag on auto.
+    expect(getCapabilitiesForModel("codebuddy-cn", "auto")).toMatchObject({
+      vision: false,
+      reasoning: true,
+      thinkingFormat: "openai",
+      contextWindow: 168000,
+      maxOutput: 32000,
+    });
+    expect(getCapabilitiesForModel("codebuddy-cn", "default")).toMatchObject({
+      vision: false,
+      reasoning: true,
+      thinkingFormat: "openai",
+      contextWindow: 200000,
+      maxOutput: 24000,
+    });
+  });
+
   it("unknown provider falls through to pattern matching", () => {
     const caps = getCapabilitiesForModel("unknown-provider", "mimo-v2.5");
     expect(caps.vision).toBe(true);
