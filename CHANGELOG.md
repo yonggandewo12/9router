@@ -1,3 +1,24 @@
+# v0.6.4 (2026-10-07)
+
+## Features
+- **A response-speed release — no new providers, only time-to-first-token and per-request work.** Upstream sockets now survive the gap between two turns: undici's idle-socket default is **4s**, and it only applies when the upstream advertises no `Keep-Alive: timeout=` — which is the case for all 11 gateways this install talks to — so every agent turn used to pay a fresh DNS+TCP+TLS. `UPSTREAM_KEEPALIVE_TIMEOUT_MS` (60s) / `UPSTREAM_KEEPALIVE_MAX_MS` (600s) now reach the shared direct agent, both proxy dispatchers and the pinned-IP image dispatchers. Proven by socket identity rather than timing: three turns with 15s/20s idle gaps held one socket, where the previous build allocated a new local port each turn. ~50–60ms/turn domestic.
+- **Streams stop getting buffered by intermediaries** — SSE responses now carry `Cache-Control: no-transform` and `X-Accel-Buffering: no`, so the first token isn't sitting in a proxy buffer.
+- **The router's own work is off the critical path**: account selection no longer serializes behind a global mutex (rotation state is in memory and reaches SQLite coalesced in the background via `src/sse/services/connectionRotation.js`), model-selector glob regexes compile once, settings reads are memoized, and a turn's remote images fetch 4 at a time. Measured honestly: `PREP` is 1–5ms against a ~1.4s TTFT — about **0.4%** — so this is hygiene, not a latency claim.
+- **Retries stopped synchronizing**: backoff is jittered, and a response we're throwing away gets its body cancelled instead of pinning a connection while the provider keeps generating to nobody.
+- **`scripts/efficiency-baseline.mjs`** — the standing ruler for cost/cache work (read-only over `~/.9router/db/data.sqlite`), plus `PREP` segment timing in the `DONE` log line.
+
+## Fixes
+- **Anthropic prompt-cache prefixes stay stable**: breakpoints were anchored before the token savers rewrote the bytes they covered, so a cache hit turned into a full-price re-write. The anchor now moves after every saver, and RTK system blocks inject after the last marker instead of before it.
+- **A configured proxy outranks a caller-supplied dispatcher again**: attaching the shared direct agent went through `options.dispatcher || …`, which let the pinned-IP image fetch route around `HTTPS_PROXY`. Egress policy (#4333 `strictProxy` discipline) now beats transport detail, pinned by a counting-proxy test.
+- **Concurrent 401s stop burning single-use OAuth refresh tokens** — refresh is serialized per account, re-entrantly.
+- **`open-sse/services/compact.js` deleted** — an unused clone of `services/combo.js`.
+
+## Notes
+- **Bounds on the above, stated plainly.** Latency bands cannot prove socket reuse (TLS session resumption plus a warm DNS cache make a re-handshake look as fast as a reuse), so every claim here rests on socket counting. An upstream that advertises a *shorter* `Keep-Alive` still wins — measured `timeout=5` re-handshakes at a 6s gap, `timeout=15` reuses — and providers advertising under ~8s get no benefit from this. The win also only lands once a long-running instance is restarted or upgraded: the installed `9router-proxy` 0.6.3 process kept its 4s behaviour, new socket per turn, until then.
+- **Declined with measurement, so deliberately absent**: boot-time connection prewarm, per-process caching of combo/model SQLite reads (1–5ms, again under 0.4% of TTFT), retry×fallback surgery (`usageHistory` stores only `ok` rows — 549/549 — so failure frequency is unproven), batching the `usageDaily` flush (2–8KB blob, ≈16.7µs, already fire-and-forget), overriding a shorter advertised upstream keep-alive, and a custom TLS-resuming connector.
+- **Fork identity unchanged**: `.github/workflows/` is still this fork's three, the package remains **`9router-proxy`** on the fork version line, and `undici` continues to be inlined into the published chunks — no new runtime dependency.
+- **Gate**: 329 test files passed / 16 skipped (345), 3272 tests passed / 15 expected-fail / 93 skipped / 1 todo in 13.5s; `providers` (90), `alias` (122 tokens) and OAuth-URL baselines byte-for-byte equal; eslint clean. New coverage: `upstream-keepalive.test.js` (raw-TCP upstream, socket counting, proxy precedence), `direct-agent-singleton.test.js` (one shared dispatcher per target, keep-alive policy actually attached), plus cache-anchor, connection-rotation, credential-lock and image-hardening tests.
+
 # v0.6.3 (2026-10-05)
 
 ## Features
