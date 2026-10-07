@@ -229,7 +229,10 @@ function injectClaudeSystem(body, prompt) {
         }
       } catch (_) {}
       try {
-        if (lastCacheIdx >= 0) sys.splice(lastCacheIdx, 0, block);
+        // Land AFTER the breakpoint, never before it: a marker caches the prefix
+        // ending at its block, so splicing in front of it changes those bytes and
+        // turns every following request into a full-price cache re-write.
+        if (lastCacheIdx >= 0) sys.splice(lastCacheIdx + 1, 0, block);
         else sys.push(block);
       } catch (_) {}
       return;

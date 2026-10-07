@@ -72,6 +72,15 @@ async function readRaw() {
   return row ? parseJson(row.data, {}) : {};
 }
 
+// Merged settings, kept in memory: every chat request reads them several times
+// (credential selection, the account fallback loop, combo routing), and each read
+// was a SELECT + JSON parse + default merge. Invalidated by every writer.
+let settingsMemo = null;
+
+export function invalidateSettingsCache() {
+  settingsMemo = null;
+}
+
 // Merge raw settings with defaults; backward-compat for missing keys
 export function mergeWithDefaults(raw) {
   const merged = { ...DEFAULT_SETTINGS, ...(raw || {}) };
@@ -102,8 +111,12 @@ export function mergeWithDefaults(raw) {
 }
 
 export async function getSettings() {
-  const raw = await readRaw();
-  return mergeWithDefaults(raw);
+  if (!settingsMemo) {
+    settingsMemo = mergeWithDefaults(await readRaw());
+  }
+  // Fresh top-level object per call so a caller assigning a key cannot leak into
+  // the next request (nested objects are shared exactly as before memoizing).
+  return { ...settingsMemo };
 }
 
 // Atomic read-merge-write inside transaction (prevents losing concurrent updates)
@@ -119,7 +132,9 @@ export async function updateSettings(updates) {
       [stringifyJson(next)],
     );
   });
-  return mergeWithDefaults(next);
+  const merged = mergeWithDefaults(next);
+  settingsMemo = merged;
+  return { ...merged };
 }
 
 export async function isCloudEnabled() {

@@ -47,6 +47,34 @@ async function resolvePinnedIps(hostname) {
   }
 }
 
+// Pinned-IP dispatchers are cached so a multi-image turn (and the next turn of
+// the same conversation) reuses one TLS connection instead of paying a fresh
+// handshake per image. The key carries the resolved IP, so a DNS change — or a
+// rebind attempt — gets its own dispatcher after re-validation below.
+const PINNED_DISPATCHERS_MAX = 16;
+const pinnedDispatchers = new Map();
+
+function getPinnedDispatcher(hostname, record) {
+  const key = `${hostname}|${record.address}|${record.family}`;
+  let dispatcher = pinnedDispatchers.get(key);
+  if (!dispatcher) {
+    if (pinnedDispatchers.size >= PINNED_DISPATCHERS_MAX) {
+      const [oldestKey, oldest] = pinnedDispatchers.entries().next().value;
+      pinnedDispatchers.delete(oldestKey);
+      oldest.close().catch(() => {});
+    }
+    dispatcher = new Agent({
+      connect: { lookup: (_h, _o, cb) => cb(null, [{ address: record.address, family: record.family }]) },
+    });
+    pinnedDispatchers.set(key, dispatcher);
+  } else {
+    // Refresh recency so the eviction order tracks hot hosts.
+    pinnedDispatchers.delete(key);
+    pinnedDispatchers.set(key, dispatcher);
+  }
+  return dispatcher;
+}
+
 // Verify buffer magic bytes match a known image signature; return its mime or null.
 function detectImageMime(buf) {
   for (const { sig, offset, mime, verifyWebp } of IMAGE_SIGNATURES) {
@@ -89,9 +117,7 @@ export async function fetchImageAsBase64(imageUrl, options = {}) {
   const fetchSignal = signal || controller.signal;
 
   // Pin connect to the validated IP so no second DNS resolution can rebind (TOCTOU fix).
-  const dispatcher = new Agent({
-    connect: { lookup: (_h, _o, cb) => cb(null, [{ address: pinnedIps[0].address, family: pinnedIps[0].family }]) },
-  });
+  const dispatcher = getPinnedDispatcher(url.hostname, pinnedIps[0]);
 
   try {
     // redirect:"manual" prevents a public URL redirecting to a private one (SSRF bypass).
@@ -119,6 +145,5 @@ export async function fetchImageAsBase64(imageUrl, options = {}) {
     return null;
   } finally {
     if (timeout) clearTimeout(timeout);
-    dispatcher.close().catch(() => {});
   }
 }

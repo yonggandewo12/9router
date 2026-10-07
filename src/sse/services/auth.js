@@ -4,10 +4,8 @@ import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLock
 import { MAX_RATE_LIMIT_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
 import { resolveProviderId, FREE_PROVIDERS } from "@/shared/constants/providers.js";
 import { getAntigravityQuotaCache } from "./antigravityQuota.js";
+import { rotationOf, markUsed } from "./connectionRotation.js";
 import * as log from "../utils/logger.js";
-
-// Mutex to prevent race conditions during account selection
-let selectionMutex = Promise.resolve();
 
 const GITHUB_MONTHLY_USAGE_LIMIT = "you've reached your additional usage limit for your plan";
 
@@ -32,186 +30,28 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     : (excludeConnectionIds ? new Set([excludeConnectionIds]) : new Set());
   const preferredConnectionId = options?.preferredConnectionId || null;
   const requestedModel = options?.requestedModel || model;
-  // Acquire mutex to prevent race conditions
-  const currentMutex = selectionMutex;
-  let resolveMutex;
-  selectionMutex = new Promise(resolve => { resolveMutex = resolve; });
 
-  try {
-    await currentMutex;
+  // Resolve alias to provider ID (e.g., "kc" -> "kilocode")
+  const providerId = resolveProviderId(provider);
 
-    // Resolve alias to provider ID (e.g., "kc" -> "kilocode")
-    const providerId = resolveProviderId(provider);
-
-    // Inject a virtual connection for no-auth free providers (with optional proxy pool from settings)
-    if (FREE_PROVIDERS[providerId]?.noAuth) {
-      const settings = await getSettings();
-      const override = (settings.providerStrategies || {})[providerId] || {};
-      const strategy = override.rotateStrategy || "none";
-      let pickedId = override.proxyPoolId || null;
-      if (strategy !== "none") {
-        const allPools = await getProxyPools({ isActive: true });
-        const poolIds = allPools.filter(p => p.proxyUrl).map(p => p.id);
-        pickedId = pickProxyPoolId(poolIds, strategy, providerId);
-      }
-      const resolvedProxy = await resolveConnectionProxyConfig({ proxyPoolId: pickedId || "" });
-      return {
-        id: "noauth",
-        connectionName: "Public",
-        isActive: true,
-        accessToken: "public",
-        providerSpecificData: {
-          connectionProxyEnabled: resolvedProxy.connectionProxyEnabled,
-          connectionProxyUrl: resolvedProxy.connectionProxyUrl,
-          connectionNoProxy: resolvedProxy.connectionNoProxy,
-          connectionProxyPoolId: resolvedProxy.proxyPoolId || null,
-          vercelRelayUrl: resolvedProxy.vercelRelayUrl || "",
-          strictProxy: resolvedProxy.strictProxy === true,
-        },
-      };
-    }
-
-    const connections = await getProviderConnections({ provider: providerId, isActive: true });
-    log.debug("AUTH", `${provider} | total connections: ${connections.length}, excludeIds: ${excludeSet.size > 0 ? [...excludeSet].join(",") : "none"}, model: ${model || "any"}`);
-
-    if (connections.length === 0) {
-      log.warn("AUTH", `No credentials for ${provider}`);
-      return null;
-    }
-
-    // Antigravity quota cache is lazy: only populated after that account returns 409/429.
-    const isAntigravity = providerId === "antigravity";
-    const antigravityQuotaCache = isAntigravity && model ? getAntigravityQuotaCache() : null;
-
-    // Filter out model-locked, excluded, and Antigravity quota-exhausted connections.
-    const availableConnections = connections.filter(c => {
-      if (excludeSet.has(c.id)) return false;
-      if (isModelLockActive(c, model)) return false;
-      const enabled = c.providerSpecificData?.enabledModels;
-      if (providerId === "codex" && Array.isArray(enabled) && enabled.length && requestedModel && !enabled.includes(requestedModel)) return false;
-      // Antigravity: skip if live quota exhausted for this model
-      if (isAntigravity && model && antigravityQuotaCache) {
-        const quota = antigravityQuotaCache.get(c.id)?.[model];
-        if (quota && quota.remainingPercentage <= 0 && quota.resetAt && new Date(quota.resetAt).getTime() > Date.now()) {
-          const account = c.id?.slice(0, 8) || "unknown";
-          log.info("AG_QUOTA", `${account} | CACHE_BLOCK ${model} — skip upstream until ${quota.resetAt}`);
-          return false;
-        }
-      }
-      return true;
-    });
-
-    log.debug("AUTH", `${provider} | available: ${availableConnections.length}/${connections.length}`);
-    connections.forEach(c => {
-      const excluded = excludeSet.has(c.id);
-      const locked = isModelLockActive(c, model);
-      if (excluded || locked) {
-        const lockUntil = getEarliestModelLockUntil(c);
-        log.debug("AUTH", `  → ${c.id?.slice(0, 8)} | ${excluded ? "excluded" : ""} ${locked ? `modelLocked(${model}) until ${lockUntil}` : ""}`);
-      }
-    });
-
-    if (availableConnections.length === 0) {
-      // Find earliest persistent lock or lazy Antigravity quota-cache reset for retry timing.
-      const lockedConns = connections.filter(c => isModelLockActive(c, model));
-      const expiries = lockedConns.map(c => getEarliestModelLockUntil(c)).filter(Boolean);
-      if (isAntigravity && model && antigravityQuotaCache) {
-        connections.forEach((c) => {
-          const resetAt = antigravityQuotaCache.get(c.id)?.[model]?.resetAt;
-          if (resetAt && new Date(resetAt).getTime() > Date.now()) expiries.push(resetAt);
-        });
-      }
-      const earliest = expiries.sort()[0] || null;
-      if (earliest) {
-        const earliestConn = lockedConns[0];
-        log.warn("AUTH", `${provider} | all ${connections.length} accounts locked for ${model || "all"} (${formatRetryAfter(earliest)}) | lastError=${earliestConn?.lastError?.slice(0, 50)}`);
-        return {
-          allRateLimited: true,
-          retryAfter: earliest,
-          retryAfterHuman: formatRetryAfter(earliest),
-          lastError: earliestConn?.lastError || null,
-          lastErrorCode: earliestConn?.errorCode || null
-        };
-      }
-      log.warn("AUTH", `${provider} | all ${connections.length} accounts unavailable`);
-      return null;
-    }
-
+  // Inject a virtual connection for no-auth free providers (with optional proxy pool from settings)
+  if (FREE_PROVIDERS[providerId]?.noAuth) {
     const settings = await getSettings();
-    // Per-provider strategy overrides global setting
-    const providerOverride = (settings.providerStrategies || {})[providerId] || {};
-    const strategy = providerOverride.fallbackStrategy || settings.fallbackStrategy || "fill-first";
-
-    let connection;
-    // Pin to preferred connection if specified and available
-    if (preferredConnectionId) {
-      connection = availableConnections.find((c) => c.id === preferredConnectionId);
-      if (connection) {
-        log.info("AUTH", `${provider} | pinned to ${connection.id?.slice(0, 8)} (${connection.name || connection.email || "unnamed"})`);
-      }
+    const override = (settings.providerStrategies || {})[providerId] || {};
+    const strategy = override.rotateStrategy || "none";
+    let pickedId = override.proxyPoolId || null;
+    if (strategy !== "none") {
+      const allPools = await getProxyPools({ isActive: true });
+      const poolIds = allPools.filter(p => p.proxyUrl).map(p => p.id);
+      pickedId = pickProxyPoolId(poolIds, strategy, providerId);
     }
-    if (connection) {
-      // skip strategy
-    } else if (strategy === "round-robin") {
-      const stickyLimit = providerOverride.stickyRoundRobinLimit || settings.stickyRoundRobinLimit || 3;
-
-      // Sort by lastUsed (most recent first) to find current candidate
-      const byRecency = [...availableConnections].sort((a, b) => {
-        if (!a.lastUsedAt && !b.lastUsedAt) return (a.priority || 999) - (b.priority || 999);
-        if (!a.lastUsedAt) return 1;
-        if (!b.lastUsedAt) return -1;
-        return new Date(b.lastUsedAt) - new Date(a.lastUsedAt);
-      });
-
-      const current = byRecency[0];
-      const currentCount = current?.consecutiveUseCount || 0;
-
-      if (current && current.lastUsedAt && currentCount < stickyLimit) {
-        // Stay with current account
-        connection = current;
-        // Update lastUsedAt and increment count (await to ensure persistence)
-        await updateProviderConnection(connection.id, {
-          lastUsedAt: new Date().toISOString(),
-          consecutiveUseCount: (connection.consecutiveUseCount || 0) + 1
-        });
-      } else {
-        // Pick the least recently used (excluding current if possible)
-        const sortedByOldest = [...availableConnections].sort((a, b) => {
-          if (!a.lastUsedAt && !b.lastUsedAt) return (a.priority || 999) - (b.priority || 999);
-          if (!a.lastUsedAt) return -1;
-          if (!b.lastUsedAt) return 1;
-          return new Date(a.lastUsedAt) - new Date(b.lastUsedAt);
-        });
-
-        connection = sortedByOldest[0];
-
-        // Update lastUsedAt and reset count to 1 (await to ensure persistence)
-        await updateProviderConnection(connection.id, {
-          lastUsedAt: new Date().toISOString(),
-          consecutiveUseCount: 1
-        });
-      }
-    } else {
-      // Default: fill-first (already sorted by priority in getProviderConnections)
-      connection = availableConnections[0];
-    }
-
-    const resolvedProxy = await resolveConnectionProxyConfig(connection.providerSpecificData || {});
-
+    const resolvedProxy = await resolveConnectionProxyConfig({ proxyPoolId: pickedId || "" });
     return {
-      authType: connection.authType,
-      apiKey: connection.apiKey,
-      accessToken: connection.accessToken,
-      refreshToken: connection.refreshToken,
-      idToken: connection.idToken,
-      expiresAt: connection.expiresAt,
-      expiresIn: connection.expiresIn,
-      lastRefreshAt: connection.lastRefreshAt,
-      projectId: connection.projectId,
-      connectionName: connection.displayName || connection.name || connection.email || connection.id,
-      copilotToken: connection.providerSpecificData?.copilotToken,
+      id: "noauth",
+      connectionName: "Public",
+      isActive: true,
+      accessToken: "public",
       providerSpecificData: {
-        ...(connection.providerSpecificData || {}),
         connectionProxyEnabled: resolvedProxy.connectionProxyEnabled,
         connectionProxyUrl: resolvedProxy.connectionProxyUrl,
         connectionNoProxy: resolvedProxy.connectionNoProxy,
@@ -219,16 +59,161 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
         vercelRelayUrl: resolvedProxy.vercelRelayUrl || "",
         strictProxy: resolvedProxy.strictProxy === true,
       },
-      connectionId: connection.id,
-      // Include current status for optimization check
-      testStatus: connection.testStatus,
-      lastError: connection.lastError,
-      // Pass full connection for clearAccountError to read modelLock_* keys
-      _connection: connection
     };
-  } finally {
-    if (resolveMutex) resolveMutex();
   }
+
+  const connections = await getProviderConnections({ provider: providerId, isActive: true });
+  log.debug("AUTH", `${provider} | total connections: ${connections.length}, excludeIds: ${excludeSet.size > 0 ? [...excludeSet].join(",") : "none"}, model: ${model || "any"}`);
+
+  if (connections.length === 0) {
+    log.warn("AUTH", `No credentials for ${provider}`);
+    return null;
+  }
+
+  // Antigravity quota cache is lazy: only populated after that account returns 409/429.
+  const isAntigravity = providerId === "antigravity";
+  const antigravityQuotaCache = isAntigravity && model ? getAntigravityQuotaCache() : null;
+
+  // Filter out model-locked, excluded, and Antigravity quota-exhausted connections.
+  const availableConnections = connections.filter(c => {
+    if (excludeSet.has(c.id)) return false;
+    if (isModelLockActive(c, model)) return false;
+    const enabled = c.providerSpecificData?.enabledModels;
+    if (providerId === "codex" && Array.isArray(enabled) && enabled.length && requestedModel && !enabled.includes(requestedModel)) return false;
+    // Antigravity: skip if live quota exhausted for this model
+    if (isAntigravity && model && antigravityQuotaCache) {
+      const quota = antigravityQuotaCache.get(c.id)?.[model];
+      if (quota && quota.remainingPercentage <= 0 && quota.resetAt && new Date(quota.resetAt).getTime() > Date.now()) {
+        const account = c.id?.slice(0, 8) || "unknown";
+        log.info("AG_QUOTA", `${account} | CACHE_BLOCK ${model} — skip upstream until ${quota.resetAt}`);
+        return false;
+      }
+    }
+    return true;
+  });
+
+  log.debug("AUTH", `${provider} | available: ${availableConnections.length}/${connections.length}`);
+  connections.forEach(c => {
+    const excluded = excludeSet.has(c.id);
+    const locked = isModelLockActive(c, model);
+    if (excluded || locked) {
+      const lockUntil = getEarliestModelLockUntil(c);
+      log.debug("AUTH", `  → ${c.id?.slice(0, 8)} | ${excluded ? "excluded" : ""} ${locked ? `modelLocked(${model}) until ${lockUntil}` : ""}`);
+    }
+  });
+
+  if (availableConnections.length === 0) {
+    // Find earliest persistent lock or lazy Antigravity quota-cache reset for retry timing.
+    const lockedConns = connections.filter(c => isModelLockActive(c, model));
+    const expiries = lockedConns.map(c => getEarliestModelLockUntil(c)).filter(Boolean);
+    if (isAntigravity && model && antigravityQuotaCache) {
+      connections.forEach((c) => {
+        const resetAt = antigravityQuotaCache.get(c.id)?.[model]?.resetAt;
+        if (resetAt && new Date(resetAt).getTime() > Date.now()) expiries.push(resetAt);
+      });
+    }
+    const earliest = expiries.sort()[0] || null;
+    if (earliest) {
+      const earliestConn = lockedConns[0];
+      log.warn("AUTH", `${provider} | all ${connections.length} accounts locked for ${model || "all"} (${formatRetryAfter(earliest)}) | lastError=${earliestConn?.lastError?.slice(0, 50)}`);
+      return {
+        allRateLimited: true,
+        retryAfter: earliest,
+        retryAfterHuman: formatRetryAfter(earliest),
+        lastError: earliestConn?.lastError || null,
+        lastErrorCode: earliestConn?.errorCode || null
+      };
+    }
+    log.warn("AUTH", `${provider} | all ${connections.length} accounts unavailable`);
+    return null;
+  }
+
+  const settings = await getSettings();
+  // Per-provider strategy overrides global setting
+  const providerOverride = (settings.providerStrategies || {})[providerId] || {};
+  const strategy = providerOverride.fallbackStrategy || settings.fallbackStrategy || "fill-first";
+
+  let connection;
+  // Pin to preferred connection if specified and available
+  if (preferredConnectionId) {
+    connection = availableConnections.find((c) => c.id === preferredConnectionId);
+    if (connection) {
+      log.info("AUTH", `${provider} | pinned to ${connection.id?.slice(0, 8)} (${connection.name || connection.email || "unnamed"})`);
+    }
+  }
+  if (connection) {
+    // skip strategy
+  } else if (strategy === "round-robin") {
+    const stickyLimit = providerOverride.stickyRoundRobinLimit || settings.stickyRoundRobinLimit || 3;
+
+    // Pending (not yet persisted) rotation beats the row. A use recorded inside
+    // the debounce window is invisible to SQLite, and without the overlay two
+    // concurrent callers would both see the same "least recently used" account.
+    const effective = availableConnections.map((c) => {
+      const pending = rotationOf(c.id);
+      return pending ? { ...c, ...pending } : c;
+    });
+
+    const byNewest = (a, b) => {
+      if (!a.lastUsedAt && !b.lastUsedAt) return (a.priority || 999) - (b.priority || 999);
+      if (!a.lastUsedAt) return 1;
+      if (!b.lastUsedAt) return -1;
+      return new Date(b.lastUsedAt) - new Date(a.lastUsedAt);
+    };
+    const byOldest = (a, b) => {
+      if (!a.lastUsedAt && !b.lastUsedAt) return (a.priority || 999) - (b.priority || 999);
+      if (!a.lastUsedAt) return -1;
+      if (!b.lastUsedAt) return 1;
+      return new Date(a.lastUsedAt) - new Date(b.lastUsedAt);
+    };
+
+    const current = [...effective].sort(byNewest)[0];
+    const currentCount = current?.consecutiveUseCount || 0;
+
+    if (current && current.lastUsedAt && currentCount < stickyLimit) {
+      // Stay with current account
+      connection = current;
+      markUsed(connection.id, currentCount + 1);
+    } else {
+      // Pick the least recently used (excluding current if possible)
+      connection = [...effective].sort(byOldest)[0];
+      markUsed(connection.id, 1);
+    }
+  } else {
+    // Default: fill-first (already sorted by priority in getProviderConnections)
+    connection = availableConnections[0];
+  }
+
+  const resolvedProxy = await resolveConnectionProxyConfig(connection.providerSpecificData || {});
+
+  return {
+    authType: connection.authType,
+    apiKey: connection.apiKey,
+    accessToken: connection.accessToken,
+    refreshToken: connection.refreshToken,
+    idToken: connection.idToken,
+    expiresAt: connection.expiresAt,
+    expiresIn: connection.expiresIn,
+    lastRefreshAt: connection.lastRefreshAt,
+    projectId: connection.projectId,
+    connectionName: connection.displayName || connection.name || connection.email || connection.id,
+    copilotToken: connection.providerSpecificData?.copilotToken,
+    providerSpecificData: {
+      ...(connection.providerSpecificData || {}),
+      connectionProxyEnabled: resolvedProxy.connectionProxyEnabled,
+      connectionProxyUrl: resolvedProxy.connectionProxyUrl,
+      connectionNoProxy: resolvedProxy.connectionNoProxy,
+      connectionProxyPoolId: resolvedProxy.proxyPoolId || null,
+      vercelRelayUrl: resolvedProxy.vercelRelayUrl || "",
+      strictProxy: resolvedProxy.strictProxy === true,
+    },
+    connectionId: connection.id,
+    // Include current status for optimization check
+    testStatus: connection.testStatus,
+    lastError: connection.lastError,
+    // Pass full connection for clearAccountError to read modelLock_* keys
+    _connection: connection
+  };
 }
 
 /**

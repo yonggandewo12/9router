@@ -77,21 +77,40 @@ function collectImageRefs(body, sourceFormat) {
  * No-op when target accepts remote URLs (e.g. openai, claude) or body has none.
  * @returns {Promise<number>} count of images converted
  */
+// Image URLs in one turn are independent, and each result writes back into its
+// own block — so fetching them in a small batch turns N sequential round trips
+// into ceil(N / 4).
+const IMAGE_FETCH_CONCURRENCY = 4;
+
+function applyFetchedImage(ref, fetched) {
+  if (ref.set) {
+    ref.set(fetched.url);
+  } else if (ref.part) {
+    delete ref.part.fileData;
+    ref.part.inlineData = { mimeType: fetched.mimeType, data: fetched.url.split(",")[1] };
+  } else if (ref.claudeBlock) {
+    ref.claudeBlock.source = { type: "base64", media_type: fetched.mimeType, data: fetched.url.split(",")[1] };
+  }
+}
+
 export async function prefetchRemoteImages(body, sourceFormat, targetFormat, options = {}) {
   if (!body || !TARGETS_NEED_BASE64.has(targetFormat)) return 0;
   const refs = collectImageRefs(body, sourceFormat);
-  if (!refs.length) return 0;
+  const pending = refs.filter((ref) => !parseDataUri(ref.get()));
+  if (!pending.length) return 0;
 
   let converted = 0;
-  for (const ref of refs) {
-    const url = ref.get();
-    if (parseDataUri(url)) continue; // already inline
-    const fetched = await fetchImageAsBase64(url, options);
-    if (!fetched) continue;
-    if (ref.set) ref.set(fetched.url);
-    else if (ref.part) { delete ref.part.fileData; ref.part.inlineData = { mimeType: fetched.mimeType, data: fetched.url.split(",")[1] }; }
-    else if (ref.claudeBlock) ref.claudeBlock.source = { type: "base64", media_type: fetched.mimeType, data: fetched.url.split(",")[1] };
-    converted++;
-  }
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < pending.length) {
+      const ref = pending[cursor++];
+      const fetched = await fetchImageAsBase64(ref.get(), options);
+      if (!fetched) continue;
+      applyFetchedImage(ref, fetched);
+      converted++;
+    }
+  };
+
+  await Promise.all(Array.from({ length: Math.min(IMAGE_FETCH_CONCURRENCY, pending.length) }, worker));
   return converted;
 }

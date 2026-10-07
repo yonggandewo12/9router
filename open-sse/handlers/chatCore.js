@@ -5,6 +5,7 @@ import { FORMATS } from "../translator/formats.js";
 import { normalizeClaudePassthrough, anchorClaudeCache } from "../translator/formats/claude.js";
 import { createStreamController } from "../utils/streamHandler.js";
 import { refreshWithRetry } from "../services/tokenRefresh.js";
+import { withCredentialRefreshLock } from "../services/oauthCredentialManager.js";
 import { createRequestLogger } from "../utils/requestLogger.js";
 import { getModelTargetFormat, getModelSupportedFormats, getModelStrip, getModelUpstreamId, getModelType, PROVIDER_ID_TO_ALIAS } from "../config/providerModels.js";
 import { PROVIDERS } from "../config/providers.js";
@@ -63,6 +64,11 @@ export function stripContinuityFields(body) {
 export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, headroomEnabled, headroomUrl, headroomCompressUserMessages, headroomTimeoutMs, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking, providerOverrides }) {
   const { provider, model } = modelInfo;
   const requestStartTime = Date.now();
+  // Local-pipeline stopwatch. TTFT is measured from requestStartTime, so without
+  // this split a slow provider and slow self-service look identical in the logs.
+  const perf = { media: 0, translate: 0, savers: 0, prep: 0 };
+  let perfFrom = requestStartTime;
+  const stampPerf = (key) => { const now = Date.now(); perf[key] = now - perfFrom; perfFrom = now; };
   // Stable per-session color so all lines of one CLI conversation share a tag
   const sessionSeed = (() => {
     try {
@@ -180,6 +186,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       const n = await prefetchRemoteImages(body, sourceFormat, targetFormat, { signal: undefined });
       if (n > 0) log?.debug?.("MODALITY", `prefetched ${n} remote image(s) for ${targetFormat}`);
     } catch (e) { log?.warn?.("MODALITY", `image prefetch failed: ${e.message}`); }
+    stampPerf("media");
   }
 
   let translatedBody;
@@ -215,6 +222,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     translatedBody.model = stripThinkingSuffix(upstreamModel);
     stripContinuityFields(translatedBody);
   }
+  stampPerf("translate");
 
   // Tool normalization: MCP-equivalent built-in dedup (Claude clients) + same-name
   // dedup for DeepSeek models (upstream rejects duplicate tool names on all endpoints).
@@ -313,10 +321,14 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   }
 
   if (xf.length && log?.line) log.line(reqTag, "⚙", xf.join(" · "));
+  stampPerf("savers");
 
   // Pin cache breakpoints to the final body — every saver above can reshape
   // system/tools/messages, and a stale anchor costs a full prefix rewrite.
-  if (passthrough && clientTool === "claude") anchorClaudeCache(translatedBody);
+  // Runs on translated bodies too: prepareClaudeRequest anchored inside
+  // translateRequest, before dedupe/tool-typing/RTK/headroom/caveman/pxpipe got
+  // their say, so without this the anchor can sit on a deleted tool or mid-array.
+  if (finalFormat === FORMATS.CLAUDE) anchorClaudeCache(translatedBody);
 
   const executor = getExecutor(provider);
   trackPendingRequest(model, provider, connectionId, true);
@@ -373,6 +385,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   // Most executors return their registry format. Cursor AgentService is an
   // exception: it is decoded by the executor into OpenAI-compatible output.
   let providerResponseFormat = targetFormat;
+  perf.prep = Date.now() - requestStartTime;
   try {
     const result = await executor.execute({
       model,
@@ -401,7 +414,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     appendRequestLog({ model, provider, connectionId, status: `FAILED ${error.name === "AbortError" ? 499 : HTTP_STATUS.BAD_GATEWAY}` }).catch(() => { });
     saveRequestDetail(buildRequestDetail({
       provider, model, connectionId,
-      latency: { ttft: 0, total: Date.now() - requestStartTime },
+      latency: { ttft: 0, total: Date.now() - requestStartTime, ...perf },
       tokens: { prompt_tokens: 0, completion_tokens: 0 },
       request: extractRequestConfig(body, stream),
       providerRequest: translatedBody || null,
@@ -428,7 +441,9 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       // providers (xAI/grok-cli) issue a new RT on every refresh; without this,
       // refreshWithRetry's 2nd/3rd attempt reuses the already-consumed RT →
       // invalid_grant → auth_failed retryable=false.
-      const newCredentials = await refreshWithRetry(async () => {
+      // The lock makes concurrent 401s on the same account share one refresh
+      // instead of each burning a (single-use) refresh token.
+      const newCredentials = await withCredentialRefreshLock(provider, credentials, () => refreshWithRetry(async () => {
         // proxyOptions is in scope and every executor's refreshCredentials accepts
         // it — without it a 401-refresh silently bypasses the connection proxy
         // (strictProxy connections then fail the refresh outright).
@@ -438,7 +453,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
           credentials.refreshToken = result.refreshToken;
         }
         return result;
-      }, 3, log);
+      }, 3, log));
       if (newCredentials?.accessToken || newCredentials?.copilotToken) {
         if (log?.line) log.line(reqTag, "🔑", `TOKEN REFRESHED · ${provider}/${model}`);
         Object.assign(credentials, newCredentials);
@@ -479,7 +494,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     appendRequestLog({ model, provider, connectionId, status: `FAILED ${statusCode}` }).catch(() => { });
     saveRequestDetail(buildRequestDetail({
       provider, model, connectionId,
-      latency: { ttft: 0, total: Date.now() - requestStartTime },
+      latency: { ttft: 0, total: Date.now() - requestStartTime, ...perf },
       tokens: { prompt_tokens: 0, completion_tokens: 0 },
       request: extractRequestConfig(body, stream),
       providerRequest: finalBody || translatedBody || null,
@@ -497,7 +512,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     return createErrorResult(statusCode, errMsg, resetsAtMs, upstreamResponseHeaders(providerResponse.headers));
   }
 
-  const sharedCtx = { provider, model, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, pxpipe: pxpipeSummary, reqTag, log };
+  const sharedCtx = { provider, model, body, stream, translatedBody, finalBody, requestStartTime, perf, connectionId, apiKey, clientRawRequest, onRequestSuccess, pxpipe: pxpipeSummary, reqTag, log };
   const appendLog = (extra) => appendRequestLog({ model, provider, connectionId, ...extra }).catch(() => { });
   const trackDone = () => trackPendingRequest(model, provider, connectionId, false);
 

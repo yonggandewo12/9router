@@ -111,6 +111,23 @@ export function resolveRetryEntry(entry) {
   };
 }
 
+// Ceiling for exponential backoff so a long attempt chain can't park a request.
+const RETRY_BACKOFF_CAP_MS = 30000;
+
+/**
+ * Exponential backoff with full jitter (AWS style): a uniform delay in
+ * [0, min(cap, delayMs * 2^(attempt-1))].
+ *
+ * Without jitter every router instance that hit the same 503 woke on the same
+ * timer, so one provider blip turned into a synchronized retry storm. A
+ * configured delayMs of 0 stays 0, keeping instant-retry tests deterministic.
+ */
+export function jitteredRetryDelayMs(delayMs, attempt) {
+  if (!(delayMs > 0)) return 0;
+  const ceiling = Math.min(RETRY_BACKOFF_CAP_MS, delayMs * 2 ** Math.max(0, attempt - 1));
+  return Math.round(Math.random() * ceiling);
+}
+
 // Requests containing these texts will bypass provider
 export const SKIP_PATTERNS = [
   "Please write a 5-10 word title for the following conversation:"

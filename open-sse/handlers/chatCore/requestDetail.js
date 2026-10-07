@@ -82,7 +82,7 @@ export function buildRequestDetail(base, overrides = {}) {
   };
 }
 
-// Build the "done" summary: duration, ttft, in/out tokens with cache breakdown
+// Build the "done" summary: duration, ttft, local prep split, in/out tokens with cache breakdown
 export function formatDoneLine({ usage, latency }) {
   const u = usage || {};
   const inTok = u.prompt_tokens ?? u.input_tokens ?? 0;
@@ -97,7 +97,18 @@ export function formatDoneLine({ usage, latency }) {
     inStr += ` (CACHE ${parts.join(" ")})`;
   }
   const ttftStr = latency?.ttft ? ` · TTFT ${latency.ttft}ms` : "";
-  return `DONE ${latency?.total ?? 0}ms${ttftStr} · ${inStr} · OUT ${outTok}`;
+  // PREP = everything the router did before the upstream call; subtracting it from
+  // TTFT separates "provider is slow" from "we are slow".
+  let prepStr = "";
+  if (Number.isFinite(latency?.prep)) {
+    const seg = [
+      latency.media ? `m${latency.media}` : "",
+      latency.translate ? `t${latency.translate}` : "",
+      latency.savers ? `s${latency.savers}` : "",
+    ].filter(Boolean).join("/");
+    prepStr = ` · PREP ${latency.prep}ms${seg ? `(${seg})` : ""}`;
+  }
+  return `DONE ${latency?.total ?? 0}ms${ttftStr}${prepStr} · ${inStr} · OUT ${outTok}`;
 }
 
 export function saveUsageStats({ provider, model, tokens, connectionId, apiKey, endpoint, label = "USAGE", silent = false }) {

@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import {
   getRefreshLeadMs,
   isUnrecoverableRefreshError,
@@ -9,6 +10,11 @@ import { PROVIDER_OAUTH } from "../providers/index.js";
 export const CODEX_MAX_REFRESH_AGE_MS = PROVIDER_OAUTH["codex"]?.maxRefreshAgeMs;
 
 const refreshLocks = new Map();
+
+// Locks held by the current async chain. A provider's refreshCredentials() may
+// itself take the same lock (codearts, deveco); without this the inner call would
+// be handed the outer promise it is supposed to resolve and deadlock the refresh.
+const heldLocks = new AsyncLocalStorage();
 
 function parseTimeMs(value) {
   if (value === undefined || value === null || value === "") return null;
@@ -133,11 +139,16 @@ function getRefreshLockKey(provider, credentials) {
 
 export async function withCredentialRefreshLock(provider, credentials, refreshFn) {
   const key = getRefreshLockKey(provider, credentials);
+  const held = heldLocks.getStore();
+  // Re-entrant: this chain already owns the lock for this account, so run the
+  // refresh directly instead of waiting on the promise we are resolving.
+  if (held?.has(key)) return refreshFn();
+
   const existing = refreshLocks.get(key);
   if (existing) return existing;
 
   const pending = Promise.resolve()
-    .then(refreshFn)
+    .then(() => heldLocks.run(new Set([...(held || []), key]), refreshFn))
     .finally(() => {
       refreshLocks.delete(key);
     });

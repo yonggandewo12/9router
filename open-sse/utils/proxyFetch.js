@@ -1,4 +1,5 @@
 import { Readable } from "stream";
+import https from "https";
 import { MEMORY_CONFIG } from "../config/runtimeConfig.js";
 import { dbg } from "./debugLog.js";
 
@@ -112,6 +113,12 @@ const TLS_CERT_ERRORS = new Set([
 function isTlsCertError(err) {
   const code = err?.cause?.code || err?.code;
   return TLS_CERT_ERRORS.has(code);
+}
+
+// A cancelled request must not be re-issued on a fallback route: the caller has
+// already gone away, and replaying it would double the upstream work.
+function isAbortError(err) {
+  return err?.name === "AbortError" || err?.code === "ABORT_ERR";
 }
 const MITM_BYPASS_HOSTS = [
   "cloudcode-pa.googleapis.com",
@@ -236,9 +243,12 @@ async function getDispatcher(proxyUrl, insecure = false) {
 
   const key = `${normalized || "direct"}::${insecure ? "insecure" : "secure"}`;
   if (!proxyDispatchers.has(key)) {
-    // Evict oldest entry if max size reached
+    // Evict oldest entry if max size reached — and actually close it, or its
+    // pooled sockets stay open for the life of the process.
     if (proxyDispatchers.size >= MEMORY_CONFIG.proxyDispatchersMaxSize) {
-      proxyDispatchers.delete(proxyDispatchers.keys().next().value);
+      const [oldestKey, oldest] = proxyDispatchers.entries().next().value;
+      proxyDispatchers.delete(oldestKey);
+      Promise.resolve(oldest?.close?.()).catch(() => {});
     }
     const { Agent, ProxyAgent } = await import("undici");
     const connect = insecure ? { rejectUnauthorized: false } : undefined;
@@ -270,62 +280,70 @@ async function fetchWithTlsFallback(url, options, proxyUrl) {
   }
 }
 
+// One pooled agent for every DNS-bypassed request: Node keys keep-alive sockets
+// by servername (verified locally), so different pinned hosts can never share a
+// TLS session, while repeated calls to the same host stop paying a full
+// TCP+TLS handshake each time.
+const bypassAgent = new https.Agent({ keepAlive: true });
+
 /**
- * Create HTTPS request with manual socket connection (bypass DNS)
+ * HTTPS request to a resolved real IP (bypass DNS)
  */
 async function createBypassRequest(parsedUrl, realIP, options) {
-  const httpsModule = await import("https");
-  const netModule = await import("net");
-  // CJS modules expose exports via .default in ESM dynamic import context
-  const https = httpsModule.default ?? httpsModule;
-  const net = netModule.default ?? netModule;
-
   return new Promise((resolve, reject) => {
-    const socket = new net.Socket();
+    const reqOptions = {
+      agent: bypassAgent,
+      host: realIP,
+      port: HTTPS_PORT,
+      // SNI + cert hostname are validated against the hostname the caller
+      // asked for, not the IP we connect to. This keeps the DNS bypass (avoiding
+      // /etc/hosts interception) while still rejecting an on-path attacker that
+      // presents a different certificate. MITM_BYPASS_HOSTS are all public-CA
+      // issued (Google / GitHub / AWS / Cursor), so default verification works.
+      servername: parsedUrl.hostname,
+      path: parsedUrl.pathname + parsedUrl.search,
+      method: options.method || "POST",
+      headers: {
+        ...options.headers,
+        Host: parsedUrl.hostname,
+      },
+    };
 
-    socket.connect(HTTPS_PORT, realIP, () => {
-      const reqOptions = {
-        socket,
-        // SNI + cert hostname are validated against the hostname the caller
-        // asked for, not the IP we connected to. This keeps the DNS-bypass
-        // (avoiding /etc/hosts MITM) while still rejecting on-path attackers
-        // that present a different cert. The MITM_BYPASS_HOSTS targets are
-        // all public-CA-issued (Google / GitHub / AWS / Cursor) so default
-        // verification works without any extra trust store.
-        servername: parsedUrl.hostname,
-        path: parsedUrl.pathname + parsedUrl.search,
-        method: options.method || "POST",
-        headers: {
-          ...options.headers,
-          Host: parsedUrl.hostname,
+    // The bypass path used to be uncancellable: an aborted client left the
+    // request running until the provider closed the connection on its own.
+    const onAbort = () => req.destroy(new DOMException("Aborted", "AbortError"));
+    if (options.signal?.aborted) return reject(new DOMException("Aborted", "AbortError"));
+
+    const req = https.request(reqOptions, (res) => {
+      const response = {
+        ok: res.statusCode >= HTTP_SUCCESS_MIN && res.statusCode < HTTP_SUCCESS_MAX,
+        status: res.statusCode,
+        statusText: res.statusMessage,
+        headers: new Map(Object.entries(res.headers)),
+        body: Readable.toWeb(res),
+        text: async () => {
+          const chunks = [];
+          for await (const chunk of res) chunks.push(chunk);
+          return Buffer.concat(chunks).toString();
         },
+        json: async () => JSON.parse(await response.text()),
       };
-
-      const req = https.request(reqOptions, (res) => {
-        const response = {
-          ok: res.statusCode >= HTTP_SUCCESS_MIN && res.statusCode < HTTP_SUCCESS_MAX,
-          status: res.statusCode,
-          statusText: res.statusMessage,
-          headers: new Map(Object.entries(res.headers)),
-          body: Readable.toWeb(res),
-          text: async () => {
-            const chunks = [];
-            for await (const chunk of res) chunks.push(chunk);
-            return Buffer.concat(chunks).toString();
-          },
-          json: async () => JSON.parse(await response.text()),
-        };
-        resolve(response);
+      res.once("close", () => {
+        if (options.signal) options.signal.removeEventListener("abort", onAbort);
       });
-
-      req.on("error", reject);
-      if (options.body) {
-        req.write(typeof options.body === "string" ? options.body : JSON.stringify(options.body));
-      }
-      req.end();
+      resolve(response);
     });
 
-    socket.on("error", reject);
+    if (options.signal) options.signal.addEventListener("abort", onAbort, { once: true });
+
+    req.on("error", (err) => {
+      if (options.signal) options.signal.removeEventListener("abort", onAbort);
+      reject(err);
+    });
+    if (options.body) {
+      req.write(typeof options.body === "string" ? options.body : JSON.stringify(options.body));
+    }
+    req.end();
   });
 }
 
@@ -370,6 +388,7 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
       const realIP = await resolveRealIP(parsedUrl.hostname);
       if (realIP) return await createBypassRequest(parsedUrl, realIP, options);
     } catch (error) {
+      if (isAbortError(error)) throw error;
       console.warn(`[ProxyFetch] MITM bypass failed: ${error.message}`);
     }
   }

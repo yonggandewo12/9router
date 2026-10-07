@@ -1,9 +1,19 @@
-import { HTTP_STATUS, RETRY_CONFIG, DEFAULT_RETRY_CONFIG, resolveRetryEntry, FETCH_CONNECT_TIMEOUT_MS } from "../config/runtimeConfig.js";
+import { HTTP_STATUS, RETRY_CONFIG, DEFAULT_RETRY_CONFIG, resolveRetryEntry, jitteredRetryDelayMs, FETCH_CONNECT_TIMEOUT_MS } from "../config/runtimeConfig.js";
 import { shouldRefreshCredentials } from "../services/oauthCredentialManager.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import { dbg } from "../utils/debugLog.js";
 import { ANTHROPIC_API_VERSION, OPENAI_COMPAT_BASE, ANTHROPIC_COMPAT_BASE } from "../providers/shared.js";
 import { resolveOpenAICompatibleApiType } from "../services/provider.js";
+
+// Cancel an upstream response we are throwing away. Leaving the body unread
+// holds the connection until GC and, on streaming endpoints, keeps the provider
+// generating a completion nobody will read.
+function discardResponse(response) {
+  try {
+    const cancelled = response?.body?.cancel?.();
+    if (cancelled?.catch) cancelled.catch(() => {});
+  } catch { /* cancel is best-effort */ }
+}
 
 /**
  * BaseExecutor - Base class for provider executors
@@ -112,7 +122,7 @@ export class BaseExecutor {
       const { attempts, delayMs } = resolveRetryEntry(retryConfig[statusKey]);
       if (attempts <= 0 || retryAttemptsByUrl[urlIndex] >= attempts) return false;
       // Hook: subclass may derive delay from the response (headers/body). null → skip retry, use fallback.
-      let waitMs = delayMs;
+      let waitMs = jitteredRetryDelayMs(delayMs, retryAttemptsByUrl[urlIndex] + 1);
       if (response && this.computeRetryDelay) {
         const dynamic = await this.computeRetryDelay(response, retryAttemptsByUrl[urlIndex] + 1, delayMs);
         if (dynamic === false) return false; // hook vetoes retry (e.g. Retry-After too long)
@@ -154,11 +164,14 @@ export class BaseExecutor {
         const cl = response.headers?.get?.("content-length") || "?";
         dbg("FETCH", `${this.provider.toUpperCase()} ← ${response.status} | ttft=${Date.now() - fetchT0}ms | ct=${ct} | cl=${cl}`);
 
-        if (await tryRetry(urlIndex, response.status, `status ${response.status}`, response)) { urlIndex--; continue; }
+        // Cancel only once the retry decision is made: computeRetryDelay above may
+        // still need to read the response (Retry-After, quota body).
+        if (await tryRetry(urlIndex, response.status, `status ${response.status}`, response)) { discardResponse(response); urlIndex--; continue; }
 
         if (this.shouldRetry(response.status, urlIndex)) {
           log?.debug?.("RETRY", `${response.status} on ${url}, trying fallback ${urlIndex + 1}`);
           lastStatus = response.status;
+          discardResponse(response);
           continue;
         }
 

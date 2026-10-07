@@ -8,6 +8,7 @@ vi.mock("../../open-sse/utils/proxyFetch.js", () => ({
 }));
 
 const { BaseExecutor } = await import("../../open-sse/executors/base.js");
+const { jitteredRetryDelayMs } = await import("../../open-sse/config/runtimeConfig.js");
 
 function res(status) {
   return { status, headers: { get: () => "" } };
@@ -103,5 +104,35 @@ describe("BaseExecutor.execute — computeRetryDelay hook veto", () => {
     // hook vetoes retry → no fallback url → returns the 429 response as-is
     expect(out.response.status).toBe(429);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("retry backoff", () => {
+  it("jitters the delay so concurrent clients do not retry in lockstep", () => {
+    expect(jitteredRetryDelayMs(0, 1)).toBe(0);
+
+    const first = Array.from({ length: 100 }, () => jitteredRetryDelayMs(3000, 1));
+    expect(new Set(first).size).toBeGreaterThan(1);
+    expect(Math.max(...first)).toBeLessThanOrEqual(3000);
+
+    // exponential on the attempt number, capped so a chain cannot park a request
+    expect(jitteredRetryDelayMs(3000, 10)).toBeLessThanOrEqual(30000);
+  });
+
+  it("cancels the discarded upstream body before retrying", async () => {
+    const withBody = (status) => {
+      const cancel = vi.fn(() => Promise.resolve());
+      return { status, headers: { get: () => "" }, body: { cancel } };
+    };
+    const ex = makeExec({ baseUrl: "https://x/api", retry: { 502: { attempts: 2, delayMs: 0 } } });
+    const dropped = withBody(502);
+    const kept = withBody(200);
+    fetchMock.mockResolvedValueOnce(dropped).mockResolvedValueOnce(kept);
+
+    const out = await ex.execute({ model: "m", body: {}, stream: false, credentials: creds });
+
+    expect(dropped.body.cancel).toHaveBeenCalledTimes(1);
+    expect(out.response).toBe(kept);
+    expect(kept.body.cancel).not.toHaveBeenCalled();
   });
 });

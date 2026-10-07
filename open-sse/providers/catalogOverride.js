@@ -1,9 +1,10 @@
 // Read side of the model catalog synced from models.dev.
 //
-// The file is the source of truth; the only thing held in memory is a parsed
-// copy dropped as soon as the file's mtime changes. getCapabilitiesForModel is
-// synchronous and runs per request, so the hot path is one stat (~1us) and the
-// parse (~0.1ms on a ~18KB file) only reruns after a sync.
+// The file is the source of truth; what is held in memory is a parsed copy plus
+// the mtime it was read at. getCapabilitiesForModel is synchronous and runs per
+// request, so the stat that detects an outside rewrite is throttled to one per
+// STAT_TTL_MS — a sync in this process calls invalidateCatalog() right after it
+// writes, so the timely path is exact and only a foreign writer can lag a second.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -19,8 +20,11 @@ export const CATALOG_RAW_FILE = path.join(DATA_DIR, "model-catalog-raw.json");
 export const CATALOG_VERSION = 2;
 
 const EMPTY = { models: {}, providers: {} };
+const STAT_TTL_MS = 1000;
 let cache = EMPTY;
 let cachedMtime = -1;
+let loaded = false;
+let lastStatAt = 0;
 
 // "zai-org/GLM-4.6V:free" -> "glm-4.6v"
 function baseId(model) {
@@ -30,6 +34,10 @@ function baseId(model) {
 }
 
 function load() {
+  if (loaded && Date.now() - lastStatAt < STAT_TTL_MS) return cache;
+  lastStatAt = Date.now();
+  loaded = true;
+
   let mtime;
   try {
     mtime = fs.statSync(CATALOG_FILE).mtimeMs;
@@ -71,6 +79,7 @@ export function getCatalogLimits(provider, model) {
 
 // Force a re-read on the next lookup (called right after a sync writes the file).
 export function invalidateCatalog() {
+  loaded = false;
   cachedMtime = -1;
 }
 
