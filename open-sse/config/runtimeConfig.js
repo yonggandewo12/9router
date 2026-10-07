@@ -58,6 +58,20 @@ export const STREAM_FIRST_CHUNK_TIMEOUT_MS = envMs("STREAM_FIRST_CHUNK_TIMEOUT_M
 // Fetch connect timeout: abort if upstream doesn't return response headers within this duration
 export const FETCH_CONNECT_TIMEOUT_MS = envMs("FETCH_CONNECT_TIMEOUT_MS", 60 * 1000);
 
+// How long an idle pooled socket to an upstream may be kept for reuse.
+// undici honours an advertised `Keep-Alive: timeout=` from the upstream and only
+// falls back to its own 4s default when the upstream says nothing — and neither
+// copilot.tencent.com nor api.anthropic.com says anything. So every turn-to-turn
+// gap (always >4s in an agent session) re-did DNS+TCP+TLS: measured
+// 67-75ms reused vs 121-136ms re-handshaked on tencent, 186ms vs 601ms on
+// anthropic. Raising it does not risk writing into a socket the upstream already
+// closed — undici reaps on the close event (400 POSTs straddling a 250ms
+// server-side idle timeout: 0 failures).
+export const UPSTREAM_KEEPALIVE_TIMEOUT_MS = envMs("UPSTREAM_KEEPALIVE_TIMEOUT_MS", 60 * 1000);
+
+// Ceiling for the above when an upstream advertises its own `Keep-Alive: timeout`.
+export const UPSTREAM_KEEPALIVE_MAX_MS = envMs("UPSTREAM_KEEPALIVE_MAX_MS", 600 * 1000);
+
 // OpenCode CLI transport. `opencode run --format json` emits a text part only once it
 // completes, so stdout is silent for the whole generation — idleMs is therefore a
 // STARTUP grace (spawn → first byte, normally step_start), not an inter-chunk stall

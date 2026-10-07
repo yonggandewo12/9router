@@ -14,6 +14,7 @@ export function parseDataUri(url) {
 
 import { lookup } from "node:dns/promises";
 import { Agent } from "undici";
+import { UPSTREAM_KEEPALIVE_TIMEOUT_MS, UPSTREAM_KEEPALIVE_MAX_MS } from "../../config/runtimeConfig.js";
 import { MAX_IMAGE_BYTES, FETCH_TIMEOUT_MS, IMAGE_SIGNATURES, BLOCKED_HOSTS } from "../../config/mediaConfig.js";
 
 // True if an IPv4/IPv6 address is private/reserved (SSRF target).
@@ -64,6 +65,8 @@ function getPinnedDispatcher(hostname, record) {
       oldest.close().catch(() => {});
     }
     dispatcher = new Agent({
+      keepAliveTimeout: UPSTREAM_KEEPALIVE_TIMEOUT_MS,
+      keepAliveMaxTimeout: UPSTREAM_KEEPALIVE_MAX_MS,
       connect: { lookup: (_h, _o, cb) => cb(null, [{ address: record.address, family: record.family }]) },
     });
     pinnedDispatchers.set(key, dispatcher);

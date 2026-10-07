@@ -1,6 +1,6 @@
 import { Readable } from "stream";
 import https from "https";
-import { MEMORY_CONFIG } from "../config/runtimeConfig.js";
+import { MEMORY_CONFIG, UPSTREAM_KEEPALIVE_TIMEOUT_MS, UPSTREAM_KEEPALIVE_MAX_MS } from "../config/runtimeConfig.js";
 import { dbg } from "./debugLog.js";
 
 const originalFetch = globalThis.fetch;
@@ -237,9 +237,30 @@ function resolveConnectionProxyUrl(targetUrl, proxyOptions) {
 /**
  * Create proxy dispatcher lazily (undici-compatible)
  */
+// Every dispatcher we build shares the same idle-socket policy: undici's 4s
+// default is shorter than the gap between two turns, so upstream sockets were
+// torn down and re-handshaked on each request.
+const KEEPALIVE_OPTS = {
+  keepAliveTimeout: UPSTREAM_KEEPALIVE_TIMEOUT_MS,
+  keepAliveMaxTimeout: UPSTREAM_KEEPALIVE_MAX_MS,
+};
+
+// One agent for all direct (no-proxy) upstream traffic. Deliberately NOT stored
+// in the LRU map below: closing an Agent lets in-flight requests finish but
+// rejects every later dispatch, so an evicted shared agent would surface as
+// UND_ERR_CLOSED on the next request.
+let directAgent = null;
+async function getDirectAgent() {
+  if (!directAgent) {
+    const { Agent } = await import("undici");
+    directAgent = new Agent(KEEPALIVE_OPTS);
+  }
+  return directAgent;
+}
+
 async function getDispatcher(proxyUrl, insecure = false) {
   const normalized = normalizeProxyUrl(proxyUrl);
-  if (!normalized && !insecure) return null;
+  if (!normalized && !insecure) return await getDirectAgent();
 
   const key = `${normalized || "direct"}::${insecure ? "insecure" : "secure"}`;
   if (!proxyDispatchers.has(key)) {
@@ -253,8 +274,8 @@ async function getDispatcher(proxyUrl, insecure = false) {
     const { Agent, ProxyAgent } = await import("undici");
     const connect = insecure ? { rejectUnauthorized: false } : undefined;
     const dispatcher = normalized
-      ? new ProxyAgent({ uri: normalized, ...(insecure ? { requestTls: connect } : {}) })
-      : new Agent({ connect });
+      ? new ProxyAgent({ uri: normalized, ...KEEPALIVE_OPTS, ...(insecure ? { requestTls: connect } : {}) })
+      : new Agent({ ...KEEPALIVE_OPTS, connect });
     proxyDispatchers.set(key, dispatcher);
   }
 
@@ -263,8 +284,9 @@ async function getDispatcher(proxyUrl, insecure = false) {
 
 async function fetchWithTlsFallback(url, options, proxyUrl) {
   try {
-    const dispatcher = proxyUrl ? await getDispatcher(proxyUrl) : undefined;
-    return await originalFetch(url, dispatcher ? { ...options, dispatcher } : options);
+    // A caller-supplied dispatcher (e.g. a pinned-IP image fetch) wins over ours.
+    const dispatcher = options.dispatcher || await getDispatcher(proxyUrl);
+    return await originalFetch(url, { ...options, dispatcher });
   } catch (err) {
     const isStrictSsl = process.env.STRICT_SSL === "true" || process.env.STRICT_SSL === "1";
     if (!isStrictSsl && isTlsCertError(err)) {

@@ -81,7 +81,12 @@ describe("Qoder signed inference transport", () => {
     expect(result.response.ok).toBe(true);
     await result.response.text();
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(!!fetchMock.mock.calls[0][1].dispatcher).toBe(useProxy);
+    // A dispatcher is always attached now: proxy traffic gets a ProxyAgent, direct
+    // traffic gets the shared long-keep-alive Agent. Asserting the kind is what
+    // still proves a configured proxy is actually honoured.
+    const { dispatcher } = fetchMock.mock.calls[0][1];
+    expect(dispatcher).toBeDefined();
+    expect(dispatcher.constructor.name).toBe(useProxy ? "ProxyAgent" : "Agent");
   });
 
   it("preserves caller cancellation without replaying the request", async () => {
