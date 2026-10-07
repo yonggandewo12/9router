@@ -284,8 +284,14 @@ async function getDispatcher(proxyUrl, insecure = false) {
 
 async function fetchWithTlsFallback(url, options, proxyUrl) {
   try {
-    // A caller-supplied dispatcher (e.g. a pinned-IP image fetch) wins over ours.
-    const dispatcher = options.dispatcher || await getDispatcher(proxyUrl);
+    // A resolved proxy outranks a caller-supplied dispatcher. The proxy is an
+    // egress policy (#4333: "never leave over the direct IP"); a caller
+    // dispatcher (the pinned-IP image fetch) is only a transport detail, and
+    // letting it win silently routes that request around the proxy. With no
+    // proxy the caller's dispatcher is kept, else we attach the shared agent.
+    const dispatcher = (proxyUrl || !options.dispatcher)
+      ? await getDispatcher(proxyUrl)
+      : options.dispatcher;
     return await originalFetch(url, { ...options, dispatcher });
   } catch (err) {
     const isStrictSsl = process.env.STRICT_SSL === "true" || process.env.STRICT_SSL === "1";

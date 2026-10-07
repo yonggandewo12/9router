@@ -60,13 +60,16 @@ export const FETCH_CONNECT_TIMEOUT_MS = envMs("FETCH_CONNECT_TIMEOUT_MS", 60 * 1
 
 // How long an idle pooled socket to an upstream may be kept for reuse.
 // undici honours an advertised `Keep-Alive: timeout=` from the upstream and only
-// falls back to its own 4s default when the upstream says nothing — and neither
-// copilot.tencent.com nor api.anthropic.com says anything. So every turn-to-turn
-// gap (always >4s in an agent session) re-did DNS+TCP+TLS: measured
-// 67-75ms reused vs 121-136ms re-handshaked on tencent, 186ms vs 601ms on
-// anthropic. Raising it does not risk writing into a socket the upstream already
-// closed — undici reaps on the close event (400 POSTs straddling a 250ms
-// server-side idle timeout: 0 failures).
+// falls back to its own 4s default when the upstream says nothing — and none of
+// the 11 gateways this install talks to says anything. So every turn-to-turn gap
+// (always >4s in an agent session) re-did DNS+TCP+TLS: measured 67ms reused vs
+// 121-136ms re-handshaked on tencent, 186-225ms vs 593-601ms on anthropic.
+// Raising it does not risk writing into a socket the upstream already closed —
+// undici reaps on the close event (400 POSTs straddling a 250ms server-side idle
+// timeout: 0 failures, and 0 failures reusing live gateways after 20/40/55s idle).
+// Boundary: an upstream that advertises a SHORTER timeout still wins, because it
+// is telling us when it will hang up (advertised timeout=5 → re-handshake at a 6s
+// gap; timeout=15 → reused). Providers that advertise <~8s get no benefit here.
 export const UPSTREAM_KEEPALIVE_TIMEOUT_MS = envMs("UPSTREAM_KEEPALIVE_TIMEOUT_MS", 60 * 1000);
 
 // Ceiling for the above when an upstream advertises its own `Keep-Alive: timeout`.
