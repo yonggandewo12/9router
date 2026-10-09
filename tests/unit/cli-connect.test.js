@@ -195,9 +195,14 @@ describe("connect run()", () => {
     home = fs.mkdtempSync(path.join(os.tmpdir(), "9r-connect-run-"));
     vi.spyOn(os, "homedir").mockReturnValue(home);
     vi.spyOn(console, "log").mockImplementation(() => {});
+    // crush resolves its config through XDG_CONFIG_HOME before falling back to
+    // ~/.config, so an inherited value (GitHub's Ubuntu runners set one) would
+    // write the file outside the temp home this block asserts against.
+    vi.stubEnv("XDG_CONFIG_HOME", "");
   });
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
     fs.rmSync(home, { recursive: true, force: true });
   });
 
