@@ -3,6 +3,7 @@ import { HTTP_STATUS, FETCH_CONNECT_TIMEOUT_MS } from "../config/runtimeConfig.j
 import { getExecutor } from "../executors/index.js";
 import { refreshWithRetry } from "../services/tokenRefresh.js";
 import { getEmbeddingAdapter } from "./embeddingProviders/index.js";
+import { getModelUpstreamId, PROVIDER_ID_TO_ALIAS } from "../config/providerModels.js";
 
 /**
  * Core embeddings handler — orchestrator only. Provider-specific URL/headers/body/normalize
@@ -38,6 +39,10 @@ export async function handleEmbeddingsCore({
   }
 
   const ctx = { input };
+  // Registry ids a provider prefixes itself (NVIDIA's `nvidia/nv-embedqa-e5-v5`)
+  // are stripped by /v1/models, so routing only ever sees the bare form; restore
+  // the wire id before it goes upstream.
+  const wireModel = getModelUpstreamId(PROVIDER_ID_TO_ALIAS[provider] || provider, model) || model;
   // buildUrl/buildHeaders/buildBody were called bare. An adapter that rejects a
   // misconfigured connection — selfhosted-embedding throws when no baseUrl is set
   // rather than silently falling back to api.openai.com — would have escaped this
@@ -45,9 +50,9 @@ export async function handleEmbeddingsCore({
   // configuration mistake is a 400 with the reason in it.
   let url, headers, requestBody;
   try {
-    url = adapter.buildUrl(model, credentials, ctx);
+    url = adapter.buildUrl(wireModel, credentials, ctx);
     headers = adapter.buildHeaders(credentials, ctx);
-    requestBody = adapter.buildBody(model, {
+    requestBody = adapter.buildBody(wireModel, {
       input,
       encoding_format: body.encoding_format || "float",
       dimensions: body.dimensions,
@@ -95,7 +100,7 @@ export async function handleEmbeddingsCore({
 
       try {
         const retryHeaders = adapter.buildHeaders(credentials, ctx);
-        const retryUrl = adapter.buildUrl(model, credentials, ctx);
+        const retryUrl = adapter.buildUrl(wireModel, credentials, ctx);
         providerResponse = await fetch(retryUrl, {
           method: "POST",
           headers: retryHeaders,

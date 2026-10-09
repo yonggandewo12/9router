@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
 import { createErrorResult } from "../utils/error.js";
 import { transcribeGeminiLive } from "./geminiLiveStt.js";
-import { PROVIDER_MODELS, PROVIDER_ID_TO_ALIAS } from "../config/providerModels.js";
+import { PROVIDER_MODELS, PROVIDER_ID_TO_ALIAS, getModelUpstreamId } from "../config/providerModels.js";
 import { HTTP_STATUS } from "../config/runtimeConfig.js";
 
 // Build auth headers from sttConfig + token
@@ -294,10 +294,16 @@ export async function handleSttCore({ provider, model, formData, credentials, st
   // marker; with neither, the provider-default sttConfig.format applies.
   const marker = (typeof transport === "string" && transport.trim()) ? transport.trim() : resolveModelTransport(provider, model);
 
+  // Registry ids a provider prefixes itself (NVIDIA's NIM ids) are stripped by
+  // /v1/models, so routing only ever sees the bare form; the wire id has to be
+  // restored before it goes upstream. resolveModelTransport above must keep
+  // matching on the bare id, which is what the registry stores.
+  const wireModel = getModelUpstreamId(PROVIDER_ID_TO_ALIAS[provider] || provider, model) || model;
+
   try {
     switch (marker || cfg.format) {
       case "gemini-live": {
-        const live = await transcribeGeminiLive({ cfg, file, model, token, formData, mimeType: resolveAudioContentType(file) });
+        const live = await transcribeGeminiLive({ cfg, file, model: wireModel, token, formData, mimeType: resolveAudioContentType(file) });
         // response_format parity with the OpenAI-compatible transport: default
         // envelope stays {text}; verbose_json adds segments mapped from the
         // Live API's incremental inputTranscription deltas. Those frames carry
@@ -313,13 +319,13 @@ export async function handleSttCore({ provider, model, formData, credentials, st
         }
         return jsonResponse({ text: live.text });
       }
-      case "deepgram":        return await transcribeDeepgram(cfg, file, model, token, formData);
-      case "assemblyai":      return await transcribeAssemblyAI(cfg, file, model, token);
-      case "nvidia-asr":      return await transcribeNvidia(cfg, file, model, token);
-      case "huggingface-asr": return await transcribeHuggingFace(cfg, file, model, token);
-      case "gemini-stt":      return await transcribeGemini(cfg, file, model, token, formData);
-      case "elevenlabs-stt":  return await transcribeElevenLabs(cfg, file, model, token, formData);
-      default:                return await transcribeOpenAICompatible(cfg, file, model, token, formData);
+      case "deepgram":        return await transcribeDeepgram(cfg, file, wireModel, token, formData);
+      case "assemblyai":      return await transcribeAssemblyAI(cfg, file, wireModel, token);
+      case "nvidia-asr":      return await transcribeNvidia(cfg, file, wireModel, token);
+      case "huggingface-asr": return await transcribeHuggingFace(cfg, file, wireModel, token);
+      case "gemini-stt":      return await transcribeGemini(cfg, file, wireModel, token, formData);
+      case "elevenlabs-stt":  return await transcribeElevenLabs(cfg, file, wireModel, token, formData);
+      default:                return await transcribeOpenAICompatible(cfg, file, wireModel, token, formData);
     }
   } catch (err) {
     return createErrorResult(err.status || HTTP_STATUS.BAD_GATEWAY, err.message || "STT request failed");

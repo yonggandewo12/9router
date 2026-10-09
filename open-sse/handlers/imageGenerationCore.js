@@ -4,6 +4,7 @@ import { refreshWithRetry } from "../services/tokenRefresh.js";
 import { getExecutor } from "../executors/index.js";
 import { getImageAdapter } from "./imageProviders/index.js";
 import { urlToBase64 } from "./imageProviders/_base.js";
+import { getModelUpstreamId, PROVIDER_ID_TO_ALIAS } from "../config/providerModels.js";
 
 function serializeRequestBody(requestBody) {
   if (typeof FormData !== "undefined" && requestBody instanceof FormData) return requestBody;
@@ -96,11 +97,14 @@ export async function handleImageGenerationCore({
   let url;
   let headers;
   let requestBody;
+  // A registry id the provider prefixes itself is stripped by /v1/models, so
+  // routing only sees the bare form; restore the wire id before it goes upstream.
+  const wireModel = getModelUpstreamId(PROVIDER_ID_TO_ALIAS[provider] || provider, model) || model;
 
   try {
-    url = adapter.buildUrl(model, credentials);
-    requestBody = await adapter.buildBody(model, body);
-    headers = adapter.buildHeaders(credentials, requestBody, model, body);
+    url = adapter.buildUrl(wireModel, credentials);
+    requestBody = await adapter.buildBody(wireModel, body);
+    headers = adapter.buildHeaders(credentials, requestBody, wireModel, body);
   } catch (error) {
     return createErrorResult(HTTP_STATUS.BAD_REQUEST, error.message || `Invalid ${provider} image request`);
   }
@@ -140,9 +144,9 @@ export async function handleImageGenerationCore({
       if (onCredentialsRefreshed) await onCredentialsRefreshed(newCredentials);
 
       try {
-        const retryBody = await adapter.buildBody(model, body);
-        const retryHeaders = adapter.buildHeaders(credentials, retryBody, model, body);
-        const retryUrl = adapter.buildUrl(model, credentials);
+        const retryBody = await adapter.buildBody(wireModel, body);
+        const retryHeaders = adapter.buildHeaders(credentials, retryBody, wireModel, body);
+        const retryUrl = adapter.buildUrl(wireModel, credentials);
         providerResponse = await fetch(retryUrl, {
           method: "POST",
           headers: retryHeaders,

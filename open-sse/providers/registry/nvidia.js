@@ -28,9 +28,13 @@ export default {
     { id: "deepseek-ai/deepseek-v4-pro", name: "DeepSeek V4 Pro" },
     { id: "deepseek-ai/deepseek-v4-flash", name: "DeepSeek V4 Flash" },
     { id: "moonshotai/kimi-k2.6", name: "Kimi K2.6" },
-    { id: "nvidia/nemotron-3-ultra-550b-a55b", name: "Nemotron 3 Ultra" },
-    { id: "nvidia/nv-embedqa-e5-v5", name: "NV EmbedQA E5 v5", kind: "embedding" },
-    { id: "nvidia/parakeet-ctc-1.1b-asr", name: "Parakeet CTC 1.1B", params: ["language"], kind: "stt" },
+    // NVIDIA's own ids carry a `nvidia/` vendor prefix, which /v1/models strips
+    // (it removes a leading `${providerId}/`) — so the registry id is the bare
+    // form and the wire id is declared explicitly, exactly like poolside's
+    // `poolside/laguna-*`.
+    { id: "nemotron-3-ultra-550b-a55b", upstreamModelId: "nvidia/nemotron-3-ultra-550b-a55b", name: "Nemotron 3 Ultra" },
+    { id: "nv-embedqa-e5-v5", upstreamModelId: "nvidia/nv-embedqa-e5-v5", name: "NV EmbedQA E5 v5", kind: "embedding" },
+    { id: "parakeet-ctc-1.1b-asr", upstreamModelId: "nvidia/parakeet-ctc-1.1b-asr", name: "Parakeet CTC 1.1B", params: ["language"], kind: "stt" },
     { id: "fastpitch", name: "FastPitch", kind: "tts" },
     { id: "tacotron2", name: "Tacotron2", kind: "tts" },
   ],
