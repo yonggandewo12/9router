@@ -88,6 +88,7 @@ async function getAllowSets(ctx) {
   const combos = new Set();
   const models = new Set();
   const providers = new Set();
+  const modelProviders = new Set();
   for (const entry of ctx.allow) {
     const key = lower(entry);
     if (comboNames.has(key)) {
@@ -95,10 +96,13 @@ async function getAllowSets(ctx) {
       continue;
     }
     const info = await getModelInfo(entry);
-    if (info?.provider && info.model) models.add(canonicalModel(info.provider, info.model));
+    if (info?.provider && info.model) {
+      models.add(canonicalModel(info.provider, info.model));
+      modelProviders.add(lower(info.provider));
+    }
     if (!entry.includes("/")) providers.add(lower(resolveProviderId(entry)));
   }
-  ctx._sets = { combos, models, providers };
+  ctx._sets = { combos, models, providers, modelProviders };
   return ctx._sets;
 }
 
@@ -157,6 +161,21 @@ export async function enforceKeyAccessProvider(ctx, requested, comboModels) {
     ? sets.combos.has(lower(requested))
     : sets.providers.has(lower(resolveProviderId(requested)));
   return allowed ? null : keyAccessDeniedResponse(ctx, requested);
+}
+
+/**
+ * Gate for video job polls: the request names no model, only the provider the
+ * job lives on. Allowed when the key may call that provider directly, or any
+ * model that resolves to it (a listed `xai/grok-imagine-video` grants polls of
+ * the xAI job it created).
+ */
+export async function enforceKeyAccessVideoPoll(ctx, provider) {
+  if (!ctx) return null;
+  const sets = await getAllowSets(ctx);
+  const p = lower(provider || "");
+  return sets.providers.has(p) || sets.modelProviders.has(p)
+    ? null
+    : keyAccessDeniedResponse(ctx, provider || "");
 }
 
 /**

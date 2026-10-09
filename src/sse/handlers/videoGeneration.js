@@ -7,7 +7,7 @@ import {
 } from "../services/auth.js";
 import { getSettings, getProviderConnectionById } from "@/lib/localDb";
 import { getModelInfo } from "../services/model.js";
-import { getKeyAccessContext, enforceKeyAccessResolved } from "../services/keyAccess.js";
+import { getKeyAccessContext, enforceKeyAccessResolved, enforceKeyAccessVideoPoll } from "../services/keyAccess.js";
 import { handleVideoProxyCore, getVideoConfig, sanitizeSecrets } from "open-sse/handlers/videoCore.js";
 import { errorResponse, unavailableResponse } from "open-sse/utils/error.js";
 import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
@@ -210,6 +210,11 @@ export async function handleVideoGet(request, requestId) {
 
   const preferredConnectionId = request.headers.get("x-connection-id") || null;
   const provider = await resolveGetProvider(request, preferredConnectionId);
+
+  // The poll names no model, so gate on the provider the job lives on — without
+  // this a restricted key that may not create video jobs can still poll them.
+  const keyAccessDenied = await enforceKeyAccessVideoPoll(await getKeyAccessContext(request), provider);
+  if (keyAccessDenied) return keyAccessDenied;
 
   const credentials = await getProviderCredentials(provider, null, null, { preferredConnectionId });
   if (!credentials || credentials.allRateLimited) {

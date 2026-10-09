@@ -65,6 +65,7 @@ describe("unrestricted passthrough", () => {
     expect(await engine.enforceKeyAccess(null, "x")).toBeNull();
     expect(await engine.enforceKeyAccessResolved(null, "x", null, null)).toBeNull();
     expect(await engine.enforceKeyAccessProvider(null, "x", null)).toBeNull();
+    expect(await engine.enforceKeyAccessVideoPoll(null, "xai")).toBeNull();
     const list = [{ id: "a" }];
     expect(await engine.filterModelsListForKey(null, list)).toBe(list);
     expect(await engine.filterAdapterModels(null, ["a", "b"], ["a"])).toEqual(["a", "b"]);
@@ -169,6 +170,25 @@ describe("provider-as-model (search / fetch)", () => {
     expect((await engine.enforceKeyAccessProvider(ctx, "exa", null)).status).toBe(403);
     expect(await engine.enforceKeyAccessProvider(ctx, "Main", ["tavily"])).toBeNull();
     expect((await engine.enforceKeyAccessProvider(ctx, "other", ["exa"])).status).toBe(403);
+  });
+});
+
+describe("video job poll (provider-only target)", () => {
+  it("allows the provider a listed model resolves to, denies others", async () => {
+    const ctx = await ctxFor("sk-cx");
+    expect(await engine.enforceKeyAccessVideoPoll(ctx, "codex")).toBeNull();
+    expect(await engine.enforceKeyAccessVideoPoll(ctx, "CODEX")).toBeNull();
+    expect((await engine.enforceKeyAccessVideoPoll(ctx, "xai")).status).toBe(403);
+  });
+  it("allows a provider listed directly", async () => {
+    expect(await engine.enforceKeyAccessVideoPoll(await ctxFor("sk-tavily"), "tavily")).toBeNull();
+  });
+  it("a combo-only key cannot poll (combos never route to video)", async () => {
+    expect((await engine.enforceKeyAccessVideoPoll(await ctxFor("sk-combo"), "openai")).status).toBe(403);
+  });
+  it("empty list and a missing provider are denied", async () => {
+    expect((await engine.enforceKeyAccessVideoPoll(await ctxFor("sk-empty"), "xai")).status).toBe(403);
+    expect((await engine.enforceKeyAccessVideoPoll(await ctxFor("sk-b"), "")).status).toBe(403);
   });
 });
 
