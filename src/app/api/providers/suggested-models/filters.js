@@ -30,12 +30,6 @@ export const FILTERS = {
       .filter((m) => typeof m?.id === "string")
       .map((m) => ({ id: m.id, name: m.id })),
 
-  // models.dev returns a large catalog; keep only mimo models
-  "mimo-free": (models) =>
-    (Array.isArray(models) ? models : [])
-      .filter((m) => m.id?.startsWith("mimo") || m.name?.toLowerCase().includes("mimo"))
-      .map((m) => ({ id: m.id, name: m.name || m.id })),
-
   // MiniMax Code (mcode) live catalog: {providers:[{providerId:"minimax",
   // config:{models:{<id>:{name, limit, modalities, thinking_config}}}}]} —
   // arrives wrapped in a single-element array (see route normalization).
