@@ -119,6 +119,14 @@ export async function getSettings() {
   return { ...settingsMemo };
 }
 
+// Value exactly as stored, without DEFAULT_SETTINGS merged in. Callers that must
+// tell "the user turned this off" from "never set" (the observability env
+// override) cannot use getSettings(): every default key is a boolean there.
+export async function getRawSetting(key) {
+  const raw = await readRaw();
+  return raw ? raw[key] : undefined;
+}
+
 // Atomic read-merge-write inside transaction (prevents losing concurrent updates)
 export async function updateSettings(updates) {
   const db = await getAdapter();

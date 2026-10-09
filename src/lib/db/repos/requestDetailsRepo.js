@@ -13,7 +13,7 @@ let cachedConfigTs = 0;
 async function getObservabilityConfig() {
   if (cachedConfig && (Date.now() - cachedConfigTs) < CONFIG_CACHE_TTL_MS) return cachedConfig;
   try {
-    const { getSettings } = await import("./settingsRepo.js");
+    const { getSettings, getRawSetting } = await import("./settingsRepo.js");
     const settings = await getSettings();
     const envRequestLogs = process.env.ENABLE_REQUEST_LOGS;
     if (envRequestLogs !== undefined) {
@@ -28,11 +28,15 @@ async function getObservabilityConfig() {
       cachedConfigTs = Date.now();
       return cachedConfig;
     }
-    const envFallback = process.env.OBSERVABILITY_ENABLED !== "false";
-    const uiFlag = typeof settings.enableObservability === "boolean";
-    const enabled = uiFlag
-      ? settings.enableObservability
-      : envFallback;
+    // getSettings() merges DEFAULT_SETTINGS, so enableObservability is always a
+    // boolean there and an explicit "off" is indistinguishable from "never set".
+    // Only the raw row can carry the UI choice; fall back to the env otherwise.
+    const uiFlag = await getRawSetting("enableObservability");
+    const enabled = typeof uiFlag === "boolean"
+      ? uiFlag
+      : process.env.OBSERVABILITY_ENABLED !== undefined
+        ? !/^(false|0|no|off)$/i.test(process.env.OBSERVABILITY_ENABLED)
+        : false;
 
     cachedConfig = {
       enabled,
@@ -68,7 +72,10 @@ function sanitizeHeaders(headers) {
   return sanitized;
 }
 
-export const __test__ = { sanitizeHeaders };
+export const __test__ = {
+  sanitizeHeaders,
+  resetConfigCache: () => { cachedConfig = null; cachedConfigTs = 0; },
+};
 
 function generateDetailId(model) {
   const timestamp = new Date().toISOString();
@@ -96,31 +103,38 @@ async function flushToDatabase() {
       const db = await getAdapter();
       const config = await getObservabilityConfig();
 
+      // JSON work is the bulk of a flush (multi-KB payloads get stringified twice:
+      // once to measure for truncation, once to store). Keep it out of the
+      // transaction so the write lock is held only for the inserts themselves.
+      const rows = items.map((item) => {
+        if (!item.id) item.id = generateDetailId(item.model);
+        if (!item.timestamp) item.timestamp = new Date().toISOString();
+        if (item.request?.headers) item.request.headers = sanitizeHeaders(item.request.headers);
+
+        const record = {
+          id: item.id,
+          provider: item.provider || null,
+          model: item.model || null,
+          connectionId: item.connectionId || null,
+          timestamp: item.timestamp,
+          status: item.status || null,
+          latency: item.latency || {},
+          tokens: item.tokens || {},
+          request: truncateField(item.request, config.maxJsonSize),
+          providerRequest: truncateField(item.providerRequest, config.maxJsonSize),
+          providerResponse: truncateField(item.providerResponse, config.maxJsonSize),
+          response: truncateField(item.response, config.maxJsonSize),
+          pxpipe: item.pxpipe || undefined,
+        };
+
+        return [record.id, record.timestamp, record.provider, record.model, record.connectionId, record.status, stringifyJson(record)];
+      });
+
       db.transaction(() => {
-        for (const item of items) {
-          if (!item.id) item.id = generateDetailId(item.model);
-          if (!item.timestamp) item.timestamp = new Date().toISOString();
-          if (item.request?.headers) item.request.headers = sanitizeHeaders(item.request.headers);
-
-          const record = {
-            id: item.id,
-            provider: item.provider || null,
-            model: item.model || null,
-            connectionId: item.connectionId || null,
-            timestamp: item.timestamp,
-            status: item.status || null,
-            latency: item.latency || {},
-            tokens: item.tokens || {},
-            request: truncateField(item.request, config.maxJsonSize),
-            providerRequest: truncateField(item.providerRequest, config.maxJsonSize),
-            providerResponse: truncateField(item.providerResponse, config.maxJsonSize),
-            response: truncateField(item.response, config.maxJsonSize),
-            pxpipe: item.pxpipe || undefined,
-          };
-
+        for (const params of rows) {
           db.run(
             `INSERT INTO requestDetails(id, timestamp, provider, model, connectionId, status, data) VALUES(?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET timestamp = excluded.timestamp, provider = excluded.provider, model = excluded.model, connectionId = excluded.connectionId, status = excluded.status, data = excluded.data`,
-            [record.id, record.timestamp, record.provider, record.model, record.connectionId, record.status, stringifyJson(record)]
+            params
           );
         }
 
