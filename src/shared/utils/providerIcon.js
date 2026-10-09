@@ -8,6 +8,9 @@ const ICON_ALIASES = {
   "ollama-search": "ollama",
   // Same brand artwork as consumer Trae (no separate enterprise logo).
   "trae-enterprise": "trae",
+  // MiniMax Code rides the existing MiniMax brand mark
+  "minimax-code": "minimax",
+  "minimax-code-global": "minimax",
 };
 
 // Runtime only — first 404 remembers id for the whole session

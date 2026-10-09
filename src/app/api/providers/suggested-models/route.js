@@ -25,7 +25,9 @@ export async function GET(request) {
     }
     const json = await res.json();
     const raw = json.data ?? json.models ?? json;
-    let data = filter(Array.isArray(raw) ? raw : []);
+    // Object-shaped catalogs (minimax-code's {providers:[…]}) ride in as a
+    // single-element array so every filter keeps an array input contract.
+    let data = filter(Array.isArray(raw) ? raw : typeof raw === "object" && raw !== null ? [raw] : []);
     // For OpenCode the "-free" suffix alone is not proof of servability — upstream
     // also lists ids the official CLI refuses. Keep only what the CLI itself
     // would serve; without a local CLI fall back to the suffix filter.

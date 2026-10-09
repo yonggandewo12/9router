@@ -29,12 +29,19 @@ const SPECIALIZED = new Set([
   // carrying a bearer key — locking it here would freeze DefaultExecutor's
   // output and call it the contract. Locked in tests/unit/codearts.test.js.
   "codearts",
+  // AWS Bedrock: signed with SigV4 against a per-connection region, and the
+  // action path depends on streaming. DefaultExecutor's golden would snapshot
+  // an unresolved `{region}` host and a thrown header. Locked in
+  // tests/unit/bedrock-provider.test.js + aws-sigv4.test.js.
+  "bedrock", "bedrock-xai",
 ]);
 
 // Sanitize header:  khử token + field thời gian động (kimi X-Msh-Device-Id) để snapshot ổn định.
 // Machine-derived identity headers: lock presence only (Linux CI ≠ dev Mac).
 // X-Msh-Version is the app version, so it changes on every release bump.
-const VOLATILE_HEADER_NAME = /^(x-platform(-version)?|x-msh-device-(id|model|name)|x-msh-version)$/i;
+// X-Mavis-Session-Id is a fresh random UUID per request, X-Mavis-Timezone-Offset
+// is the host's UTC offset — both miniMax Code, both unstable on any machine.
+const VOLATILE_HEADER_NAME = /^(x-platform(-version)?|x-msh-device-(id|model|name)|x-msh-version|x-mavis-(session-id|timezone-offset))$/i;
 function sanitize(headers) {
   const out = {};
   for (const [k, v] of Object.entries(headers)) {
