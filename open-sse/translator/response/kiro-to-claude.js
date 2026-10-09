@@ -186,6 +186,15 @@ export function kiroToClaudeResponse(chunk, state) {
       if (tc.function?.arguments) {
         const toolInfo = state.toolCalls.get(idx);
         if (toolInfo) {
+          // Nothing here rewrites the args, so pass each fragment straight
+          // through — buffering until finish hides the whole tool-input
+          // generation from the client.
+          results.push({
+            type: "content_block_delta",
+            index: toolInfo.blockIndex,
+            delta: { type: "input_json_delta", partial_json: tc.function.arguments },
+          });
+        } else {
           state.toolArgBuffers.set(
             idx,
             (state.toolArgBuffers.get(idx) || "") + tc.function.arguments

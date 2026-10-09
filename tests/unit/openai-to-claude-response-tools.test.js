@@ -59,3 +59,35 @@ describe("openaiToClaudeResponse tool argument sanitization", () => {
     });
   });
 });
+
+describe("openaiToClaudeResponse tool argument streaming", () => {
+  const chunk = (delta, finishReason = null) => ({
+    id: "chatcmpl-stream",
+    model: "test-model",
+    choices: [{ delta, finish_reason: finishReason }],
+  });
+
+  it("forwards fragments of a non-Read tool as they arrive", () => {
+    const state = createState();
+    openaiToClaudeResponse(chunk({ tool_calls: [{ index: 0, id: "toolu_w", function: { name: "Write", arguments: "" } }] }), state);
+
+    const first = openaiToClaudeResponse(chunk({ tool_calls: [{ index: 0, function: { arguments: '{"file_path":"/a.js",' } }] }), state);
+    const second = openaiToClaudeResponse(chunk({ tool_calls: [{ index: 0, function: { arguments: '"content":"x"}' } }] }), state);
+    expect(getInputJsonDelta(first)).toBe('{"file_path":"/a.js",');
+    expect(getInputJsonDelta(second)).toBe('"content":"x"}');
+
+    // Finish closes the block; re-emitting the args would corrupt the client's
+    // concatenation of partial_json fragments.
+    const done = openaiToClaudeResponse(chunk({}, "tool_calls"), state);
+    expect(getInputJsonDelta(done)).toBeUndefined();
+    expect(done.some((e) => e.type === "content_block_stop")).toBe(true);
+  });
+
+  it("flushes args buffered before the tool name was known", () => {
+    const state = createState();
+    openaiToClaudeResponse(chunk({ tool_calls: [{ index: 0, id: "toolu_l", function: { arguments: '{"q":' } }] }), state);
+    const named = openaiToClaudeResponse(chunk({ tool_calls: [{ index: 0, function: { name: "Grep", arguments: '"x"}' } }] }), state);
+    expect(getInputJsonDelta(named)).toBe('{"q":"x"}');
+    expect(getInputJsonDelta(openaiToClaudeResponse(chunk({}, "tool_calls"), state))).toBeUndefined();
+  });
+});

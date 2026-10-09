@@ -10,6 +10,24 @@ import { extractReasoningText } from "../concerns/reasoning.js";
 // is then a no-op. Kept intentionally; do NOT couple to request's empty prefix.
 const CLAUDE_OAUTH_TOOL_PREFIX = "proxy_";
 
+// Args of these tools get rewritten before they reach the client, so they have
+// to be buffered instead of streamed fragment by fragment.
+const SANITIZED_TOOL_NAMES = new Set(["Read"]);
+
+function needsArgSanitize(toolName) {
+  return SANITIZED_TOOL_NAMES.has(
+    toolName.startsWith(CLAUDE_OAUTH_TOOL_PREFIX)
+      ? toolName.slice(CLAUDE_OAUTH_TOOL_PREFIX.length)
+      : toolName
+  );
+}
+
+const toolArgDelta = (index, partialJson) => ({
+  type: "content_block_delta",
+  index,
+  delta: { type: "input_json_delta", partial_json: partialJson },
+});
+
 // Sanitize tool call arguments to fix bad params from non-Anthropic models
 function sanitizeToolArgs(toolName, argsJson) {
   try {
@@ -235,9 +253,21 @@ export function openaiToClaudeResponse(chunk, state) {
       if (tc.function?.name && !toolInfo.name) toolInfo.name = tc.function.name;
 
       if (tc.function?.arguments) {
-        // Buffer args instead of streaming — sanitize at finish to fix bad params
+        // Stream args as they arrive: buffering until finish hides the whole
+        // tool-input generation from the client (a multi-KB Write looks frozen).
+        // Tools whose args get rewritten must stay buffered — a sanitize pass
+        // cannot be applied to fragments that are already on the wire.
         if (!state.toolArgBuffers) state.toolArgBuffers = new Map();
-        state.toolArgBuffers.set(idx, (state.toolArgBuffers.get(idx) || "") + tc.function.arguments);
+        if (state.toolArgStreamed?.has(idx)) {
+          results.push(toolArgDelta(toolInfo.blockIndex, tc.function.arguments));
+        } else {
+          state.toolArgBuffers.set(idx, (state.toolArgBuffers.get(idx) || "") + tc.function.arguments);
+          if (toolInfo.name && !needsArgSanitize(toolInfo.name)) {
+            (state.toolArgStreamed ||= new Set()).add(idx);
+            results.push(toolArgDelta(toolInfo.blockIndex, state.toolArgBuffers.get(idx)));
+            state.toolArgBuffers.set(idx, "");
+          }
+        }
       }
     }
   }
@@ -260,11 +290,7 @@ export function openaiToClaudeResponse(chunk, state) {
       const buffered = state.toolArgBuffers?.get(idx);
       if (buffered) {
         const sanitized = sanitizeToolArgs(toolInfo.name, buffered);
-        results.push({
-          type: "content_block_delta",
-          index: toolInfo.blockIndex,
-          delta: { type: "input_json_delta", partial_json: sanitized }
-        });
+        results.push(toolArgDelta(toolInfo.blockIndex, sanitized));
       }
       results.push({
         type: "content_block_stop",

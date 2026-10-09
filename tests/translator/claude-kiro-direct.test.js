@@ -304,7 +304,7 @@ describe("Kiro → Claude (direct route, OpenAI-shaped chunks from executor)", (
     expect(delta.delta).toEqual({ type: "thinking_delta", thinking: "pondering" });
   });
 
-  it("tool_calls map to a tool_use block with buffered input_json_delta", () => {
+  it("tool_calls stream input_json_delta with the fragment that carried them", () => {
     const state = {};
     R(
       {
@@ -313,13 +313,18 @@ describe("Kiro → Claude (direct route, OpenAI-shaped chunks from executor)", (
       },
       state
     );
-    R(
+    const argEvents = R(
       {
         id: "c", object: "chat.completion.chunk", model: "m",
         choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: '{"q":"x"}' } }] }, finish_reason: null }],
       },
       state
     );
+    const jsonDelta = argEvents.find(
+      (e) => e.type === "content_block_delta" && e.delta.type === "input_json_delta"
+    );
+    expect(jsonDelta.index).toBeDefined();
+    expect(jsonDelta.delta.partial_json).toBe('{"q":"x"}');
     const events = R(
       {
         id: "c", object: "chat.completion.chunk", model: "m",
@@ -327,11 +332,9 @@ describe("Kiro → Claude (direct route, OpenAI-shaped chunks from executor)", (
       },
       state
     );
-    const jsonDelta = events.find(
-      (e) => e.type === "content_block_delta" && e.delta.type === "input_json_delta"
-    );
-    expect(jsonDelta.index).toBeDefined();
-    expect(jsonDelta.delta.partial_json).toBe('{"q":"x"}');
+    // The args are already on the wire: finish closes the block without repeating them.
+    expect(events.some((e) => e.delta?.type === "input_json_delta")).toBe(false);
+    expect(events.some((e) => e.type === "content_block_stop")).toBe(true);
     const md = events.find((e) => e.type === "message_delta");
     expect(md.delta.stop_reason).toBe("tool_use");
   });

@@ -128,9 +128,16 @@ describe("responses → claude end-to-end keeps parallel tool_use blocks separat
 
     const starts = out.filter((r) => r?.type === "content_block_start" && r?.content_block?.type === "tool_use");
     expect(starts).toHaveLength(4);
+    // Args stream as fragments (Claude concatenates partial_json per block), so
+    // there are more deltas than blocks; group by index before parsing.
     const partials = out.filter((r) => r?.delta?.type === "input_json_delta");
-    expect(partials).toHaveLength(4);
-    const bodies = partials.map((r) => JSON.parse(r.delta.partial_json).file_path).sort();
+    expect(partials.length).toBeGreaterThan(starts.length);
+    const byBlock = new Map();
+    for (const r of partials) {
+      byBlock.set(r.index, (byBlock.get(r.index) || "") + r.delta.partial_json);
+    }
+    expect(byBlock.size).toBe(4);
+    const bodies = [...byBlock.values()].map((json) => JSON.parse(json).file_path).sort();
     expect(bodies).toEqual([
       "/docs/.gitignore",
       "/docs/PRODUCT.md",
