@@ -12,6 +12,7 @@ import { getCapabilitiesForModel } from "../providers/capabilities.js";
 import { STREAM_FIRST_CHUNK_TIMEOUT_MS } from "../config/runtimeConfig.js";
 import { AWS_EVENTSTREAM } from "../config/awsConstants.js";
 import { crc32, parseEventFrame } from "../utils/awsEventStream.js";
+import { makeAbortError, readWithTimeout } from "../utils/streamRead.js";
 
 const KIRO_REPAIR_BUFFER_MAX_BYTES = 8 * 1024 * 1024;
 const KIRO_REPAIR_HEARTBEAT_MS = 10_000;
@@ -62,31 +63,6 @@ function concatChunks(chunks, totalBytes) {
     offset += chunk.byteLength;
   }
   return output;
-}
-
-function makeAbortError(reason) {
-  const error = new Error(reason?.message || reason || "Request aborted");
-  error.name = "AbortError";
-  return error;
-}
-
-async function readWithTimeout(reader, signal, timeoutMs, message) {
-  if (signal?.aborted) throw makeAbortError(signal.reason);
-  let timeout;
-  let abortHandler;
-  const timeoutPromise = new Promise((_, reject) => {
-    timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
-  });
-  const abortPromise = new Promise((_, reject) => {
-    abortHandler = () => reject(makeAbortError(signal.reason));
-    signal?.addEventListener("abort", abortHandler, { once: true });
-  });
-  try {
-    return await Promise.race([reader.read(), timeoutPromise, abortPromise]);
-  } finally {
-    clearTimeout(timeout);
-    signal?.removeEventListener?.("abort", abortHandler);
-  }
 }
 
 async function readResponsePrefix(response, signal, maxBytes, timeoutMs) {

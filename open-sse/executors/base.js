@@ -37,7 +37,9 @@ export class BaseExecutor {
     return this.getBaseUrls().length || 1;
   }
 
-  buildUrl(model, stream, urlIndex = 0, credentials = null) {
+  // Executors are process-wide singletons, so anything one request derives has to
+  // live in hookCtx (one object per execute() call), never on `this`.
+  buildUrl(model, stream, urlIndex = 0, credentials = null, hookCtx = {}) {
     if (this.provider?.startsWith?.("openai-compatible-")) {
       const baseUrl = credentials?.providerSpecificData?.baseUrl || OPENAI_COMPAT_BASE;
       const normalized = baseUrl.replace(/\/$/, "");
@@ -107,7 +109,12 @@ export class BaseExecutor {
     return { status: response.status, message: bodyText || `HTTP ${response.status}` };
   }
 
-  async execute({ model, body, stream, credentials, signal, log, proxyOptions = null, providerOverrides = null }) {
+  async execute({ model, body, stream, credentials, signal, log, proxyOptions = null, providerOverrides = null, hookCtx = null }) {
+    // One scratch object per execute() call, handed to buildUrl/transformRequest/
+    // buildHeaders. Executors are process-wide singletons, so anything derived from a
+    // request body has to live here; on `this` it is read by whichever request happens
+    // to look at the shared executor next.
+    const ctx = hookCtx || {};
     const fallbackCount = this.getFallbackCount();
     let lastError = null;
     let lastStatus = 0;
@@ -135,9 +142,9 @@ export class BaseExecutor {
     };
 
     for (let urlIndex = 0; urlIndex < fallbackCount; urlIndex++) {
-      const url = this.buildUrl(model, stream, urlIndex, credentials);
-      const transformedBody = this.transformRequest(model, body, stream, credentials);
-      const headers = this.buildHeaders(credentials, stream, url, model, transformedBody);
+      const url = this.buildUrl(model, stream, urlIndex, credentials, ctx);
+      const transformedBody = this.transformRequest(model, body, stream, credentials, ctx);
+      const headers = this.buildHeaders(credentials, stream, url, model, transformedBody, ctx);
       // User per-provider override wins over registry headers (blocked names filtered at the API)
       if (providerOverrides?.headers) Object.assign(headers, providerOverrides.headers);
 

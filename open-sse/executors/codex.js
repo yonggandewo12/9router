@@ -9,8 +9,9 @@ import { normalizeResponsesInput } from "../translator/formats/responsesApi.js";
 import { fetchImageAsBase64 } from "../translator/concerns/image.js";
 import { getModelUpstreamId, getProviderModels } from "../config/providerModels.js";
 import { getThinkingLevels } from "../providers/thinkingLevels.js";
-import { DEFAULT_RETRY_CONFIG, HTTP_STATUS, resolveRetryEntry } from "../config/runtimeConfig.js";
+import { DEFAULT_RETRY_CONFIG, HTTP_STATUS, STREAM_FIRST_CHUNK_TIMEOUT_MS, resolveRetryEntry } from "../config/runtimeConfig.js";
 import { dbg } from "../utils/debugLog.js";
+import { readWithTimeout } from "../utils/streamRead.js";
 import { resolveSessionId } from "../utils/sessionManager.js";
 import { stripCodexUnsupportedPatterns } from "../utils/codexToolSchema.js";
 
@@ -24,6 +25,7 @@ const CODEX_SSE_USER_OUTPUT_PATTERNS = [
   '"type":"response.function_call_arguments.delta"',
 ];
 const CODEX_SSE_PEEK_BYTES = 256 * 1024;
+const CODEX_PEEK_STALL_MESSAGE = "codex sse peek stalled";
 const CODEX_MODEL_CAPACITY_MESSAGE = "Selected model is at capacity. Please try a different model.";
 function isCodexResponsesLiteModel(model) {
   const baseId = String(model || "").replace(/\([^()]+\)\s*$/, "");
@@ -210,19 +212,20 @@ function codexSseErrorResponse(status, message) {
 export class CodexExecutor extends BaseExecutor {
   constructor() {
     super("codex", PROVIDERS.codex);
-    this._currentSessionId = null;
   }
 
   /**
    * Override headers to add codex-specific identity headers.
-   * transformRequest runs BEFORE buildHeaders, sets this._currentSessionId.
+   * transformRequest runs BEFORE buildHeaders and puts the resolved session id on
+   * hookCtx, which is per execute() call — on `this` a concurrent request would read
+   * another conversation's session_id and prompt_cache_key, poisoning cache affinity.
    */
-  buildHeaders(credentials, stream = true, _url = null, model = null, body = null) {
+  buildHeaders(credentials, stream = true, _url = null, model = null, body = null, hookCtx = {}) {
     const headers = super.buildHeaders(credentials, stream);
     if (isCodexResponsesLiteModel(model && getModelUpstreamId("cx", model)) && !body?.tools?.some?.(tool => tool?.type === "web_search")) {
       headers["x-openai-internal-codex-responses-lite"] = "true";
     }
-    headers["session_id"] = this._currentSessionId || credentials?.connectionId || "default";
+    headers["session_id"] = hookCtx?.sessionId || credentials?.connectionId || "default";
     // Identify client type to Codex backend (matches official codex CLI)
     if (!headers["originator"]) headers["originator"] = "codex_cli_rs";
     // Account/workspace binding header — required when multiple Codex accounts
@@ -240,9 +243,9 @@ export class CodexExecutor extends BaseExecutor {
     return headers;
   }
 
-  buildUrl(model, stream, urlIndex = 0, credentials = null) {
-    const base = super.buildUrl(model, stream, urlIndex, credentials);
-    return this._isCompact ? `${base}/compact` : base;
+  buildUrl(model, stream, urlIndex = 0, credentials = null, hookCtx = {}) {
+    const base = super.buildUrl(model, stream, urlIndex, credentials, hookCtx);
+    return hookCtx?.isCompact ? `${base}/compact` : base;
   }
 
   async refreshCredentials(credentials, log) {
@@ -279,7 +282,7 @@ export class CodexExecutor extends BaseExecutor {
   async execute(args) {
     const imgCount = Array.isArray(args.body?.input) ? args.body.input.reduce((n, it) => n + (Array.isArray(it.content) ? it.content.filter(c => c.type === "image_url").length : 0), 0) : 0;
     const inputLen = Array.isArray(args.body?.input) ? args.body.input.length : 0;
-    dbg("CODEX", `execute start | inputItems=${inputLen} | images=${imgCount} | sessionId=${this._currentSessionId || "pending"}`);
+    dbg("CODEX", `execute start | inputItems=${inputLen} | images=${imgCount}`);
     if (imgCount > 0) {
       const t0 = Date.now();
       await this.prefetchImages(args.body);
@@ -288,14 +291,34 @@ export class CodexExecutor extends BaseExecutor {
       await this.prefetchImages(args.body);
     }
 
+    // BaseExecutor calls buildUrl *before* transformRequest, so a flag derived from the
+    // body has to be settled here. Read from the shared executor instead, it is the
+    // previous request's: a normal /responses call right after a /compact one used to
+    // POST to /responses/compact and the client got a compaction summary as its answer.
+    // Survives both the url-fallback and the SSE-overload loops because it is per call.
+    const isCompact = !!args.body?._compact;
+    // A 401-refresh retry re-enters execute() with this same body, so the marker has to
+    // stay readable after the request is built — non-enumerable keeps it out of the
+    // serialized request while keeping the compaction endpoint on the retry.
+    if (isCompact) Object.defineProperty(args.body, "_compact", { value: true, enumerable: false, configurable: true });
+    const hookCtx = { isCompact };
+
     // Retry loop for SSE-level overloaded errors (200 OK body contains event: error)
     // Reuses 503 retry config — same semantic: upstream temporarily unavailable
     const retryConfig = { ...DEFAULT_RETRY_CONFIG, ...this.config.retry };
     const { attempts, delayMs } = resolveRetryEntry(retryConfig[503]);
     let attempt = 0;
     while (true) {
-      const result = await super.execute(args);
-      const peek = await this._peekSseTransientError(result.response);
+      const result = await super.execute({ ...args, hookCtx });
+      let peek;
+      try {
+        peek = await this._peekSseTransientError(result.response, args.signal);
+      } catch (e) {
+        if (e?.name === "AbortError") throw e;
+        args.log?.warn?.("RETRY", `CODEX | SSE peek ${e?.message || "failed"}`);
+        result.response = codexSseErrorResponse(HTTP_STATUS.GATEWAY_TIMEOUT, e?.message || CODEX_MODEL_CAPACITY_MESSAGE);
+        return result;
+      }
       if (!peek.matched) {
         // Replace body with re-assembled stream (prefix bytes already read + rest)
         if (peek.replacementBody) {
@@ -327,7 +350,10 @@ export class CodexExecutor extends BaseExecutor {
   // Peek first N bytes of SSE body to detect upstream transient errors.
   // Returns { matched: string|null, message: string|null, accountFallback: boolean, replacementBody: ReadableStream|null }.
   // Caller must use replacementBody when no error matched (original body has been read).
-  async _peekSseTransientError(response) {
+  // Throws on a stalled/cancelled peek: the abandoned read() stays pending, so the body
+  // can no longer be re-locked safely — a late chunk would be handed to that orphan and
+  // dropped. A completed read (network reset) is fine to re-assemble.
+  async _peekSseTransientError(response, signal) {
     if (!response || !response.ok || !response.body) return { matched: null, message: null, accountFallback: false, replacementBody: null };
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -337,7 +363,10 @@ export class CodexExecutor extends BaseExecutor {
     let accountFallback = false;
     try {
       while (text.length < CODEX_SSE_PEEK_BYTES) {
-        const { done, value } = await reader.read();
+        // This peek runs before pipeWithDisconnect arms its stall watchdog, so an
+        // unbounded read() here is a request (and a socket) held open forever by an
+        // upstream that answers with headers and then goes quiet.
+        const { done, value } = await readWithTimeout(reader, signal, STREAM_FIRST_CHUNK_TIMEOUT_MS, CODEX_PEEK_STALL_MESSAGE);
         if (done) break;
         chunks.push(value);
         text += decoder.decode(value, { stream: true });
@@ -349,6 +378,7 @@ export class CodexExecutor extends BaseExecutor {
         if (CODEX_SSE_USER_OUTPUT_PATTERNS.some(p => lowerText.includes(p))) break;
       }
     } catch (e) {
+      if (e?.message === CODEX_PEEK_STALL_MESSAGE || e?.name === "AbortError") throw e;
       dbg("CODEX", `peek read error: ${e.message}`);
     }
 
@@ -411,11 +441,13 @@ export class CodexExecutor extends BaseExecutor {
    * Transform request before sending - inject default instructions if missing.
    * Image fetching is handled separately in prefetchImages() so this stays sync.
    */
-  transformRequest(model, body, stream, credentials) {
-    this._isCompact = !!body._compact;
-    delete body._compact;
+  transformRequest(model, body, stream, credentials, hookCtx = {}) {
+    // execute() re-declares a set marker non-enumerable so it survives a retry without
+    // reaching the wire; a false/foreign one is dropped outright.
+    if (!body._compact) delete body._compact;
     // Resolve conversation-stable session_id (priority: body → assistant-text → workspace → machine)
-    this._currentSessionId = resolveCacheSessionId(body, credentials);
+    const sessionId = resolveCacheSessionId(body, credentials);
+    hookCtx.sessionId = sessionId;
     // Convert string input to array format (Codex API requires input as array)
     const normalized = normalizeResponsesInput(body.input);
     if (normalized) body.input = normalized;
@@ -472,8 +504,8 @@ export class CodexExecutor extends BaseExecutor {
     body.store = false;
 
     // Inject prompt_cache_key for stable Codex prompt caching
-    if (!body.prompt_cache_key && this._currentSessionId) {
-      body.prompt_cache_key = this._currentSessionId;
+    if (!body.prompt_cache_key && sessionId) {
+      body.prompt_cache_key = sessionId;
     }
 
     // Map virtual Codex review models to the upstream Codex model before suffix parsing.
