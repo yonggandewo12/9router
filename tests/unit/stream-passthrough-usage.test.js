@@ -116,5 +116,8 @@ describe("passthrough usage on the finish chunk", () => {
     expect(finish.usage).toMatchObject({ completion_tokens: 100, estimated: true });
     expect(finish.usage.prompt_tokens).toBeGreaterThan(BUFFER_TOKENS);
     expect(completed).toMatchObject({ estimated: true });
+    // The +2000 pad exists so the client leaves headroom in its context window.
+    // It was never charged upstream, so billing gets the estimate without it.
+    expect(completed.prompt_tokens).toBe(finish.usage.prompt_tokens - BUFFER_TOKENS);
   });
 });

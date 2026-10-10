@@ -40,6 +40,7 @@ const PENDING_COMPLETION_FLUSH_MS = 3000;
  * @param {object} options.body - Request body (for input token estimation)
  * @param {function} options.onStreamComplete - Callback when stream completes (content, usage)
  * @param {string} options.apiKey - API key for usage tracking
+ * @param {AbortSignal} options.abortSignal - Aborted when the client disconnects or the stream is torn down
  */
 export function createSSEStream(options = {}) {
   const {
@@ -55,7 +56,8 @@ export function createSSEStream(options = {}) {
     body = null,
     onStreamComplete = null,
     apiKey = null,
-    credentials = null
+    credentials = null,
+    abortSignal = null
   } = options;
 
   let buffer = "";
@@ -92,8 +94,10 @@ export function createSSEStream(options = {}) {
 
   // Usage/logging tail, callable from transform() as well as flush(): a client that
   // closes right after the terminal event cancels the reader, and flush() never runs.
+  let abortListener = null;
   const finalizeStream = () => {
     if (completionFlushTimer) { clearTimeout(completionFlushTimer); completionFlushTimer = null; }
+    if (abortSignal && abortListener) { abortSignal.removeEventListener("abort", abortListener); abortListener = null; }
     if (finalized) return;
     finalized = true;
 
@@ -118,6 +122,17 @@ export function createSSEStream(options = {}) {
       }, finalUsage, ttftAt);
     }
   };
+
+  // Aborted mid-stream = the fetch died, so flush() never runs and the tokens the
+  // upstream already spent would vanish from the ledger. finalizeStream() is
+  // idempotent, so the normal completion path is unaffected.
+  if (abortSignal) {
+    if (abortSignal.aborted) finalizeStream();
+    else {
+      abortListener = () => finalizeStream();
+      abortSignal.addEventListener("abort", abortListener, { once: true });
+    }
+  }
 
   // Emit the deferred response.completed now — at [DONE], or when the watchdog
   // below gives up on a usage trailer that never arrives.
@@ -244,7 +259,7 @@ export function createSSEStream(options = {}) {
                   injectedUsage = true;
                 } else {
                   const estimated = estimateUsage(body, totalContentLength, FORMATS.OPENAI);
-                  parsed.usage = filterUsageForFormat(estimated, FORMATS.OPENAI);
+                  parsed.usage = filterUsageForFormat(addBufferToUsage(estimated), FORMATS.OPENAI);
                   output = `data: ${JSON.stringify(parsed)}\n`;
                   usage = estimated;
                   injectedUsage = true;
@@ -386,8 +401,10 @@ export function createSSEStream(options = {}) {
         // Translate: targetFormat -> openai -> sourceFormat
         const translated = translateResponse(targetFormat, sourceFormat, parsed, state);
 
-        // Log OpenAI intermediate chunks (if available)
-        if (translated?._openaiIntermediate) {
+        // Log OpenAI intermediate chunks (if available). formatSSE is a stringify per
+        // chunk, so this only runs when the logger is a real one — the no-op logger
+        // returned with request logging off has a null sessionPath.
+        if (reqLogger?.sessionPath && translated?._openaiIntermediate) {
           for (const item of translated._openaiIntermediate) {
             const openaiOutput = formatSSE(item, FORMATS.OPENAI);
             reqLogger?.appendOpenAIChunk?.(openaiOutput);
@@ -406,7 +423,9 @@ export function createSSEStream(options = {}) {
             const isFinishChunk = item.type === "message_delta" || item.choices?.[0]?.finish_reason;
             if (state.finishReason && isFinishChunk && !hasValidUsage(item.usage) && totalContentLength > 0) {
               const estimated = estimateUsage(body, totalContentLength, sourceFormat);
-              item.usage = filterUsageForFormat(estimated, sourceFormat); // Filter + already has buffer
+              // Buffer is the client-facing pad only; state.usage stays the real estimate
+              // so the ledger isn't billed for tokens upstream never charged.
+              item.usage = filterUsageForFormat(addBufferToUsage(estimated), sourceFormat);
               state.usage = estimated;
             } else if (state.finishReason && isFinishChunk && state.usage) {
               // Add buffer and filter usage for client (but keep original in state.usage for logging)
@@ -549,7 +568,7 @@ export function createSSEStream(options = {}) {
   });
 }
 
-export function createSSETransformStreamWithLogger(targetFormat, sourceFormat, provider = null, reqLogger = null, toolNameMap = null, model = null, connectionId = null, body = null, onStreamComplete = null, apiKey = null, customToolNames = null, credentials = null) {
+export function createSSETransformStreamWithLogger(targetFormat, sourceFormat, provider = null, reqLogger = null, toolNameMap = null, model = null, connectionId = null, body = null, onStreamComplete = null, apiKey = null, customToolNames = null, credentials = null, abortSignal = null) {
   return createSSEStream({
     mode: STREAM_MODE.TRANSLATE,
     targetFormat,
@@ -563,11 +582,12 @@ export function createSSETransformStreamWithLogger(targetFormat, sourceFormat, p
     body,
     onStreamComplete,
     apiKey,
-    credentials
+    credentials,
+    abortSignal
   });
 }
 
-export function createPassthroughStreamWithLogger(provider = null, reqLogger = null, model = null, connectionId = null, body = null, onStreamComplete = null, apiKey = null) {
+export function createPassthroughStreamWithLogger(provider = null, reqLogger = null, model = null, connectionId = null, body = null, onStreamComplete = null, apiKey = null, abortSignal = null) {
   return createSSEStream({
     mode: STREAM_MODE.PASSTHROUGH,
     provider,
@@ -576,6 +596,7 @@ export function createPassthroughStreamWithLogger(provider = null, reqLogger = n
     connectionId,
     body,
     onStreamComplete,
-    apiKey
+    apiKey,
+    abortSignal
   });
 }

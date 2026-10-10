@@ -336,22 +336,55 @@ export function mergeUsage(prev, next) {
   return merged;
 }
 
+// Providers bill a vision item as a fixed allowance (roughly 1-1.6K tokens), not as
+// the length of its base64 payload: a screenshot is ~1500 tokens upstream, ~250K as
+// characters. Both the ledger and the client's context-window math inherit this, so
+// the payload is priced as one image instead of being walked byte for byte.
+const VISION_ITEM_TOKENS = 1024;
+const BASE64_PAYLOAD_MIN_CHARS = 1024;
+const WHITESPACE_RE = /\s/;
+
+function isBase64Payload(value) {
+  if (value.length < BASE64_PAYLOAD_MIN_CHARS) return false;
+  if (value.startsWith("data:")) return true;
+  // Real base64 has no whitespace; any prose, code or JSON blob does.
+  return !WHITESPACE_RE.test(value);
+}
+
+function countBodyChars(value, acc) {
+  if (typeof value === "string") {
+    if (isBase64Payload(value)) acc.visionItems++;
+    else acc.chars += value.length;
+    return;
+  }
+  if (value == null || typeof value !== "object") {
+    acc.chars += 4;
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) countBodyChars(item, acc);
+    return;
+  }
+  for (const [key, item] of Object.entries(value)) {
+    acc.chars += key.length;
+    countBodyChars(item, acc);
+  }
+}
+
 /**
- * Estimate input tokens from request body
- * Calculate total body size for more accurate estimation
+ * Estimate input tokens from request body by walking its text (messages, tools,
+ * system, thinking config, ...) at ~4 chars per token.
  */
 export function estimateInputTokens(body) {
   if (!body || typeof body !== "object") return 0;
 
   try {
-    // Calculate total body size (includes messages, tools, system, thinking config, etc.)
-    const bodyStr = JSON.stringify(body);
-    const totalChars = bodyStr.length;
-
+    const acc = { chars: 0, visionItems: 0 };
+    countBodyChars(body, acc);
     // Estimate: ~4 chars per token (rough average across all tokenizers)
-    return Math.ceil(totalChars / 4);
+    return Math.ceil(acc.chars / 4) + acc.visionItems * VISION_ITEM_TOKENS;
   } catch (err) {
-    // Fallback if stringify fails
+    // Fallback if the walk fails
     return 0;
   }
 }
@@ -366,6 +399,10 @@ export function estimateOutputTokens(contentLength) {
 
 /**
  * Format usage object based on target format
+ *
+ * Unbuffered on purpose: these numbers go to the usage ledger, and BUFFER_TOKENS
+ * is a client-facing context-window pad, not something upstream ever charged.
+ * Apply addBufferToUsage at the sites that write usage into a response body.
  * @param {number} inputTokens - Input/prompt tokens
  * @param {number} outputTokens - Output/completion tokens
  * @param {string} targetFormat - Target format from FORMATS
@@ -373,20 +410,20 @@ export function estimateOutputTokens(contentLength) {
 export function formatUsage(inputTokens, outputTokens, targetFormat) {
   // Claude format uses input_tokens/output_tokens
   if (targetFormat === FORMATS.CLAUDE) {
-    return addBufferToUsage({ 
-      input_tokens: inputTokens, 
-      output_tokens: outputTokens, 
-      estimated: true 
-    });
+    return {
+      input_tokens: inputTokens,
+      output_tokens: outputTokens,
+      estimated: true
+    };
   }
 
   // Default: OpenAI format (works for openai, gemini, responses, etc.)
-  return addBufferToUsage({
+  return {
     prompt_tokens: inputTokens,
     completion_tokens: outputTokens,
     total_tokens: inputTokens + outputTokens,
     estimated: true
-  });
+  };
 }
 
 /**
