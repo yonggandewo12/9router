@@ -309,8 +309,15 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
     // a completion body, or the client gets 200 + a body with no choices and the
     // account keeps its healthy rotation.
     if (parsed.error) {
-      appendLog({ status: `FAILED ${HTTP_STATUS.BAD_GATEWAY}` });
-      return createErrorResult(HTTP_STATUS.BAD_GATEWAY, parsed.error.message || "Upstream SSE stream failed");
+      // Same rule as sseToJsonHandler: a structured SSE error frame carries the real
+      // upstream status (qoder emits 403 for a billing envelope). Reporting 502 makes
+      // the account loop cool down on the wrong code, so keep 400-599 and fall back.
+      const upstreamStatus = Number(parsed.error.status);
+      const status = Number.isInteger(upstreamStatus) && upstreamStatus >= 400 && upstreamStatus <= 599
+        ? upstreamStatus
+        : HTTP_STATUS.BAD_GATEWAY;
+      appendLog({ status: `FAILED ${status}` });
+      return createErrorResult(status, parsed.error.message || "Upstream SSE stream failed");
     }
     responseBody = parsed;
   } else {
