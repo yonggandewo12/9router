@@ -135,6 +135,27 @@ const CODEX_PORT = CODEX_CONFIG.fixedPort;
 
 // Pending exchange sessions keyed by state — used by server-side exchange mode
 const pendingExchanges = new Map();
+const PENDING_EXCHANGE_TTL_MS = 10 * 60 * 1000;
+
+// A popup the user abandons never reaches clearCodexSession, so entries retire on a
+// TTL: it bounds the map, and it stops a state minted an hour ago from still being
+// redeemable should its callback URL surface again.
+function readPendingExchange(state) {
+  const entry = state ? pendingExchanges.get(state) : null;
+  if (!entry) return null;
+  if (Date.now() - (entry.createdAt || 0) > PENDING_EXCHANGE_TTL_MS) {
+    pendingExchanges.delete(state);
+    return null;
+  }
+  return entry;
+}
+
+function prunePendingExchanges() {
+  const now = Date.now();
+  for (const [state, entry] of pendingExchanges) {
+    if (now - (entry?.createdAt || 0) > PENDING_EXCHANGE_TTL_MS) pendingExchanges.delete(state);
+  }
+}
 
 /**
  * Register a pending exchange session for server-side mode.
@@ -142,6 +163,7 @@ const pendingExchanges = new Map();
  */
 export function registerCodexSession({ state, codeVerifier, redirectUri }) {
   if (!state || !codeVerifier || !redirectUri) return false;
+  prunePendingExchanges();
   pendingExchanges.set(state, {
     codeVerifier,
     redirectUri,
@@ -155,7 +177,7 @@ export function registerCodexSession({ state, codeVerifier, redirectUri }) {
  * Read session status (modal polls this).
  */
 export function getCodexSessionStatus(state) {
-  return pendingExchanges.get(state) || null;
+  return readPendingExchange(state);
 }
 
 /**
@@ -211,7 +233,7 @@ export function startCodexProxy(appPort) {
       const code = url.searchParams.get("code");
       const state = url.searchParams.get("state");
       const errorParam = url.searchParams.get("error");
-      const session = state ? pendingExchanges.get(state) : null;
+      const session = readPendingExchange(state);
 
       // Mode A: server-side exchange (session registered)
       if (session) {
