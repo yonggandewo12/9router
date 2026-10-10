@@ -101,11 +101,17 @@ export async function handleEmbeddingsCore({
       try {
         const retryHeaders = adapter.buildHeaders(credentials, ctx);
         const retryUrl = adapter.buildUrl(wireModel, credentials, ctx);
-        providerResponse = await fetch(retryUrl, {
+        const retryResponse = await fetch(retryUrl, {
           method: "POST",
           headers: retryHeaders,
           body: JSON.stringify(requestBody),
+          ...(typeof AbortSignal?.timeout === "function"
+            ? { signal: AbortSignal.timeout(FETCH_CONNECT_TIMEOUT_MS) }
+            : {}),
         });
+        // The 401/403 being replaced has an unread body holding its socket.
+        try { await providerResponse.body?.cancel?.(); } catch { /* noop */ }
+        providerResponse = retryResponse;
       } catch {
         log?.warn?.("TOKEN", `${provider.toUpperCase()} | retry after refresh failed`);
       }
