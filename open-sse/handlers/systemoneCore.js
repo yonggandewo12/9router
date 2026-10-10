@@ -1,7 +1,7 @@
 import { createErrorResult, parseUpstreamError, formatProviderError } from "../utils/error.js";
 import { HTTP_STATUS, FETCH_CONNECT_TIMEOUT_MS } from "../config/runtimeConfig.js";
 import { PROVIDER_MEDIA } from "../providers/index.js";
-import { getModelUpstreamId } from "../config/providerModels.js";
+import { getModelUpstreamId, PROVIDER_ID_TO_ALIAS } from "../config/providerModels.js";
 import { generateSessionId } from "../executors/opencode-zen.js";
 
 /**
@@ -19,6 +19,10 @@ export async function handleSystemoneCore({
   onRequestSuccess,
 }) {
   const { provider, model } = modelInfo;
+  // PROVIDER_MODELS is keyed by the registry alias, so the alias table has to be
+  // consulted here (as every sibling lane does) — opencode/opencode-zen store their
+  // models under `oc`/`ocz`, and a raw provider id silently no-ops the mapping.
+  const wireModel = getModelUpstreamId(PROVIDER_ID_TO_ALIAS[provider] || provider, model) || model;
   const cfg = PROVIDER_MEDIA[provider]?.systemoneConfig;
   let targetUrl = credentials?.providerSpecificData?.baseUrl || cfg?.baseUrl;
   if (!targetUrl) {
@@ -39,7 +43,7 @@ export async function handleSystemoneCore({
     targetUrl = targetUrl.replace("{accountId}", accountId);
   }
   if (targetUrl.includes("{model}")) {
-    targetUrl = targetUrl.replace(/\{model\}/g, model);
+    targetUrl = targetUrl.replace(/\{model\}/g, wireModel);
   }
 
   // Validate input at the trust boundary; question-level shape is upstream's job.
@@ -60,7 +64,7 @@ export async function handleSystemoneCore({
     "x-opencode-session": generateSessionId(),
   };
   // Cloudflare validates the body model as a short selector (e.g. "clef-flash"), not the full id.
-  const requestBody = { ...body, model: getModelUpstreamId(provider, model) || model };
+  const requestBody = { ...body, model: wireModel };
 
   log?.debug?.("SYSTEMONE", `${provider.toUpperCase()} | ${model}`);
 
