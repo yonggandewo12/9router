@@ -19,7 +19,15 @@ export async function dedupRefresh(provider, oldToken, fn, log) {
   const promise = (async () => {
     try {
       const result = await fn();
-      refreshDedupCache.set(key, { result, expiresAt: Date.now() + REFRESH_RESULT_TTL_MS });
+      // This entry holds freshly minted credentials, and a spent single-use refresh
+      // token is never queried again — so the entry has to retire on a timer, not on
+      // the next lookup of the same (dead) key.
+      const entry = { result, expiresAt: Date.now() + REFRESH_RESULT_TTL_MS };
+      refreshDedupCache.set(key, entry);
+      const sweep = setTimeout(() => {
+        if (refreshDedupCache.get(key) === entry) refreshDedupCache.delete(key);
+      }, REFRESH_RESULT_TTL_MS);
+      sweep.unref?.();
       return result;
     } catch (err) {
       refreshDedupCache.delete(key);
