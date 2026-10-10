@@ -1,4 +1,5 @@
 // Shared helpers for image provider adapters
+import { FETCH_CONNECT_TIMEOUT_MS } from "../../config/runtimeConfig.js";
 
 export const POLL_INTERVAL_MS = 1500;
 export const POLL_TIMEOUT_MS = 120000;
@@ -20,7 +21,9 @@ export function sizeToAspectRatio(size) {
 
 // Fetch URL → base64 (for providers returning image URLs)
 export async function urlToBase64(url) {
-  const res = await fetch(url);
+  // Not a streaming job, so the whole download is bounded — headers and body alike.
+  // A CDN that accepts and then stalls would otherwise hold the client request open.
+  const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_CONNECT_TIMEOUT_MS) });
   if (!res.ok) throw new Error(`Failed to fetch image: ${res.status}`);
   const buf = await res.arrayBuffer();
   return Buffer.from(buf).toString("base64");

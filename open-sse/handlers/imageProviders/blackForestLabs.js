@@ -1,5 +1,6 @@
 // Black Forest Labs (FLUX) — async submit + polling_url
 import { sleep, nowSec, POLL_INTERVAL_MS, POLL_TIMEOUT_MS } from "./_base.js";
+import { fetchWithConnectTimeout } from "../../utils/fetchTimeout.js";
 import { PROVIDER_MEDIA } from "../../providers/index.js";
 
 const BASE_URL = PROVIDER_MEDIA["black-forest-labs"]?.imageConfig?.baseUrl;
@@ -28,7 +29,7 @@ export default {
     const deadline = Date.now() + POLL_TIMEOUT_MS;
     while (Date.now() < deadline) {
       await sleep(POLL_INTERVAL_MS);
-      const r = await fetch(pollingUrl, { headers: { "x-key": headers["x-key"], "Accept": "application/json" } });
+      const r = await fetchWithConnectTimeout(pollingUrl, { headers: { "x-key": headers["x-key"], "Accept": "application/json" } });
       if (!r.ok) throw new Error(`BFL status ${r.status}`);
       const s = await r.json();
       if (s.status === "Ready") return s;

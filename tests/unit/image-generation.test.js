@@ -524,8 +524,10 @@ describe("handleImageGenerationCore", () => {
     });
 
     expect(result.success).toBe(true);
-    expect(global.fetch).toHaveBeenNthCalledWith(1, "https://example.com/source.png");
-    expect(global.fetch).toHaveBeenNthCalledWith(2, "https://example.com/mask.png");
+    // urlToBase64 bounds the whole download, so it now passes a signal too.
+    const withTimeout = expect.objectContaining({ signal: expect.any(AbortSignal) });
+    expect(global.fetch).toHaveBeenNthCalledWith(1, "https://example.com/source.png", withTimeout);
+    expect(global.fetch).toHaveBeenNthCalledWith(2, "https://example.com/mask.png", withTimeout);
 
     const providerCall = global.fetch.mock.calls[2];
     expect(providerCall[0]).toBe("https://api.cloudflare.com/client/v4/accounts/cf-account/ai/run/@cf/runwayml/stable-diffusion-v1-5-inpainting");

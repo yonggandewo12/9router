@@ -1,5 +1,6 @@
 // Runway ML — async submit + /tasks/{id} polling
 import { sleep, nowSec, sizeToAspectRatio, POLL_INTERVAL_MS, POLL_TIMEOUT_MS } from "./_base.js";
+import { fetchWithConnectTimeout } from "../../utils/fetchTimeout.js";
 import { PROVIDER_MEDIA } from "../../providers/index.js";
 
 const BASE_URL = PROVIDER_MEDIA["runwayml"]?.imageConfig?.baseUrl;
@@ -33,7 +34,7 @@ export default {
     const deadline = Date.now() + POLL_TIMEOUT_MS;
     while (Date.now() < deadline) {
       await sleep(POLL_INTERVAL_MS);
-      const r = await fetch(taskUrl, { headers });
+      const r = await fetchWithConnectTimeout(taskUrl, { headers });
       if (!r.ok) throw new Error(`Runway status ${r.status}`);
       const s = await r.json();
       if (s.status === "SUCCEEDED") return s;

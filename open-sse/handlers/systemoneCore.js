@@ -1,5 +1,6 @@
 import { createErrorResult, parseUpstreamError, formatProviderError } from "../utils/error.js";
-import { HTTP_STATUS, FETCH_CONNECT_TIMEOUT_MS } from "../config/runtimeConfig.js";
+import { HTTP_STATUS } from "../config/runtimeConfig.js";
+import { fetchWithConnectTimeout } from "../utils/fetchTimeout.js";
 import { PROVIDER_MEDIA } from "../providers/index.js";
 import { getModelUpstreamId, PROVIDER_ID_TO_ALIAS } from "../config/providerModels.js";
 import { generateSessionId } from "../executors/opencode-zen.js";
@@ -70,13 +71,10 @@ export async function handleSystemoneCore({
 
   let providerResponse;
   try {
-    providerResponse = await fetch(targetUrl, {
+    providerResponse = await fetchWithConnectTimeout(targetUrl, {
       method: "POST",
       headers,
       body: JSON.stringify(requestBody),
-      ...(typeof AbortSignal?.timeout === "function"
-        ? { signal: AbortSignal.timeout(FETCH_CONNECT_TIMEOUT_MS) }
-        : {}),
     });
   } catch (error) {
     const errMsg = formatProviderError(error, provider, model, HTTP_STATUS.BAD_GATEWAY);

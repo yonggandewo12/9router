@@ -1,5 +1,6 @@
 // NanoBanana API — async submit + poll record-info
 import { sleep, nowSec, sizeToAspectRatio, POLL_INTERVAL_MS, POLL_TIMEOUT_MS } from "./_base.js";
+import { fetchWithConnectTimeout } from "../../utils/fetchTimeout.js";
 import { PROVIDER_MEDIA } from "../../providers/index.js";
 
 const IMG_CFG = PROVIDER_MEDIA["nanobanana"]?.imageConfig || {};
@@ -43,7 +44,7 @@ export default {
     const deadline = Date.now() + POLL_TIMEOUT_MS;
     while (Date.now() < deadline) {
       await sleep(POLL_INTERVAL_MS);
-      const r = await fetch(pollUrl, { headers });
+      const r = await fetchWithConnectTimeout(pollUrl, { headers });
       if (!r.ok) throw new Error(`NanoBanana status ${r.status}`);
       const s = await r.json();
       const flag = s.data?.successFlag;

@@ -1,5 +1,6 @@
 import { createErrorResult, parseUpstreamError, formatProviderError } from "../utils/error.js";
-import { HTTP_STATUS, FETCH_CONNECT_TIMEOUT_MS } from "../config/runtimeConfig.js";
+import { HTTP_STATUS } from "../config/runtimeConfig.js";
+import { fetchWithConnectTimeout } from "../utils/fetchTimeout.js";
 import { refreshWithRetry } from "../services/tokenRefresh.js";
 import { getExecutor } from "../executors/index.js";
 import { getImageAdapter } from "./imageProviders/index.js";
@@ -112,24 +113,16 @@ export async function handleImageGenerationCore({
   log?.debug?.("IMAGE", `${provider.toUpperCase()} | ${model} | prompt="${body.prompt.slice(0, 50)}..."`);
 
   let providerResponse;
-  // Bound only until the upstream answers with headers: image generation can
-  // legitimately run for minutes, and an AbortSignal that stays armed would cut
-  // off the body read too (same discipline as BaseExecutor.execute).
-  const connectCtrl = new AbortController();
-  const connectTimer = setTimeout(() => connectCtrl.abort(new Error("fetch connect timeout")), FETCH_CONNECT_TIMEOUT_MS);
   try {
-    providerResponse = await fetch(url, {
+    providerResponse = await fetchWithConnectTimeout(url, {
       method: "POST",
       headers,
       body: serializeRequestBody(requestBody),
-      signal: connectCtrl.signal,
     });
   } catch (error) {
     const errMsg = formatProviderError(error, provider, model, HTTP_STATUS.BAD_GATEWAY);
     log?.debug?.("IMAGE", `Fetch error: ${errMsg}`);
     return createErrorResult(HTTP_STATUS.BAD_GATEWAY, errMsg);
-  } finally {
-    clearTimeout(connectTimer);
   }
 
   // Handle 401/403 — try token refresh (skipped for noAuth providers)
@@ -151,25 +144,20 @@ export async function handleImageGenerationCore({
       Object.assign(credentials, newCredentials);
       if (onCredentialsRefreshed) await onCredentialsRefreshed(newCredentials);
 
-      const retryCtrl = new AbortController();
-      const retryTimer = setTimeout(() => retryCtrl.abort(new Error("fetch connect timeout")), FETCH_CONNECT_TIMEOUT_MS);
       try {
         const retryBody = await adapter.buildBody(wireModel, body);
         const retryHeaders = adapter.buildHeaders(credentials, retryBody, wireModel, body);
         const retryUrl = adapter.buildUrl(wireModel, credentials);
-        const retryResponse = await fetch(retryUrl, {
+        const retryResponse = await fetchWithConnectTimeout(retryUrl, {
           method: "POST",
           headers: retryHeaders,
           body: serializeRequestBody(retryBody),
-          signal: retryCtrl.signal,
         });
         // The 401/403 being replaced has an unread body holding its socket.
         try { await providerResponse.body?.cancel?.(); } catch { /* noop */ }
         providerResponse = retryResponse;
       } catch {
         log?.warn?.("TOKEN", `${provider.toUpperCase()} | retry after refresh failed`);
-      } finally {
-        clearTimeout(retryTimer);
       }
     } else {
       log?.warn?.("TOKEN", `${provider.toUpperCase()} | refresh failed`);

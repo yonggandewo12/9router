@@ -1,5 +1,6 @@
 import { createErrorResult, parseUpstreamError, formatProviderError } from "../utils/error.js";
-import { HTTP_STATUS, FETCH_CONNECT_TIMEOUT_MS } from "../config/runtimeConfig.js";
+import { HTTP_STATUS } from "../config/runtimeConfig.js";
+import { fetchWithConnectTimeout } from "../utils/fetchTimeout.js";
 import { getExecutor } from "../executors/index.js";
 import { refreshWithRetry } from "../services/tokenRefresh.js";
 import { getEmbeddingAdapter } from "./embeddingProviders/index.js";
@@ -66,13 +67,10 @@ export async function handleEmbeddingsCore({
 
   let providerResponse;
   try {
-    providerResponse = await fetch(url, {
+    providerResponse = await fetchWithConnectTimeout(url, {
       method: "POST",
       headers,
       body: JSON.stringify(requestBody),
-      ...(typeof AbortSignal?.timeout === "function"
-        ? { signal: AbortSignal.timeout(FETCH_CONNECT_TIMEOUT_MS) }
-        : {}),
     });
   } catch (error) {
     const errMsg = formatProviderError(error, provider, model, HTTP_STATUS.BAD_GATEWAY);
@@ -101,13 +99,10 @@ export async function handleEmbeddingsCore({
       try {
         const retryHeaders = adapter.buildHeaders(credentials, ctx);
         const retryUrl = adapter.buildUrl(wireModel, credentials, ctx);
-        const retryResponse = await fetch(retryUrl, {
+        const retryResponse = await fetchWithConnectTimeout(retryUrl, {
           method: "POST",
           headers: retryHeaders,
           body: JSON.stringify(requestBody),
-          ...(typeof AbortSignal?.timeout === "function"
-            ? { signal: AbortSignal.timeout(FETCH_CONNECT_TIMEOUT_MS) }
-            : {}),
         });
         // The 401/403 being replaced has an unread body holding its socket.
         try { await providerResponse.body?.cancel?.(); } catch { /* noop */ }

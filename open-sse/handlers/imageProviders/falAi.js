@@ -1,5 +1,6 @@
 // Fal.ai — async submit + queue polling
 import { sleep, nowSec, sizeToAspectRatio, POLL_INTERVAL_MS, POLL_TIMEOUT_MS } from "./_base.js";
+import { fetchWithConnectTimeout } from "../../utils/fetchTimeout.js";
 import { PROVIDER_MEDIA } from "../../providers/index.js";
 
 const BASE_URL = PROVIDER_MEDIA["fal-ai"]?.imageConfig?.baseUrl;
@@ -22,11 +23,14 @@ export default {
     const deadline = Date.now() + POLL_TIMEOUT_MS;
     while (Date.now() < deadline) {
       await sleep(POLL_INTERVAL_MS);
-      const r = await fetch(status_url, { headers });
+      // The deadline is only re-checked once a poll returns, so an unbounded fetch
+      // here can outrun POLL_TIMEOUT_MS by however long the socket takes to die.
+      const r = await fetchWithConnectTimeout(status_url, { headers });
       if (!r.ok) throw new Error(`Fal status ${r.status}`);
       const s = await r.json();
       if (s.status === "COMPLETED") {
-        const fr = await fetch(response_url, { headers });
+        const fr = await fetchWithConnectTimeout(response_url, { headers });
+        if (!fr.ok) throw new Error(`Fal result ${fr.status}`);
         return await fr.json();
       }
       if (s.status === "FAILED") throw new Error(s.error || "Fal generation failed");
