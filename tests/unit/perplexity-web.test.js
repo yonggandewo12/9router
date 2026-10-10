@@ -12,6 +12,13 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+
+// The executor goes through proxyAwareFetch so a per-connection proxy is honoured;
+// delegate to the swappable global so the existing fetch stubs keep driving it.
+vi.mock("../../open-sse/utils/proxyFetch.js", () => ({
+  proxyAwareFetch: (url, options) => globalThis.fetch(url, options),
+}));
+
 import {
   parseOpenAIMessages,
   buildQuery,

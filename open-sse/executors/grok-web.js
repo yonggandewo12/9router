@@ -1,5 +1,8 @@
 import { BaseExecutor } from "./base.js";
 import { PROVIDERS } from "../config/providers.js";
+import { STREAM_FIRST_CHUNK_TIMEOUT_MS } from "../config/runtimeConfig.js";
+import { proxyAwareFetch } from "../utils/proxyFetch.js";
+import { connectTimeoutGuard } from "../utils/fetchTimeout.js";
 import { SSE_DONE, SSE_HEADERS_NO_BUFFER } from "../utils/sseConstants.js";
 import { sseChunk } from "../utils/sse.js";
 
@@ -223,7 +226,7 @@ export class GrokWebExecutor extends BaseExecutor {
     super("grok-web", PROVIDERS["grok-web"]);
   }
 
-  async execute({ model, body, stream, credentials, signal, log }) {
+  async execute({ model, body, stream, credentials, signal, log, proxyOptions = null }) {
     const messages = body?.messages;
     if (!messages || !Array.isArray(messages) || messages.length === 0) {
       const errResp = new Response(JSON.stringify({
@@ -292,16 +295,22 @@ export class GrokWebExecutor extends BaseExecutor {
     log?.info?.("GROK-WEB", `Query to ${model} (grok=${grokModel}, mode=${modelMode}), len=${message.length}`);
 
     let response;
+    // proxyAwareFetch (not the patched global fetch) so a per-connection proxy and
+    // strictProxy are honoured like every other lane; the guard bounds the wait for
+    // headers so a silent upstream cannot hold the request open.
+    const guard = connectTimeoutGuard(signal, this.config?.timeoutMs || STREAM_FIRST_CHUNK_TIMEOUT_MS);
     try {
-      response = await fetch(GROK_CHAT_API, {
-        method: "POST", headers, body: JSON.stringify(grokPayload), signal,
-      });
+      response = await proxyAwareFetch(GROK_CHAT_API, {
+        method: "POST", headers, body: JSON.stringify(grokPayload), signal: guard.signal,
+      }, proxyOptions);
     } catch (err) {
       log?.error?.("GROK-WEB", `Fetch failed: ${err.message || String(err)}`);
       const errResp = new Response(JSON.stringify({
         error: { message: `Grok connection failed: ${err.message || String(err)}`, type: "upstream_error" },
       }), { status: 502, headers: { "Content-Type": "application/json" } });
       return { response: errResp, url: GROK_CHAT_API, headers, transformedBody: grokPayload };
+    } finally {
+      guard.clear();
     }
 
     if (!response.ok) {

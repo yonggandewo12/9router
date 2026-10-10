@@ -1,5 +1,8 @@
 import { BaseExecutor } from "./base.js";
 import { PROVIDERS } from "../config/providers.js";
+import { STREAM_FIRST_CHUNK_TIMEOUT_MS } from "../config/runtimeConfig.js";
+import { proxyAwareFetch } from "../utils/proxyFetch.js";
+import { connectTimeoutGuard } from "../utils/fetchTimeout.js";
 import { SSE_DONE, SSE_HEADERS_NO_BUFFER } from "../utils/sseConstants.js";
 import { sseChunk } from "../utils/sse.js";
 
@@ -393,7 +396,7 @@ export class PerplexityWebExecutor extends BaseExecutor {
     super("perplexity-web", PROVIDERS["perplexity-web"]);
   }
 
-  async execute({ model, body, stream, credentials, signal, log }) {
+  async execute({ model, body, stream, credentials, signal, log, proxyOptions = null }) {
     const messages = body?.messages;
     if (!messages || !Array.isArray(messages) || messages.length === 0) {
       const errResp = new Response(JSON.stringify({
@@ -450,18 +453,24 @@ export class PerplexityWebExecutor extends BaseExecutor {
 
     log?.info?.("PPLX-WEB", `Query to ${model} (pref=${modelPref}, mode=${pplxMode}), len=${query.length}`);
 
+    // proxyAwareFetch (not the patched global fetch) so a per-connection proxy and
+    // strictProxy are honoured like every other lane; the guard bounds the wait for
+    // headers so a silent upstream cannot hold the request open.
     const fetchOptions = { method: "POST", headers, body: JSON.stringify(pplxBody) };
-    if (signal) fetchOptions.signal = signal;
+    const guard = connectTimeoutGuard(signal, this.config?.timeoutMs || STREAM_FIRST_CHUNK_TIMEOUT_MS);
+    fetchOptions.signal = guard.signal;
 
     let response;
     try {
-      response = await fetch(PPLX_SSE_ENDPOINT, fetchOptions);
+      response = await proxyAwareFetch(PPLX_SSE_ENDPOINT, fetchOptions, proxyOptions);
     } catch (err) {
       log?.error?.("PPLX-WEB", `Fetch failed: ${err.message || String(err)}`);
       const errResp = new Response(JSON.stringify({
         error: { message: `Perplexity connection failed: ${err.message || String(err)}`, type: "upstream_error" },
       }), { status: 502, headers: { "Content-Type": "application/json" } });
       return { response: errResp, url: PPLX_SSE_ENDPOINT, headers, transformedBody: pplxBody };
+    } finally {
+      guard.clear();
     }
 
     if (!response.ok) {
