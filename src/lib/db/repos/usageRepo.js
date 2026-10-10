@@ -10,7 +10,12 @@ function maskApiKey(key) {
   return key.slice(0, 8) + "***" + key.slice(-4);
 }
 
-const PENDING_TIMEOUT_MS = 60 * 1000;
+// Safety net for a pending count that no teardown path ever released (abort,
+// disconnect and flush all decrement it themselves). It has to sit above the longest
+// legitimate request — a streaming agent turn runs for minutes — or the dashboard
+// shows zero active requests while work is still in flight. Unref'd, so it cannot
+// hold the process open on shutdown.
+const PENDING_TIMEOUT_MS = 10 * 60 * 1000;
 const RING_CAP = 50;
 const CONN_CACHE_TTL_MS = 30 * 1000;
 const PERIOD_MS = { "24h": 86400000, "7d": 604800000, "30d": 2592000000, "60d": 5184000000 };
@@ -150,39 +155,55 @@ async function calculateCost(provider, model, tokens) {
   }
 }
 
+// One pending count per (model, account); clamped at zero and pruned when empty so
+// getActiveRequests() never reports a stale pair.
+function adjustPending(modelKey, connectionId, delta) {
+  if (!pendingRequests.byModel[modelKey]) pendingRequests.byModel[modelKey] = 0;
+  pendingRequests.byModel[modelKey] = Math.max(0, pendingRequests.byModel[modelKey] + delta);
+  if (pendingRequests.byModel[modelKey] === 0) delete pendingRequests.byModel[modelKey];
+
+  if (!connectionId) return;
+  if (!pendingRequests.byAccount[connectionId]) pendingRequests.byAccount[connectionId] = {};
+  if (!pendingRequests.byAccount[connectionId][modelKey]) pendingRequests.byAccount[connectionId][modelKey] = 0;
+  pendingRequests.byAccount[connectionId][modelKey] = Math.max(0, pendingRequests.byAccount[connectionId][modelKey] + delta);
+  if (pendingRequests.byAccount[connectionId][modelKey] === 0) {
+    delete pendingRequests.byAccount[connectionId][modelKey];
+    if (Object.keys(pendingRequests.byAccount[connectionId]).length === 0) {
+      delete pendingRequests.byAccount[connectionId];
+    }
+  }
+}
+
 export function trackPendingRequest(model, provider, connectionId, started, error = false) {
   const modelKey = provider ? `${model} (${provider})` : model;
   const timerKey = `${connectionId}|${modelKey}`;
 
-  if (!pendingRequests.byModel[modelKey]) pendingRequests.byModel[modelKey] = 0;
-  pendingRequests.byModel[modelKey] = Math.max(0, pendingRequests.byModel[modelKey] + (started ? 1 : -1));
-  if (pendingRequests.byModel[modelKey] === 0) delete pendingRequests.byModel[modelKey];
+  adjustPending(modelKey, connectionId, started ? 1 : -1);
 
-  if (connectionId) {
-    if (!pendingRequests.byAccount[connectionId]) pendingRequests.byAccount[connectionId] = {};
-    if (!pendingRequests.byAccount[connectionId][modelKey]) pendingRequests.byAccount[connectionId][modelKey] = 0;
-    pendingRequests.byAccount[connectionId][modelKey] = Math.max(0, pendingRequests.byAccount[connectionId][modelKey] + (started ? 1 : -1));
-    if (pendingRequests.byAccount[connectionId][modelKey] === 0) {
-      delete pendingRequests.byAccount[connectionId][modelKey];
-      if (Object.keys(pendingRequests.byAccount[connectionId]).length === 0) {
-        delete pendingRequests.byAccount[connectionId];
-      }
-    }
-  }
-
+  // One watchdog per in-flight request. A single shared timer per key meant that any
+  // sibling finishing cancelled it (leaving a genuinely stuck count stuck forever),
+  // and firing it zeroed the whole key — wiping the counts of healthy requests on
+  // other accounts that share the model. Release one count instead.
   if (started) {
-    clearTimeout(pendingTimers[timerKey]);
-    pendingTimers[timerKey] = setTimeout(() => {
-      delete pendingTimers[timerKey];
-      if (pendingRequests.byModel[modelKey] > 0) pendingRequests.byModel[modelKey] = 0;
-      if (connectionId && pendingRequests.byAccount[connectionId]?.[modelKey] > 0) {
-        pendingRequests.byAccount[connectionId][modelKey] = 0;
+    const timers = pendingTimers[timerKey] || (pendingTimers[timerKey] = []);
+    const timer = setTimeout(() => {
+      const list = pendingTimers[timerKey];
+      if (list) {
+        const at = list.indexOf(timer);
+        if (at >= 0) list.splice(at, 1);
+        if (list.length === 0) delete pendingTimers[timerKey];
       }
+      adjustPending(modelKey, connectionId, -1);
       scheduleStatsEvent("pending");
     }, PENDING_TIMEOUT_MS);
+    timer.unref?.();
+    timers.push(timer);
   } else {
-    clearTimeout(pendingTimers[timerKey]);
-    delete pendingTimers[timerKey];
+    const timers = pendingTimers[timerKey];
+    if (timers?.length) {
+      clearTimeout(timers.shift());
+      if (timers.length === 0) delete pendingTimers[timerKey];
+    }
   }
 
   if (!started && error && provider) {
