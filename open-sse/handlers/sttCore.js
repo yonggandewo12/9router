@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import { createErrorResult } from "../utils/error.js";
+import { fetchWithConnectTimeout } from "../utils/fetchTimeout.js";
 import { transcribeGeminiLive } from "./geminiLiveStt.js";
 import { PROVIDER_MODELS, PROVIDER_ID_TO_ALIAS, getModelUpstreamId } from "../config/providerModels.js";
 import { HTTP_STATUS } from "../config/runtimeConfig.js";
@@ -78,8 +79,14 @@ async function transcribeAssemblyAI(cfg, file, model, token) {
   const start = Date.now();
   while (Date.now() - start < 120_000) {
     await new Promise((r) => setTimeout(r, 2000));
-    const poll = await fetch(`${cfg.baseUrl}/${id}`, { headers: auth });
-    if (!poll.ok) continue;
+    // Bounded like the image poll loops: the deadline is only re-checked after a poll
+    // returns, so one hung request would outrun the 120s budget entirely.
+    const poll = await fetchWithConnectTimeout(`${cfg.baseUrl}/${id}`, { headers: auth });
+    if (!poll.ok) {
+      // An unread error body keeps its socket, and this loop can run sixty times.
+      try { await poll.body?.cancel?.(); } catch { /* noop */ }
+      continue;
+    }
     const r = await poll.json();
     if (r.status === "completed") return jsonResponse({ text: r.text || "" });
     if (r.status === "error") return createErrorResult(500, r.error || "AssemblyAI failed");
