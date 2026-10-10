@@ -1,13 +1,14 @@
 import { BaseExecutor } from "./base.js";
 import { PROVIDERS } from "../config/providers.js";
 import { OAUTH_ENDPOINTS, GITHUB_COPILOT } from "../config/appConstants.js";
-import { HTTP_STATUS } from "../config/runtimeConfig.js";
+import { HTTP_STATUS, STREAM_FIRST_CHUNK_TIMEOUT_MS } from "../config/runtimeConfig.js";
 import { openaiToOpenAIResponsesRequest } from "../translator/request/openai-responses.js";
 import { openaiResponsesToOpenAIResponse } from "../translator/response/openai-responses.js";
 import { initState, translateRequest, translateResponse } from "../translator/index.js";
 import { FORMATS } from "../translator/formats.js";
 import { parseSSELine, formatSSE } from "../utils/streamHelpers.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
+import { connectTimeoutGuard } from "../utils/fetchTimeout.js";
 import { stripUnsupportedParams } from "../translator/concerns/paramSupport.js";
 import { SSE_DONE } from "../utils/sseConstants.js";
 import { ANTHROPIC_API_VERSION } from "../providers/shared.js";
@@ -164,6 +165,24 @@ export class GithubExecutor extends BaseExecutor {
     return result;
   }
 
+  // Copilot answers with headers quickly, but a hung edge would otherwise hold the
+  // request and the account's concurrency slot open until the client gives up.
+  async postWithHeaderTimeout(url, headers, transformedBody, signal, proxyOptions) {
+    const guard = connectTimeoutGuard(signal, this.config?.timeoutMs || STREAM_FIRST_CHUNK_TIMEOUT_MS);
+    try {
+      return await proxyAwareFetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(transformedBody),
+        signal: guard.signal
+      }, proxyOptions);
+    } catch (error) {
+      throw guard.settleError(error);
+    } finally {
+      guard.clear();
+    }
+  }
+
   async executeWithResponsesEndpoint({ model, body, stream, credentials, signal, log, proxyOptions = null }) {
     const url = this.config.responsesUrl;
     const headers = this.buildHeaders(credentials, stream);
@@ -172,12 +191,7 @@ export class GithubExecutor extends BaseExecutor {
 
     log?.debug("GITHUB", "Sending translated request to /responses");
 
-    const response = await proxyAwareFetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(transformedBody),
-      signal
-    }, proxyOptions);
+    const response = await this.postWithHeaderTimeout(url, headers, transformedBody, signal, proxyOptions);
 
     if (!response.ok) {
       return { response, url, headers, transformedBody };
@@ -267,12 +281,7 @@ export class GithubExecutor extends BaseExecutor {
 
     log?.debug("GITHUB", "Sending translated request to /v1/messages");
 
-    const response = await proxyAwareFetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(transformedBody),
-      signal
-    }, proxyOptions);
+    const response = await this.postWithHeaderTimeout(url, headers, transformedBody, signal, proxyOptions);
 
     if (!response.ok) {
       return { response, url, headers, transformedBody };

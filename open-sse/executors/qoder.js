@@ -28,6 +28,7 @@ import { createHash } from "crypto";
 import { BaseExecutor } from "./base.js";
 import { PROVIDERS } from "../config/providers.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
+import { connectTimeoutGuard } from "../utils/fetchTimeout.js";
 import { buildErrorBody } from "../utils/error.js";
 import { SSE_DONE } from "../utils/sseConstants.js";
 import { FETCH_CONNECT_TIMEOUT_MS, HTTP_STATUS, SSE_PEEK_BUFFER_LIMIT } from "../config/runtimeConfig.js";
@@ -747,15 +748,13 @@ export class QoderExecutor extends BaseExecutor {
 
     // Abort if upstream doesn't return response headers within connect timeout.
     const timeoutMs = this.config?.timeoutMs || FETCH_CONNECT_TIMEOUT_MS;
-    const connectCtrl = new AbortController();
-    const connectTimer = setTimeout(() => connectCtrl.abort(new Error("fetch connect timeout")), timeoutMs);
-    const mergedSignal = signal ? AbortSignal.any([signal, connectCtrl.signal]) : connectCtrl.signal;
+    const guard = connectTimeoutGuard(signal, timeoutMs);
 
     let response;
     try {
       response = await proxyAwareFetch(
         url,
-        { method: "POST", headers, body: encodedBodyBuf, signal: mergedSignal },
+        { method: "POST", headers, body: encodedBodyBuf, signal: guard.signal },
         // A failed proxy request may already have reached Qoder. Replaying
         // the same COSY signature directly reuses its requestId and returns
         // 403/code 103. Let the caller retry through execute() with fresh signing.
@@ -763,10 +762,10 @@ export class QoderExecutor extends BaseExecutor {
       );
     } catch (err) {
       // strictProxy wraps transport errors; retain caller cancellation semantics.
-      if (mergedSignal.aborted) throw mergedSignal.reason;
+      if (guard.signal.aborted) throw guard.signal.reason ?? err;
       throw err;
     } finally {
-      clearTimeout(connectTimer);
+      guard.clear();
     }
 
     if (!response.ok) {

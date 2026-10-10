@@ -1,5 +1,7 @@
 import { BaseExecutor } from "./base.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
+import { connectTimeoutGuard } from "../utils/fetchTimeout.js";
+import { STREAM_FIRST_CHUNK_TIMEOUT_MS } from "../config/runtimeConfig.js";
 import { PROVIDERS } from "../config/providers.js";
 import { randomUUID } from "node:crypto";
 
@@ -416,12 +418,20 @@ export class WindsurfExecutor extends BaseExecutor {
 
     log?.debug?.("WS", `Windsurf → ${wsModel} (${wsMessages.length} messages)`);
 
-    const upstream = await proxyAwareFetch(url, {
-      method: "POST",
-      headers,
-      body: framedPayload,
-      signal,
-    }, proxyOptions);
+    const guard = connectTimeoutGuard(signal, this.config?.timeoutMs || STREAM_FIRST_CHUNK_TIMEOUT_MS);
+    let upstream;
+    try {
+      upstream = await proxyAwareFetch(url, {
+        method: "POST",
+        headers,
+        body: framedPayload,
+        signal: guard.signal,
+      }, proxyOptions);
+    } catch (error) {
+      throw guard.settleError(error);
+    } finally {
+      guard.clear();
+    }
 
     if (!upstream.ok && upstream.status !== 200) {
       return { response: upstream, url, headers, transformedBody: protoPayload };

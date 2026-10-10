@@ -1,6 +1,6 @@
 import { BaseExecutor } from "./base.js";
 import { PROVIDERS, PROVIDER_OAUTH } from "../config/providers.js";
-import { HTTP_STATUS } from "../config/runtimeConfig.js";
+import { HTTP_STATUS, STREAM_FIRST_CHUNK_TIMEOUT_MS } from "../config/runtimeConfig.js";
 import {
   generateCursorBody,
   encodeField,
@@ -18,6 +18,7 @@ import { chatChunkSse, sseChunk } from "../utils/sse.js";
 import { FORMATS } from "../translator/formats.js";
 import { ROLE, OPENAI_BLOCK } from "../translator/schema/index.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
+import { connectTimeoutGuard } from "../utils/fetchTimeout.js";
 import zlib from "zlib";
 import crypto from "crypto";
 
@@ -388,12 +389,23 @@ export class CursorExecutor extends BaseExecutor {
   }
 
   async makeFetchRequest(url, headers, body, signal, proxyOptions = null) {
-    const response = await proxyAwareFetch(url, {
-      method: "POST",
-      headers,
-      body,
-      signal
-    }, proxyOptions);
+    // Cursor's agent runs server-side before it answers, so the ceiling is the
+    // first-chunk budget rather than the 60s default — but it still needs one, or a
+    // silent upstream holds the request and its account slot open indefinitely.
+    const guard = connectTimeoutGuard(signal, this.config?.timeoutMs || STREAM_FIRST_CHUNK_TIMEOUT_MS);
+    let response;
+    try {
+      response = await proxyAwareFetch(url, {
+        method: "POST",
+        headers,
+        body,
+        signal: guard.signal
+      }, proxyOptions);
+    } catch (error) {
+      throw guard.settleError(error);
+    } finally {
+      guard.clear();
+    }
 
     return {
       status: response.status,

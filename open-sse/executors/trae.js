@@ -1,5 +1,7 @@
 import { BaseExecutor } from "./base.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
+import { connectTimeoutGuard } from "../utils/fetchTimeout.js";
+import { FETCH_CONNECT_TIMEOUT_MS } from "../config/runtimeConfig.js";
 import { PROVIDERS } from "../config/providers.js";
 
 // Trae executor — SOLO remote agent API.
@@ -145,12 +147,22 @@ export default class TraeExecutor extends BaseExecutor {
       auto_create_project: false,
       origin: "web",
     };
-    const res = await proxyAwareFetch(`${this.base()}/chat_sessions`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-      signal,
-    }, proxyOptions || null);
+    // streamEvents bounds itself; session creation had no bound at all, so a silent
+    // upstream stalled the whole turn before it started.
+    const guard = connectTimeoutGuard(signal, this.config?.timeoutMs || FETCH_CONNECT_TIMEOUT_MS);
+    let res;
+    try {
+      res = await proxyAwareFetch(`${this.base()}/chat_sessions`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        signal: guard.signal,
+      }, proxyOptions || null);
+    } catch (error) {
+      throw guard.settleError(error);
+    } finally {
+      guard.clear();
+    }
     const text = await res.text();
     if (!res.ok) throw new Error(`[${res.status}] ${text}`);
     const json = JSON.parse(text);

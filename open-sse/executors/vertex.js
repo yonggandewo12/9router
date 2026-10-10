@@ -2,6 +2,8 @@ import { BaseExecutor } from "./base.js";
 import { PROVIDERS } from "../config/providers.js";
 import { parseVertexSaJson, refreshVertexToken, refreshGoogleToken } from "../services/tokenRefresh.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
+import { connectTimeoutGuard, fetchWithConnectTimeout } from "../utils/fetchTimeout.js";
+import { STREAM_FIRST_CHUNK_TIMEOUT_MS } from "../config/runtimeConfig.js";
 
 // Cache project IDs resolved from raw API keys { apiKey → projectId }
 const projectIdCache = new Map();
@@ -35,7 +37,7 @@ function parseVertexAdcJson(apiKey) {
 async function resolveProjectId(apiKey) {
   if (projectIdCache.has(apiKey)) return projectIdCache.get(apiKey);
 
-  const res = await fetch(
+  const res = await fetchWithConnectTimeout(
     `https://aiplatform.googleapis.com/v1/publishers/google/models/__probe__:generateContent?key=${apiKey}`,
     { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }
   );
@@ -163,12 +165,23 @@ export class VertexExecutor extends BaseExecutor {
     const headers = this.buildHeaders(credentials, stream);
     const transformedBody = this.transformRequest(model, body, stream, credentials);
 
-    const response = await proxyAwareFetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(transformedBody),
-      signal,
-    }, proxyOptions);
+    // Bound the wait for headers only, and generously: a Vertex non-streaming call can
+    // legitimately think for a while, but an upstream that never answers must not hold
+    // the request (and the account's concurrency slot) open indefinitely.
+    const guard = connectTimeoutGuard(signal, this.config?.timeoutMs || STREAM_FIRST_CHUNK_TIMEOUT_MS);
+    let response;
+    try {
+      response = await proxyAwareFetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(transformedBody),
+        signal: guard.signal,
+      }, proxyOptions);
+    } catch (error) {
+      throw guard.settleError(error);
+    } finally {
+      guard.clear();
+    }
 
     return { response, url, headers, transformedBody };
   }

@@ -8,6 +8,7 @@ import {
 import { crc32, parseEventFrame } from "../utils/awsEventStream.js";
 import { escapeUri, signAwsRequest } from "../utils/awsSigv4.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
+import { connectTimeoutGuard } from "../utils/fetchTimeout.js";
 import { SSE_DONE, SSE_HEADERS } from "../utils/sseConstants.js";
 import { FORMATS } from "../translator/formats.js";
 import { FETCH_CONNECT_TIMEOUT_MS } from "../config/runtimeConfig.js";
@@ -123,12 +124,7 @@ export class BedrockExecutor extends BaseExecutor {
       credentials: resolved,
     });
 
-    const connectCtrl = new AbortController();
-    const connectTimer = setTimeout(
-      () => connectCtrl.abort(new Error("Bedrock fetch connect timeout")),
-      this.config?.timeoutMs || FETCH_CONNECT_TIMEOUT_MS,
-    );
-    const fetchSignal = signal ? AbortSignal.any([signal, connectCtrl.signal]) : connectCtrl.signal;
+    const guard = connectTimeoutGuard(signal, this.config?.timeoutMs || FETCH_CONNECT_TIMEOUT_MS);
     let response;
     try {
       response = await proxyAwareFetch(
@@ -137,7 +133,7 @@ export class BedrockExecutor extends BaseExecutor {
           method: "POST",
           headers,
           body: payload,
-          signal: fetchSignal,
+          signal: guard.signal,
           // Bedrock never redirects. Following one would replay the body and the signed
           // x-amz-security-token at whatever origin the redirect names, so refuse instead.
           redirect: "error",
@@ -145,12 +141,12 @@ export class BedrockExecutor extends BaseExecutor {
         proxyOptions,
       );
     } catch (error) {
-      if (connectCtrl.signal.aborted && !signal?.aborted) {
+      if (guard.timedOut) {
         throw new Error("Bedrock fetch connect timeout", { cause: error });
       }
       throw error;
     } finally {
-      clearTimeout(connectTimer);
+      guard.clear();
     }
 
     // The returned headers only feed chatCore's request logger, which writes them to disk
