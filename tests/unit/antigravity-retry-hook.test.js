@@ -73,7 +73,6 @@ describe("antigravity computeRetryDelay hook (D3)", () => {
   });
 
   it("buildHeaders matches official IDE stream headers", () => {
-    ag._lastSessionId = "sess-123";
     const h = ag.buildHeaders({ accessToken: "tok" }, true);
     expect(h["User-Agent"]).toBe("antigravity/ide/2.11.0 darwin/arm64");
     expect(h["Content-Type"]).toBe("application/json");

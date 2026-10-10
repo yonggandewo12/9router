@@ -73,9 +73,14 @@ export async function POST(request) {
         };
 
         const executor = getExecutor(provider);
-        const url = executor.buildUrl(model, stream, 0, credentials);
-        const headers = executor.buildHeaders(credentials, stream);
-        const finalBody = executor.transformRequest(model, translated, stream, credentials);
+        // Mirror BaseExecutor.execute exactly — same order, same arguments, one hookCtx
+        // for the call. buildHeaders last, because that is where an executor reads back
+        // what transformRequest derived (codex session_id, grok-cli turn/model ids); any
+        // other order previews headers the real request would never send.
+        const hookCtx = {};
+        const url = executor.buildUrl(model, stream, 0, credentials, hookCtx);
+        const finalBody = executor.transformRequest(model, translated, stream, credentials, hookCtx);
+        const headers = executor.buildHeaders(credentials, stream, url, model, finalBody, hookCtx);
 
         return NextResponse.json({ success: true, result: { url, headers, body: finalBody } });
       }

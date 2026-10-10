@@ -80,18 +80,14 @@ describe("GrokCliExecutor", () => {
   });
 
   it("buildHeaders sets CLI fingerprint + session headers", () => {
-    executor._currentSessionId = "sess-abc";
-    executor._currentReqId = "req-xyz";
-    executor._agentId = "agent-1";
-    executor._currentModel = "grok-4.5";
-    executor._currentTurnIdx = 3;
+    const hookCtx = { sessionId: "sess-abc", reqId: "req-xyz", agentId: "agent-1", model: "grok-4.5", turnIdx: 3 };
 
     const headers = executor.buildHeaders(
       {
         accessToken: "tok_test",
         providerSpecificData: { email: "u@example.com", userId: "uid-1" },
       },
-      true
+      true, null, null, null, hookCtx
     );
 
     expect(headers.Authorization).toBe("Bearer tok_test");
@@ -112,9 +108,6 @@ describe("GrokCliExecutor", () => {
   });
 
   it("buildHeaders falls back to top-level email/userId (OAuth mapTokens shape)", () => {
-    executor._currentSessionId = "sess-top";
-    executor._currentReqId = "req-top";
-
     const headers = executor.buildHeaders(
       {
         accessToken: "tok_test",
@@ -122,7 +115,7 @@ describe("GrokCliExecutor", () => {
         // userId only top-level; psd has neither email nor userId
         providerSpecificData: { authMethod: "device_code" },
       },
-      true
+      true, null, null, null, { sessionId: "sess-top", reqId: "req-top" }
     );
 
     expect(headers["x-email"]).toBe("top@example.com");
@@ -152,9 +145,10 @@ describe("GrokCliExecutor", () => {
     };
 
     // Simulate translator already converting messages→input; also test messages fallback
+    const ctx = {};
     const out = executor.transformRequest("grok-4.5-high", { ...body }, true, {
       connectionId: "conn-1",
-    });
+    }, ctx);
 
     expect(out.model).toBe("grok-4.5");
     expect(out.stream).toBe(true);
@@ -166,7 +160,7 @@ describe("GrokCliExecutor", () => {
     expect(out.user).toBeUndefined();
     expect(Array.isArray(out.input)).toBe(true);
     expect(out.input.length).toBeGreaterThan(0);
-    expect(executor._currentTurnIdx).toBe(1);
+    expect(ctx.turnIdx).toBe(1);
 
     // tools flattened + hosted tools kept
     expect(out.tools).toHaveLength(3);
@@ -365,6 +359,7 @@ describe("GrokCliExecutor", () => {
     };
 
     // Turn 1: one user message
+    const ctx = {};
     executor.transformRequest(
       "grok-4.5",
       {
@@ -375,18 +370,20 @@ describe("GrokCliExecutor", () => {
         ],
       },
       true,
-      creds
+      creds,
+      ctx
     );
-    expect(executor._currentSessionId).toBeTruthy();
-    expect(executor._currentTurnIdx).toBe(1);
-    let headers = executor.buildHeaders({ accessToken: "t" }, true);
+    expect(ctx.sessionId).toBeTruthy();
+    expect(ctx.turnIdx).toBe(1);
+    let headers = executor.buildHeaders({ accessToken: "t" }, true, null, null, null, ctx);
     expect(headers["x-grok-turn-idx"]).toBe("1");
-    expect(headers["x-grok-session-id"]).toBe(executor._currentSessionId);
-    expect(headers["x-grok-conv-id"]).toBe(executor._currentSessionId);
+    expect(headers["x-grok-session-id"]).toBe(ctx.sessionId);
+    expect(headers["x-grok-conv-id"]).toBe(ctx.sessionId);
 
-    const sessionId = executor._currentSessionId;
+    const sessionId = ctx.sessionId;
 
     // Turn 2: full history with two user messages
+    const ctx2 = {};
     executor.transformRequest(
       "grok-4.5",
       {
@@ -399,14 +396,16 @@ describe("GrokCliExecutor", () => {
         ],
       },
       true,
-      creds
+      creds,
+      ctx2
     );
-    expect(executor._currentSessionId).toBe(sessionId);
-    expect(executor._currentTurnIdx).toBe(2);
-    headers = executor.buildHeaders({ accessToken: "t" }, true);
+    expect(ctx2.sessionId).toBe(sessionId);
+    expect(ctx2.turnIdx).toBe(2);
+    headers = executor.buildHeaders({ accessToken: "t" }, true, null, null, null, ctx2);
     expect(headers["x-grok-turn-idx"]).toBe("2");
 
     // Same session, a new delta-style request advances without relying on full history.
+    const ctx3 = {};
     executor.transformRequest(
       "grok-4.5",
       {
@@ -414,9 +413,10 @@ describe("GrokCliExecutor", () => {
         input: [{ type: "message", role: "user", content: "only latest" }],
       },
       true,
-      creds
+      creds,
+      ctx3
     );
-    expect(executor._currentTurnIdx).toBe(3);
+    expect(ctx3.turnIdx).toBe(3);
   });
 
   it("countGrokCliUserTurns / resolveGrokCliTurnIdx helpers", () => {
@@ -443,12 +443,14 @@ describe("GrokCliExecutor", () => {
 
   it("keeps fallback session stable when assistant history appears", () => {
     const creds = { connectionId: "fallback-conn", rawHeaders: {} };
+    const first = {};
     executor.transformRequest("grok-build", {
       model: "grok-build",
       input: [{ type: "message", role: "user", content: "first" }],
-    }, true, creds);
-    const firstSession = executor._currentSessionId;
+    }, true, creds, first);
+    const firstSession = first.sessionId;
 
+    const second = {};
     executor.transformRequest("grok-build", {
       model: "grok-build",
       input: [
@@ -456,9 +458,9 @@ describe("GrokCliExecutor", () => {
         { type: "message", role: "assistant", content: "x".repeat(100) },
         { type: "message", role: "user", content: "second" },
       ],
-    }, true, creds);
-    expect(executor._currentSessionId).toBe(firstSession);
-    expect(executor._currentTurnIdx).toBe(2);
+    }, true, creds, second);
+    expect(second.sessionId).toBe(firstSession);
+    expect(second.turnIdx).toBe(2);
   });
 
   it("does not advance turn index when retrying the same request body", () => {
@@ -467,10 +469,11 @@ describe("GrokCliExecutor", () => {
       input: [{ type: "message", role: "user", content: "retry me" }],
     };
     const creds = { connectionId: "retry-conn" };
-    executor.transformRequest("grok-build", body, true, creds);
-    const firstTurn = executor._currentTurnIdx;
-    executor.transformRequest("grok-build", body, true, creds);
-    expect(executor._currentTurnIdx).toBe(firstTurn);
+    const first = {};
+    executor.transformRequest("grok-build", body, true, creds, first);
+    const second = {};
+    executor.transformRequest("grok-build", body, true, creds, second);
+    expect(second.turnIdx).toBe(first.turnIdx);
   });
 
   it("bounds per-session turn state", () => {

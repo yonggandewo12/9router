@@ -158,9 +158,10 @@ describe("GrokCliExecutor multi-turn input", () => {
       include: ["reasoning.encrypted_content"],
     };
 
+    const ctx = {};
     const out = executor.transformRequest("grok-4.5", structuredClone(body), true, {
       connectionId: "mt-1",
-    });
+    }, ctx);
 
     const reasoning = out.input.filter((i) => i.type === "reasoning");
     expect(reasoning).toHaveLength(1);
@@ -176,6 +177,6 @@ describe("GrokCliExecutor multi-turn input", () => {
     }
     expect(out.include).toContain("reasoning.encrypted_content");
     expect(out.store).toBe(false);
-    expect(executor._currentTurnIdx).toBe(2);
+    expect(ctx.turnIdx).toBe(2);
   });
 });

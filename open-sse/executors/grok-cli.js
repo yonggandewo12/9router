@@ -333,6 +333,31 @@ function resolveEffortFromModel(modelId) {
   return null;
 }
 
+// Agent id fallback for connections that carry no deviceId: derived from the machine
+// id, so it is stable for the process and shared by every request (memoized promise
+// keeps concurrent first-callers from deriving it twice).
+let machineAgentIdPromise = null;
+function machineAgentId() {
+  if (!machineAgentIdPromise) {
+    machineAgentIdPromise = (async () => {
+      try {
+        const mid = await getConsistentMachineId("grok-cli-agent");
+        // Format as UUID-ish for header aesthetics
+        return [
+          mid.slice(0, 8),
+          mid.slice(8, 12),
+          "5" + mid.slice(13, 16),
+          "a" + mid.slice(17, 20),
+          mid.slice(0, 12).padEnd(12, "0"),
+        ].join("-");
+      } catch {
+        return crypto.randomUUID();
+      }
+    })();
+  }
+  return machineAgentIdPromise;
+}
+
 /**
  * Grok CLI Executor — OpenAI Responses API on cli-chat-proxy.grok.com
  * Auth: OAuth device-code access token (xai-grok-cli).
@@ -340,10 +365,6 @@ function resolveEffortFromModel(modelId) {
 export class GrokCliExecutor extends BaseExecutor {
   constructor() {
     super("grok-cli", PROVIDERS["grok-cli"]);
-    this._currentSessionId = null;
-    this._currentReqId = null;
-    this._currentTurnIdx = 1;
-    this._agentId = null;
   }
 
   buildUrl() {
@@ -359,7 +380,11 @@ export class GrokCliExecutor extends BaseExecutor {
     return shouldRefreshCredentials("grok-cli", credentials);
   }
 
-  buildHeaders(credentials, stream = true) {
+  // Every value here is request-scoped, so it arrives on hookCtx (one object per
+  // execute() call) instead of the singleton: two concurrent conversations used to
+  // overwrite each other's session/req/turn/model between transformRequest and
+  // buildHeaders, which merged their upstream context and could serve the wrong model.
+  buildHeaders(credentials, stream = true, _url = null, _model = null, _body = null, hookCtx = {}) {
     const headers = super.buildHeaders(credentials, stream);
 
     // Static fingerprint from registry
@@ -373,18 +398,18 @@ export class GrokCliExecutor extends BaseExecutor {
     headers["x-grok-client-version"] =
       this.config.clientVersion || headers["x-grok-client-version"] || GROK_CLI_VERSION;
 
-    const sessionId = this._currentSessionId || credentials?.connectionId || crypto.randomUUID();
-    const reqId = this._currentReqId || crypto.randomUUID();
+    const sessionId = hookCtx?.sessionId || credentials?.connectionId || crypto.randomUUID();
+    const reqId = hookCtx?.reqId || crypto.randomUUID();
     headers["x-grok-session-id"] = sessionId;
     // CLI uses the same id for conv + session on chat turns
     headers["x-grok-conv-id"] = sessionId;
     headers["x-grok-req-id"] = reqId;
-    headers["x-grok-turn-idx"] = String(this._currentTurnIdx || 1);
+    headers["x-grok-turn-idx"] = String(hookCtx?.turnIdx || 1);
 
-    if (this._agentId) headers["x-grok-agent-id"] = this._agentId;
+    if (hookCtx?.agentId) headers["x-grok-agent-id"] = hookCtx.agentId;
 
     // Surface model override (CLI always sets this)
-    if (this._currentModel) headers["x-grok-model-override"] = this._currentModel;
+    if (hookCtx?.model) headers["x-grok-model-override"] = hookCtx.model;
 
     // Identity: mapTokens stores email top-level AND in providerSpecificData;
     // fall back either way so OAuth connections always fingerprint like the CLI.
@@ -416,14 +441,17 @@ export class GrokCliExecutor extends BaseExecutor {
     return super.parseError(response, bodyText);
   }
 
-  transformRequest(model, body, stream, credentials) {
+  transformRequest(model, body, stream, credentials, hookCtx = {}) {
     // Session / request ids for headers — stable per client conversation when possible
     const requestKey = body;
-    this._currentSessionId = resolveGrokCliSessionId(credentials, body);
-    this._currentReqId = crypto.randomUUID();
-    this._agentId =
+    hookCtx.sessionId = resolveGrokCliSessionId(credentials, body);
+    hookCtx.reqId = crypto.randomUUID();
+    // execute() pre-seeds the process-wide machine agent id; a connection-scoped
+    // device/agent id wins, but must not erase the fallback (the CLI always sends one).
+    hookCtx.agentId =
       credentials?.providerSpecificData?.deviceId ||
       credentials?.providerSpecificData?.agentId ||
+      hookCtx.agentId ||
       null;
 
     // Normalize Responses input
@@ -453,7 +481,7 @@ export class GrokCliExecutor extends BaseExecutor {
     normalizeGrokCliTools(body);
 
     // Turn index after input is finalized (user-message count, monotonic per session)
-    this._currentTurnIdx = resolveGrokCliTurnIdx(this._currentSessionId, body.input, requestKey);
+    hookCtx.turnIdx = resolveGrokCliTurnIdx(hookCtx.sessionId, body.input, requestKey);
 
     body.stream = true;
     body.store = false;
@@ -470,7 +498,7 @@ export class GrokCliExecutor extends BaseExecutor {
       resolvedModel = getModelUpstreamId("grok-cli", resolvedModel) || resolvedModel;
     }
     body.model = resolvedModel;
-    this._currentModel = resolvedModel;
+    hookCtx.model = resolvedModel;
 
     // Reasoning effort priority: explicit > reasoning_effort > model suffix > default high.
     // grok-build and Composer reject reasoningEffort but still accept summary/encrypted continuity.
@@ -526,26 +554,12 @@ export class GrokCliExecutor extends BaseExecutor {
   }
 
   async execute(args) {
-    // Lazy-resolve stable agent id once per process if connection has none
-    if (!this._agentId && !args.credentials?.providerSpecificData?.deviceId) {
-      try {
-        const mid = await getConsistentMachineId("grok-cli-agent");
-        // Format as UUID-ish for header aesthetics
-        this._agentId = [
-          mid.slice(0, 8),
-          mid.slice(8, 12),
-          "5" + mid.slice(13, 16),
-          "a" + mid.slice(17, 20),
-          mid.slice(0, 12).padEnd(12, "0"),
-        ].join("-");
-      } catch {
-        this._agentId = crypto.randomUUID();
-      }
-    } else if (args.credentials?.providerSpecificData?.deviceId) {
-      this._agentId = args.credentials.providerSpecificData.deviceId;
-    }
+    // The machine-derived agent id is process-stable, everything else about the
+    // request is not — so it is resolved here and handed over on hookCtx.
+    const deviceId = args.credentials?.providerSpecificData?.deviceId;
+    const hookCtx = { agentId: deviceId || (await machineAgentId()) };
 
-    return super.execute(args);
+    return super.execute({ ...args, hookCtx });
   }
 }
 
