@@ -221,7 +221,10 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   } else {
     translatedBody = translateRequest(sourceFormat, targetFormat, upstreamModel, body, stream, credentials, provider, reqLogger, stripList, connectionId, clientTool);
     if (!translatedBody) {
-      trackPendingRequest(model, provider, connectionId, false, true);
+      // No pending counter to release yet: the increment happens with the dispatch
+      // below, so decrementing here would take a count off another in-flight request
+      // on the same model+account. A local translation failure is not a provider error
+      // either, so it must not stamp lastErrorProvider.
       return createErrorResult(HTTP_STATUS.BAD_REQUEST, `Failed to translate request for ${sourceFormat} → ${targetFormat}`);
     }
     toolNameMap = translatedBody._toolNameMap;
@@ -482,6 +485,11 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
             proxyOptions,
             providerOverrides,
           });
+          // Whichever response we drop has to be cancelled, not just abandoned: an
+          // unread body holds its socket (and on generation providers keeps billing
+          // for the job) — same reason videoCore and BaseExecutor.cancel it.
+          const discarded = retryResult.response.ok ? providerResponse : retryResult.response;
+          try { await discarded.body?.cancel?.(); } catch { /* noop */ }
           if (retryResult.response.ok) {
             providerResponse = retryResult.response;
             providerUrl = retryResult.url;
