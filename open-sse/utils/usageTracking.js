@@ -336,24 +336,29 @@ export function mergeUsage(prev, next) {
   return merged;
 }
 
-// Providers bill a vision item as a fixed allowance (roughly 1-1.6K tokens), not as
-// the length of its base64 payload: a screenshot is ~1500 tokens upstream, ~250K as
-// characters. Both the ledger and the client's context-window math inherit this, so
-// the payload is priced as one image instead of being walked byte for byte.
-const VISION_ITEM_TOKENS = 1024;
-const BASE64_PAYLOAD_MIN_CHARS = 1024;
-const WHITESPACE_RE = /\s/;
+// Providers bill a media item as a flat allowance (an image is ~1-1.6K tokens,
+// audio/PDF by their own rules), not as the length of its base64 payload: a
+// screenshot is ~1500 tokens upstream but ~250K characters. Both the ledger and the
+// client's context-window math inherit this, so a decoded payload is priced as one
+// item instead of being walked byte for byte.
+const MEDIA_ITEM_TOKENS = 1024;
+const MEDIA_PAYLOAD_MIN_CHARS = 1024;
+const BASE64_RE = /^[A-Za-z0-9+/_-]+={0,2}$/;
 
-function isBase64Payload(value) {
-  if (value.length < BASE64_PAYLOAD_MIN_CHARS) return false;
-  if (value.startsWith("data:")) return true;
-  // Real base64 has no whitespace; any prose, code or JSON blob does.
-  return !WHITESPACE_RE.test(value);
+// Only the slots a provider actually decodes as media: `source.data` /
+// `inlineData.data` (Claude, Gemini, Kiro) and any base64 `data:` URL (OpenAI
+// image_url, Codex input_image). A shape-free guess — "long string with no
+// whitespace" — would price minified JSON or a single-line code blob, which the
+// model genuinely reads as text, as one image and under-bill it by ~50x.
+function isMediaPayload(key, value) {
+  if (value.length < MEDIA_PAYLOAD_MIN_CHARS) return false;
+  if (value.startsWith("data:")) return value.includes(";base64,");
+  return key === "data" && BASE64_RE.test(value);
 }
 
-function countBodyChars(value, acc) {
+function countBodyChars(value, acc, key = null) {
   if (typeof value === "string") {
-    if (isBase64Payload(value)) acc.visionItems++;
+    if (isMediaPayload(key, value)) acc.mediaItems++;
     else acc.chars += value.length;
     return;
   }
@@ -365,24 +370,25 @@ function countBodyChars(value, acc) {
     for (const item of value) countBodyChars(item, acc);
     return;
   }
-  for (const [key, item] of Object.entries(value)) {
-    acc.chars += key.length;
-    countBodyChars(item, acc);
+  for (const [prop, item] of Object.entries(value)) {
+    acc.chars += prop.length;
+    countBodyChars(item, acc, prop);
   }
 }
 
 /**
  * Estimate input tokens from request body by walking its text (messages, tools,
- * system, thinking config, ...) at ~4 chars per token.
+ * system, thinking config, ...) at ~4 chars per token, with each decoded media
+ * payload counted as one flat allowance.
  */
 export function estimateInputTokens(body) {
   if (!body || typeof body !== "object") return 0;
 
   try {
-    const acc = { chars: 0, visionItems: 0 };
+    const acc = { chars: 0, mediaItems: 0 };
     countBodyChars(body, acc);
     // Estimate: ~4 chars per token (rough average across all tokenizers)
-    return Math.ceil(acc.chars / 4) + acc.visionItems * VISION_ITEM_TOKENS;
+    return Math.ceil(acc.chars / 4) + acc.mediaItems * MEDIA_ITEM_TOKENS;
   } catch (err) {
     // Fallback if the walk fails
     return 0;

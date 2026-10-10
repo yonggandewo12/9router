@@ -44,11 +44,31 @@ describe("estimateInputTokens", () => {
     expect(asImage).toBeLessThan(2000);
   });
 
+  it("treats Gemini inlineData as one media item", () => {
+    const tokens = estimateInputTokens({
+      contents: [{ role: "user", parts: [{ inlineData: { mimeType: "image/png", data: base64(800_000) } }] }],
+    });
+    expect(tokens).toBeLessThan(2000);
+  });
+
   it("scales with the number of images", () => {
     const payload = base64(200_000);
-    const one = estimateInputTokens({ input: [{ image: payload }] });
-    const three = estimateInputTokens({ input: [{ image: payload }, { image: payload }, { image: payload }] });
+    const shot = { type: "image", source: { type: "base64", media_type: "image/png", data: payload } };
+    const one = estimateInputTokens({ messages: [{ role: "user", content: [shot] }] });
+    const three = estimateInputTokens({ messages: [{ role: "user", content: [shot, shot, shot] }] });
     expect(three - one).toBeGreaterThan(1500);
+  });
+
+  // The allowance is for a payload the provider DECODES. Long text the model actually
+  // reads — minified JSON, a single-line code blob, a bare base64 dump in a tool
+  // result — has no whitespace either, and pricing it as one image under-bills ~50x.
+  it("counts long whitespace-free text as text, not as media", () => {
+    const minified = `{"k":"${"v".repeat(200_000)}"}`;
+    const asText = estimateInputTokens({ messages: [{ role: "tool", content: minified }] });
+    expect(asText).toBeGreaterThan(40_000);
+
+    const notBase64 = `data:text/plain,${"x".repeat(100_000)}`;
+    expect(estimateInputTokens({ messages: [{ role: "user", content: notBase64 }] })).toBeGreaterThan(20_000);
   });
 
   it("still counts structured config that has no payload", () => {
