@@ -51,7 +51,7 @@ describe("stream teardown on abort", () => {
       model: "glm-5.1",
       body: { model: "glm-5.1", messages: [{ role: "user", content: "hi" }] },
       abortSignal: ctrl.signal,
-      onStreamComplete: (payload, usage) => completed.push({ payload, usage }),
+      onStreamComplete: (payload, usage, _ttft, meta) => completed.push({ payload, usage, meta }),
     });
 
     attachReader(stream);
@@ -64,12 +64,14 @@ describe("stream teardown on abort", () => {
     await tick();
 
     expect(completed).toHaveLength(1);
-    const { payload, usage } = completed[0];
+    const { payload, usage, meta } = completed[0];
     expect(payload.content).toBe("x".repeat(400));
     expect(usage.estimated).toBe(true);
     expect(usage.completion_tokens).toBe(100);
     // What gets recorded is the real estimate, without the client-facing pad.
     expect(usage.prompt_tokens).toBeLessThan(2000);
+    // The tail knows it was cut short, so the detail row is not filed as a success.
+    expect(meta.aborted).toBe(true);
   });
 
   it("fires the tail exactly once when the terminal event and the abort race", async () => {
@@ -81,7 +83,7 @@ describe("stream teardown on abort", () => {
       model: "glm-5.1",
       body: { model: "glm-5.1", messages: [] },
       abortSignal: ctrl.signal,
-      onStreamComplete: (payload, usage) => completed.push(usage),
+      onStreamComplete: (payload, usage, _ttft, meta) => completed.push({ usage, meta }),
     });
 
     const { drain } = attachReader(stream);
@@ -94,6 +96,8 @@ describe("stream teardown on abort", () => {
     await tick();
 
     expect(completed).toHaveLength(1);
+    // The stream finished on its own before the abort landed, so it stays a success.
+    expect(completed[0].meta.aborted).toBe(false);
     await drain;
   });
 

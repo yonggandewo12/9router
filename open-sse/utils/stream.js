@@ -95,7 +95,7 @@ export function createSSEStream(options = {}) {
   // Usage/logging tail, callable from transform() as well as flush(): a client that
   // closes right after the terminal event cancels the reader, and flush() never runs.
   let abortListener = null;
-  const finalizeStream = () => {
+  const finalizeStream = (aborted = false) => {
     if (completionFlushTimer) { clearTimeout(completionFlushTimer); completionFlushTimer = null; }
     if (abortSignal && abortListener) { abortSignal.removeEventListener("abort", abortListener); abortListener = null; }
     if (finalized) return;
@@ -119,7 +119,7 @@ export function createSSEStream(options = {}) {
       onStreamComplete({
         content: accumulatedContent,
         thinking: accumulatedThinking
-      }, finalUsage, ttftAt);
+      }, finalUsage, ttftAt, { aborted });
     }
   };
 
@@ -127,9 +127,9 @@ export function createSSEStream(options = {}) {
   // upstream already spent would vanish from the ledger. finalizeStream() is
   // idempotent, so the normal completion path is unaffected.
   if (abortSignal) {
-    if (abortSignal.aborted) finalizeStream();
+    if (abortSignal.aborted) finalizeStream(true);
     else {
-      abortListener = () => finalizeStream();
+      abortListener = () => finalizeStream(true);
       abortSignal.addEventListener("abort", abortListener, { once: true });
     }
   }
