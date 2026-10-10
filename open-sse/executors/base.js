@@ -199,7 +199,10 @@ export class BaseExecutor {
           log?.debug?.("RETRY", `Error on ${url}, trying fallback ${urlIndex + 1}`);
           continue;
         }
-        throw error;
+        // The settled error, not the raw one: a connect timeout arrives as undici's
+        // AbortError, and chatCore reads AbortError as 499 "client aborted" — which
+        // would blame the caller for a dead upstream and skip the account cooldown.
+        throw lastError;
       }
     }
 
