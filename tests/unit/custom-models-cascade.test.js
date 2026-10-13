@@ -138,7 +138,13 @@ describe("customModels provider cascade", () => {
     // the name is now a bound shortcut: same target is idempotent, moving it to
     // another model goes through delete + create like the sibling route does
     expect((await put({ model: "ark/first", alias: "repaint" })).status).toBe(200);
-    expect((await put({ model: "ark/second", alias: "repaint" })).status).toBe(400);
+    const stolen = await put({ model: "ark/second", alias: "repaint" });
+    expect(stolen.status).toBe(400);
+    // The alert a user sees has to say what to do about it
+    const hint = (await stolen.json()).error;
+    expect(hint).toContain("repaint");
+    expect(hint).toContain("ark/first");
+    expect(hint).toContain("delete");
     expect(await db.getModelAliases()).toMatchObject({ repaint: "ark/first" });
   });
 

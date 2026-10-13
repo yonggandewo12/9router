@@ -89,10 +89,12 @@ export async function PUT(request) {
     const modelAliases = await getModelAliases();
 
     // Canonical direction: key=alias, value="provider/model". Reject stealing an
-    // existing alias for a different model.
+    // existing alias for a different model (same rule as PUT /api/models/alias).
     const existing = modelAliases[alias];
     if (existing && existing !== model) {
-      return NextResponse.json({ error: "Alias already in use" }, { status: 400 });
+      return NextResponse.json({
+        error: `Alias "${alias}" already points to ${existing} — delete it before reusing the name for ${model}`,
+      }, { status: 400 });
     }
 
     await setModelAlias(alias, model);

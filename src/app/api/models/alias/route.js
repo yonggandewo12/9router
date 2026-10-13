@@ -29,7 +29,9 @@ export async function PUT(request) {
     // another model is refused — the dashboard offers delete + create instead.
     const existing = (await getModelAliases())[alias];
     if (existing && existing !== model) {
-      return NextResponse.json({ error: "Alias already in use" }, { status: 400 });
+      return NextResponse.json({
+        error: `Alias "${alias}" already points to ${existing} — delete it before reusing the name for ${model}`,
+      }, { status: 400 });
     }
 
     await setModelAlias(alias, model);
