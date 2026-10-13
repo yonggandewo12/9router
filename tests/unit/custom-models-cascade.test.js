@@ -102,6 +102,29 @@ describe("customModels provider cascade", () => {
     expect(await db.getModelAliases()).not.toHaveProperty("bad");
   });
 
+  // setModelAlias guards the write path, but migrate.js and the import path
+  // INSERT alias values verbatim, so the read path has to be the one that
+  // guarantees a string — ModelSelectModal calls .startsWith() on every value.
+  it("hands readers a string for rows the migration wrote verbatim", async () => {
+    const { getAdapter } = await import("@/lib/db/driver.js");
+    const adapter = await getAdapter();
+    const put = (key, value) => adapter.run(
+      `INSERT OR REPLACE INTO kv(scope, key, value) VALUES('modelAliases', ?, ?)`, [key, JSON.stringify(value)]);
+
+    await put("legacy-object", { provider: "ark", model: "glm-5.3" });
+    await put("no-model-here", { provider: "ark" });
+    await put("not-an-object", 42);
+
+    const aliases = await db.getModelAliases();
+    expect(aliases["legacy-object"]).toBe("ark/glm-5.3");
+    expect(aliases).not.toHaveProperty("no-model-here");
+    expect(aliases).not.toHaveProperty("not-an-object");
+
+    await db.deleteModelAlias("legacy-object");
+    await db.deleteModelAlias("no-model-here");
+    await db.deleteModelAlias("not-an-object");
+  });
+
   it("PUT /api/models/alias follows the same rule as PUT /api/models", async () => {
     const route = await import("@/app/api/models/alias/route.js");
     const put = (body) => route.PUT(new Request("http://x/api/models/alias", {
@@ -118,6 +141,38 @@ describe("customModels provider cascade", () => {
     expect((await put({ model: "ark/second", alias: "repaint" })).status).toBe(400);
     expect(await db.getModelAliases()).toMatchObject({ repaint: "ark/first" });
   });
+
+  // A node answers to two names: its raw id (what the dashboard stores) and its
+  // prefix (what /v1/models advertises, so what a client copies back). Matching
+  // only the id leaves working rows behind under the other spelling.
+  it("matches both spellings of a node when handed a list", async () => {
+    const id = "openai-compatible-chat-cafe0000-0000-0000-0000-000000000000";
+    const names = [id, "glados"];
+    await db.addCustomModel({ providerAlias: id, id: "glm-4.7", type: "llm" });
+    await db.addCustomModel({ providerAlias: "glados", id: "glm-4.7", type: "llm" });
+    await db.addCustomModel({ providerAlias: "glados", id: "other", type: "embedding" });
+    await db.setModelAlias("by-id", `${id}/glm-4.7`);
+    await db.setModelAlias("by-prefix", "glados/glm-4.7");
+    await db.disableModels(id, ["glm-4.7"]);
+    await db.disableModels("glados", ["glm-4.7"]);
+
+    expect(await db.deleteCustomModelsByProvider(names)).toBe(3);
+    expect(await db.deleteModelAliasesForProvider(names)).toBe(2);
+    expect(await db.getModelAliases()).not.toHaveProperty("by-prefix");
+    for (const name of names) await db.enableModels(name, []);
+
+    const left = (await db.getCustomModels()).map((m) => m.providerAlias);
+    expect(left).not.toContain("glados");
+    expect(left).not.toContain(id);
+  });
+
+  it("an empty or falsy name list never wipes a scope", async () => {
+    const before = (await db.getCustomModels()).length;
+    expect(await db.deleteCustomModelsByProvider([])).toBe(0);
+    expect(await db.deleteCustomModelsByProvider([null, undefined, ""])).toBe(0);
+    expect(await db.deleteModelAliasesForProvider([])).toBe(0);
+    expect((await db.getCustomModels()).length).toBe(before);
+  });
 });
 
 describe("DELETE /api/provider-nodes/[id]", () => {
@@ -126,8 +181,11 @@ describe("DELETE /api/provider-nodes/[id]", () => {
       type: "openai-compatible", name: "Dying node", prefix: "dying", baseUrl: "http://127.0.0.1:9/v1",
     });
     await db.addCustomModel({ providerAlias: node.id, id: "glm-4.7", type: "llm" });
+    await db.addCustomModel({ providerAlias: "dying", id: "glm-4.7", type: "llm" });
     await db.setModelAlias("dying-fast", `${node.id}/glm-4.7`);
+    await db.setModelAlias("dying-slow", "dying/glm-4.7");
     await db.disableModels(node.id, ["glm-4.7"]);
+    await db.disableModels("dying", ["glm-4.7"]);
 
     const route = await import("@/app/api/provider-nodes/[id]/route.js");
     const res = await route.DELETE(
@@ -137,9 +195,14 @@ describe("DELETE /api/provider-nodes/[id]", () => {
 
     expect(res.status).toBe(200);
     expect(await db.getProviderNodeById(node.id)).toBeNull();
-    expect((await db.getCustomModels()).some((m) => m.providerAlias === node.id)).toBe(false);
+    const survivors = (await db.getCustomModels()).map((m) => m.providerAlias);
+    expect(survivors).not.toContain(node.id);
+    expect(survivors).not.toContain("dying");
     expect(await db.getModelAliases()).not.toHaveProperty("dying-fast");
-    expect((await db.getDisabledModels())[node.id]).toBeUndefined();
+    expect(await db.getModelAliases()).not.toHaveProperty("dying-slow");
+    const disabled = await db.getDisabledModels();
+    expect(disabled[node.id]).toBeUndefined();
+    expect(disabled.dying).toBeUndefined();
   });
 
   // The node row is deleted last on purpose: if a cascade fails, the node is
@@ -150,12 +213,12 @@ describe("DELETE /api/provider-nodes/[id]", () => {
     });
     const reached = [];
     vi.doMock("@/models", () => ({
-      getProviderNodeById: async (id) => (id === node.id ? { id } : null),
+      getProviderNodeById: async (id) => (id === node.id ? { id, prefix: "halfdying" } : null),
       getProviderConnections: async () => [],
       updateProviderConnection: async () => {},
       updateProviderNode: async () => {},
-      deleteProviderConnectionsByProvider: async (id) => { reached.push(`connections:${id}`); },
-      deleteCustomModelsByProvider: async (id) => { reached.push(`customModels:${id}`); },
+      deleteProviderConnectionsByProvider: async (id) => { reached.push(["connections", id]); },
+      deleteCustomModelsByProvider: async (names) => { reached.push(["customModels", names]); },
       deleteModelAliasesForProvider: async () => { throw new Error("cascade failed"); },
       enableModels: async () => {},
       deleteProviderNode: async () => { throw new Error("must not be reached"); },
@@ -170,7 +233,10 @@ describe("DELETE /api/provider-nodes/[id]", () => {
 
     vi.doUnmock("@/models");
     expect(res.status).toBe(500);
-    expect(reached).toEqual([`connections:${node.id}`, `customModels:${node.id}`]);
+    expect(reached).toEqual([
+      ["connections", node.id],
+      ["customModels", [node.id, "halfdying"]],
+    ]);
     expect(await db.getProviderNodeById(node.id)).not.toBeNull();
   });
 });
