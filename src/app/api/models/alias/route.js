@@ -24,8 +24,9 @@ export async function PUT(request) {
       return NextResponse.json({ error: "Model and alias required" }, { status: 400 });
     }
 
-    // Same rule as PUT /api/models (the two routes write one table): re-pointing
-    // this alias is fine, quietly stealing another model's shortcut is not.
+    // Same rule as PUT /api/models (the two routes write one table): a name is
+    // bound to its target, so re-setting the pair is idempotent and moving it to
+    // another model is refused — the dashboard offers delete + create instead.
     const existing = (await getModelAliases())[alias];
     if (existing && existing !== model) {
       return NextResponse.json({ error: "Alias already in use" }, { status: 400 });
