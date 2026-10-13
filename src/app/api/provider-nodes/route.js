@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createProviderNode, getProviderNodes } from "@/models";
 import { OPENAI_COMPATIBLE_PREFIX, ANTHROPIC_COMPATIBLE_PREFIX, CUSTOM_EMBEDDING_PREFIX } from "@/shared/constants/providers";
+import { findPrefixConflict } from "@/lib/providerPrefix";
 import { generateId } from "@/shared/utils";
 
 export const dynamic = "force-dynamic";
@@ -40,6 +41,11 @@ export async function POST(request) {
 
     if (!prefix?.trim()) {
       return NextResponse.json({ error: "Prefix is required" }, { status: 400 });
+    }
+
+    const conflict = await findPrefixConflict(prefix);
+    if (conflict) {
+      return NextResponse.json({ error: conflict }, { status: 400 });
     }
 
     // Determine type

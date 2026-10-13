@@ -303,15 +303,15 @@ describe("DELETE /api/provider-nodes/[id]", () => {
     expect(await db.getProviderNodeById(twinB.id)).not.toBeNull();
   });
 
-  // "pa"/"voyage" are perplexity-agent's and voyage-ai's uiAlias, "agnes-ai" is
-  // agnes's extra registry alias: neither predicate alone sees both, which is
-  // why the guard unions them.
+  // A built-in provider answers to several registry names. "pa"/"voyage" are
+  // perplexity-agent's and voyage-ai's uiAlias, "agnes-ai" is agnes's extra
+  // aliases[] entry; getProviderByAlias only knows id and uiAlias, so the guard
+  // reads the registry set instead.
   it("does not cascade under the other spellings of a built-in provider", async () => {
-    const { RESERVED_PROVIDER_PREFIXES } = await import("@/sse/services/model.js");
-    const { getProviderByAlias } = await import("@/shared/constants/providers");
-    expect(RESERVED_PROVIDER_PREFIXES.has("agnes-ai")).toBe(true);
+    const { getProviderByAlias, isReservedProviderName } = await import("@/shared/constants/providers");
+    expect(isReservedProviderName("agnes-ai")).toBe(true);
     expect(getProviderByAlias("agnes-ai")).toBeNull();
-    expect(RESERVED_PROVIDER_PREFIXES.has("pa")).toBe(false);
+    expect(isReservedProviderName("pa")).toBe(true);
     expect(getProviderByAlias("pa")?.id).toBe("perplexity-agent");
 
     vi.resetModules();
@@ -359,5 +359,55 @@ describe("DELETE /api/provider-nodes/[id]", () => {
     // Once the last claimant goes, the name is free again and does get cleaned up
     expect((await drop(second.id)).status).toBe(200);
     expect((await db.getCustomModels()).some((m) => m.providerAlias === "embeds")).toBe(false);
+  });
+});
+
+// The cascade guard above only survives a name collision that is already in the
+// data. Refusing the collision where the name is typed keeps it from happening.
+describe("prefix collisions at the config boundary", () => {
+  const create = (body) => import("@/app/api/provider-nodes/route.js")
+    .then(({ POST }) => POST(new Request("http://x/api/provider-nodes", {
+      method: "POST",
+      body: JSON.stringify({ type: "openai-compatible", apiType: "chat", baseUrl: "http://127.0.0.1:9/v1", ...body }),
+      headers: { "content-type": "application/json" },
+    })));
+
+  it("refuses a prefix a built-in provider already answers to", async () => {
+    for (const prefix of ["ollama", "pa"]) {
+      const res = await create({ name: `Copycat ${prefix}`, prefix });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toContain(prefix);
+    }
+    expect((await create({ name: "Unique", prefix: "unique-node" })).status).toBe(201);
+  });
+
+  it("refuses a prefix another node already wears", async () => {
+    const taken = await create({ name: "Worn", prefix: "worn" });
+    expect(taken.status).toBe(201);
+
+    const res = await create({ name: "Impossessor", prefix: "worn" });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain("already used");
+  });
+
+  it("lets a node keep its own prefix on edit, but not adopt a sibling's", async () => {
+    const mine = await db.createProviderNode({
+      type: "openai-compatible", name: "Mine", prefix: "mine", baseUrl: "http://127.0.0.1:9/v1",
+    });
+    await db.createProviderNode({
+      type: "openai-compatible", name: "Theirs", prefix: "theirs", baseUrl: "http://127.0.0.1:9/v1",
+    });
+
+    const { PUT } = await import("@/app/api/provider-nodes/[id]/route.js");
+    const edit = (id, prefix) => PUT(new Request(`http://x/api/provider-nodes/${id}`, {
+      method: "PUT",
+      body: JSON.stringify({ name: "edited", prefix, apiType: "chat", baseUrl: "http://127.0.0.1:9/v1" }),
+      headers: { "content-type": "application/json" },
+    }), { params: Promise.resolve({ id }) });
+
+    expect((await edit(mine.id, "mine")).status).toBe(200);
+    expect((await edit(mine.id, "theirs")).status).toBe(400);
+    expect((await edit(mine.id, "openai")).status).toBe(400);
+    expect((await db.getProviderNodeById(mine.id)).prefix).toBe("mine");
   });
 });

@@ -144,6 +144,21 @@ export const ID_TO_ALIAS = Object.values(AI_PROVIDERS).reduce((acc, p) => {
   return acc;
 }, {});
 
+// Every name a built-in provider can be addressed by: registry id, registry
+// alias, the UI short alias, and the extra aliases[] spellings. Built from
+// REGISTRY because buildProviderEntry drops aliases[], and because AI_PROVIDERS
+// keeps only one alias per provider (uiAlias wins over alias).
+const RESERVED_PROVIDER_NAMES = new Set();
+for (const entry of REGISTRY) {
+  for (const name of [entry.id, entry.alias, entry.uiAlias, ...(entry.aliases || [])]) {
+    if (name) RESERVED_PROVIDER_NAMES.add(name);
+  }
+}
+
+export function isReservedProviderName(name) {
+  return RESERVED_PROVIDER_NAMES.has(name);
+}
+
 // Helper: Get providers by service kind (e.g. "tts", "embedding", "image")
 // Providers without serviceKinds default to ["llm"]
 export function getProvidersByKind(kind) {

@@ -16,10 +16,6 @@ for (const entry of REGISTRY) {
   for (const alias of entry.aliases || []) RESERVED_PROVIDER_PREFIXES.add(alias);
 }
 
-// The authority on which names already belong to a built-in provider: a node's
-// user-typed prefix only owns its kv rows when it is not one of these.
-export { RESERVED_PROVIDER_PREFIXES };
-
 export function parseModel(modelStr) {
   const parsed = parseModelCore(modelStr);
   if (parsed?.providerAlias && LOCAL_PROVIDER_ALIASES[parsed.providerAlias]) {

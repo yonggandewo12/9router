@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { deleteCustomModelsByProvider, deleteModelAliasesForProvider, deleteProviderConnectionsByProvider, deleteProviderNode, enableModels, getProviderConnections, getProviderNodeById, getProviderNodes, updateProviderConnection, updateProviderNode } from "@/models";
-import { RESERVED_PROVIDER_PREFIXES } from "@/sse/services/model.js";
-import { getProviderByAlias } from "@/shared/constants/providers";
+import { findPrefixConflict } from "@/lib/providerPrefix";
+import { isReservedProviderName } from "@/shared/constants/providers";
 
 // PUT /api/provider-nodes/[id] - Update provider node
 export async function PUT(request, { params }) {
@@ -21,6 +21,16 @@ export async function PUT(request, { params }) {
 
     if (!prefix?.trim()) {
       return NextResponse.json({ error: "Prefix is required" }, { status: 400 });
+    }
+
+    // Only a rename is checked: a node created before this rule can already wear
+    // a name it should not have, and the owner still has to be able to fix its
+    // URL or key. The DELETE guard keeps such a shared name from cascading.
+    if (prefix.trim() !== node.prefix?.trim()) {
+      const conflict = await findPrefixConflict(prefix, id);
+      if (conflict) {
+        return NextResponse.json({ error: conflict }, { status: 400 });
+      }
     }
 
     // Only validate apiType for OpenAI Compatible nodes
@@ -82,18 +92,17 @@ export async function PUT(request, { params }) {
   }
 }
 
-// A prefix joins the cascade only while it is this node's own name. node.prefix
-// is user-typed and checked only for "not empty", so it can coincide with a
-// built-in provider ("ollama" as a compatible-node prefix is a configuration
-// people create) or with a sibling node's. Claims are checked along the three
-// paths a name reaches the wire: RESERVED for request-time "<name>/model"
-// resolution (getProviderByAlias adds the uiAlias spelling RESERVED omits), a
-// sibling node's prefix for nodes with no connection yet — the custom-embedding
-// card keys its rows on prefix alone — and a connection's prefix for what
-// /v1/models advertises. Cascading under a claimed name would delete a live
-// provider's models and shortcuts; leaving a row behind is the cheaper mistake.
+// A prefix joins the cascade only while it is still this node's own name. Create
+// and edit refuse collisions (findPrefixConflict), but data written before that
+// rule — or restored from a backup — can still share a name, and cascading under
+// a shared one would delete a live provider's models and shortcuts. Claims are
+// checked along the three paths a name reaches the wire: a built-in provider's
+// own spellings, a sibling node's prefix (request-time resolution matches on
+// node.prefix, and the custom-embedding card keys its rows on prefix alone), and
+// a connection's prefix (what /v1/models advertises). Leaving a row behind is the
+// cheaper mistake.
 function prefixStillClaimed(prefix, nodeId, nodes, connections) {
-  if (RESERVED_PROVIDER_PREFIXES.has(prefix) || getProviderByAlias(prefix)) return true;
+  if (isReservedProviderName(prefix)) return true;
   const claimed = (name) => String(name || "").trim() === prefix;
   return nodes.some((node) => node.id !== nodeId && claimed(node.prefix))
     || connections.some((conn) => conn.provider !== nodeId && claimed(conn.providerSpecificData?.prefix));
