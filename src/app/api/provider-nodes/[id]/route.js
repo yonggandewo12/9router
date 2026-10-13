@@ -90,13 +90,15 @@ export async function DELETE(request, { params }) {
       return NextResponse.json({ error: "Provider node not found" }, { status: 404 });
     }
 
-    await deleteProviderConnectionsByProvider(id);
-    await deleteProviderNode(id);
     // Everything kv-scoped to this node's alias must die with it, or the combo
-    // picker shows ghost groups and shortcuts dangle on a dead provider.
+    // picker shows ghost groups and shortcuts dangle on a dead provider. The
+    // node row goes last: a cascade that throws mid-way would otherwise leave
+    // the orphans behind an id that now 404s, with no way to retry.
+    await deleteProviderConnectionsByProvider(id);
     await deleteCustomModelsByProvider(id);
     await deleteModelAliasesForProvider(id);
     await enableModels(id, []); // empty ids = drop the whole disabledModels row
+    await deleteProviderNode(id);
 
     return NextResponse.json({ success: true });
   } catch (error) {

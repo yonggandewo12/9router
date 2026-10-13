@@ -82,4 +82,95 @@ describe("customModels provider cascade", () => {
     }));
     expect(clash.status).toBe(400);
   });
+
+  it("cascade drops the legacy {provider, model} alias form too", async () => {
+    const dead = "openai-compatible-chat-legacy-form";
+    const { getAdapter } = await import("@/lib/db/driver.js");
+    const adapter = await getAdapter();
+    adapter.run(`INSERT OR REPLACE INTO kv(scope, key, value) VALUES('modelAliases', ?, ?)`,
+      ["legacy-target", JSON.stringify({ provider: dead, model: "glm-4.7" })]);
+
+    expect(await db.deleteModelAliasesForProvider(dead)).toBe(1);
+    expect(await db.getModelAliases()).not.toHaveProperty("legacy-target");
+  });
+
+  // ModelSelectModal calls .startsWith() on every value; one non-string row
+  // blanks the whole picker, so the repo is the place that says no.
+  it("refuses an alias or target that readers cannot treat as a string", async () => {
+    await expect(db.setModelAlias("bad", { provider: "ark", model: "glm" })).rejects.toThrow();
+    await expect(db.setModelAlias(" ", "ark/glm")).rejects.toThrow();
+    expect(await db.getModelAliases()).not.toHaveProperty("bad");
+  });
+
+  it("PUT /api/models/alias follows the same rule as PUT /api/models", async () => {
+    const route = await import("@/app/api/models/alias/route.js");
+    const put = (body) => route.PUT(new Request("http://x/api/models/alias", {
+      method: "PUT",
+      body: JSON.stringify(body),
+      headers: { "content-type": "application/json" },
+    }));
+
+    expect((await put({ model: "other/model", alias: "glm-fast" })).status).toBe(400);
+    expect((await put({ model: "ark/first", alias: "repaint" })).status).toBe(200);
+    // the name is now a bound shortcut: same target is idempotent, moving it to
+    // another model goes through delete + create like the sibling route does
+    expect((await put({ model: "ark/first", alias: "repaint" })).status).toBe(200);
+    expect((await put({ model: "ark/second", alias: "repaint" })).status).toBe(400);
+    expect(await db.getModelAliases()).toMatchObject({ repaint: "ark/first" });
+  });
+});
+
+describe("DELETE /api/provider-nodes/[id]", () => {
+  it("takes the node's kv rows with it", async () => {
+    const node = await db.createProviderNode({
+      type: "openai-compatible", name: "Dying node", prefix: "dying", baseUrl: "http://127.0.0.1:9/v1",
+    });
+    await db.addCustomModel({ providerAlias: node.id, id: "glm-4.7", type: "llm" });
+    await db.setModelAlias("dying-fast", `${node.id}/glm-4.7`);
+    await db.disableModels(node.id, ["glm-4.7"]);
+
+    const route = await import("@/app/api/provider-nodes/[id]/route.js");
+    const res = await route.DELETE(
+      new Request(`http://x/api/provider-nodes/${node.id}`, { method: "DELETE" }),
+      { params: Promise.resolve({ id: node.id }) },
+    );
+
+    expect(res.status).toBe(200);
+    expect(await db.getProviderNodeById(node.id)).toBeNull();
+    expect((await db.getCustomModels()).some((m) => m.providerAlias === node.id)).toBe(false);
+    expect(await db.getModelAliases()).not.toHaveProperty("dying-fast");
+    expect((await db.getDisabledModels())[node.id]).toBeUndefined();
+  });
+
+  // The node row is deleted last on purpose: if a cascade fails, the node is
+  // still there and the DELETE can be retried instead of 404-ing on orphans.
+  it("keeps the node when a cascade fails, so the delete stays retryable", async () => {
+    const node = await db.createProviderNode({
+      type: "openai-compatible", name: "Half-dead node", prefix: "halfdying", baseUrl: "http://127.0.0.1:9/v1",
+    });
+    const reached = [];
+    vi.doMock("@/models", () => ({
+      getProviderNodeById: async (id) => (id === node.id ? { id } : null),
+      getProviderConnections: async () => [],
+      updateProviderConnection: async () => {},
+      updateProviderNode: async () => {},
+      deleteProviderConnectionsByProvider: async (id) => { reached.push(`connections:${id}`); },
+      deleteCustomModelsByProvider: async (id) => { reached.push(`customModels:${id}`); },
+      deleteModelAliasesForProvider: async () => { throw new Error("cascade failed"); },
+      enableModels: async () => {},
+      deleteProviderNode: async () => { throw new Error("must not be reached"); },
+    }));
+    vi.resetModules();
+
+    const { DELETE } = await import("@/app/api/provider-nodes/[id]/route.js");
+    const res = await DELETE(
+      new Request(`http://x/api/provider-nodes/${node.id}`, { method: "DELETE" }),
+      { params: Promise.resolve({ id: node.id }) },
+    );
+
+    vi.doUnmock("@/models");
+    expect(res.status).toBe(500);
+    expect(reached).toEqual([`connections:${node.id}`, `customModels:${node.id}`]);
+    expect(await db.getProviderNodeById(node.id)).not.toBeNull();
+  });
 });

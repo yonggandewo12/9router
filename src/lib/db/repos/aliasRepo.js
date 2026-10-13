@@ -11,8 +11,13 @@ export async function getModelAliases() {
   return await aliasKv.getAll();
 }
 
+// Readers call String methods on the value (ModelSelectModal does
+// `.startsWith()` on every entry), so a non-string here blanks the picker.
 export async function setModelAlias(alias, model) {
-  await aliasKv.set(alias, model);
+  if (typeof alias !== "string" || !alias.trim() || typeof model !== "string" || !model.trim()) {
+    throw new Error(`invalid model alias ${JSON.stringify(alias)} → ${JSON.stringify(model)}`);
+  }
+  await aliasKv.set(alias.trim(), model.trim());
 }
 
 export async function deleteModelAlias(alias) {
@@ -77,6 +82,14 @@ export async function deleteCustomModelsByProvider(providerAlias) {
 // modelAliases are canonical {alias → "providerId/model"} (every reader filters
 // by value — ModelSelectModal, /api/v1/models). A dying node must also drop the
 // shortcuts that resolve through it, or they dangle and fail at request time.
+// resolveModelAliasFromMap also honours the legacy {provider, model} form, so
+// both shapes have to match here or those rows survive the cascade.
+function aliasTarget(value) {
+  if (typeof value === "string") return value;
+  if (value && typeof value === "object" && value.provider && value.model) return `${value.provider}/${value.model}`;
+  return "";
+}
+
 export async function deleteModelAliasesForProvider(providerId) {
   if (!providerId) return 0;
   const prefix = `${providerId}/`;
@@ -85,7 +98,7 @@ export async function deleteModelAliasesForProvider(providerId) {
   db.transaction(() => {
     const rows = db.all(`SELECT key, value FROM kv WHERE scope = 'modelAliases'`);
     for (const { key, value } of rows) {
-      if (!String(parseJson(value, "")).startsWith(prefix)) continue;
+      if (!aliasTarget(parseJson(value, "")).startsWith(prefix)) continue;
       db.run(`DELETE FROM kv WHERE scope = 'modelAliases' AND key = ?`, [key]);
       removed++;
     }
