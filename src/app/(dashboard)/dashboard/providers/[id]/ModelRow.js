@@ -1,7 +1,7 @@
 import PropTypes from "prop-types";
 import { CapacityBadges } from "@/shared/components";
 
-export default function ModelRow({ model, fullModel, alias, copied, onCopy, testStatus, isCustom, isFree, onDeleteAlias, onTest, isTesting, onDisable, caps, thinkingSuffix }) {
+export default function ModelRow({ model, fullModel, aliases, copied, onCopy, testStatus, isCustom, isFree, onDeleteAlias, onTest, isTesting, onDisable, onAddAlias, onRemoveAlias, caps, thinkingSuffix }) {
   const displayModel = thinkingSuffix ? `${fullModel}(${thinkingSuffix})` : fullModel;
   const borderColor = testStatus === "ok"
     ? "border-green-500/40"
@@ -14,6 +14,14 @@ export default function ModelRow({ model, fullModel, alias, copied, onCopy, test
     : testStatus === "error"
     ? "#ef4444"
     : undefined;
+
+  // Same character set the CLI config writers apply, so a shortcut typed here
+  // is one a client can actually put in a request
+  const promptAlias = () => {
+    const typed = window.prompt(`Shortcut name for ${displayModel}`, "");
+    const name = typed?.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "");
+    if (name) onAddAlias(name);
+  };
 
   return (
     <div className={`group w-full sm:w-auto min-w-0 max-w-full rounded-lg border px-3 py-2 ${borderColor} hover:bg-sidebar/50`}>
@@ -30,8 +38,35 @@ export default function ModelRow({ model, fullModel, alias, copied, onCopy, test
             {model.name && <span className="break-all sm:truncate text-[9px] italic text-text-muted/70">{model.name}</span>}
             <CapacityBadges caps={caps} colorOverride="text-text-muted/70" size={12} />
           </span>
+          {aliases?.length > 0 && (
+            <span className="flex min-w-0 flex-wrap items-center gap-1 pl-1">
+              {aliases.map((alias) => (
+                <span key={alias} className="flex items-center gap-0.5 rounded bg-sidebar px-1 py-px font-mono text-[9px] text-primary/80">
+                  {alias}
+                  {onRemoveAlias && (
+                    <button onClick={() => onRemoveAlias(alias)} title="Remove shortcut" className="text-text-muted hover:text-red-500">
+                      <span className="material-symbols-outlined text-[10px]">close</span>
+                    </button>
+                  )}
+                </span>
+              ))}
+            </span>
+          )}
         </div>
         <div className="flex shrink-0 items-center gap-0.5 sm:gap-1">
+          {onAddAlias && (
+            <div className="relative shrink-0 group/btn">
+              <button
+                onClick={promptAlias}
+                className="rounded p-0.5 text-text-muted opacity-100 transition-opacity hover:bg-sidebar hover:text-primary sm:opacity-0 sm:group-hover:opacity-100"
+              >
+                <span className="material-symbols-outlined text-sm">label</span>
+              </button>
+              <span className="pointer-events-none absolute mt-1 top-5 left-1/2 -translate-x-1/2 text-[10px] text-text-muted whitespace-nowrap opacity-0 group-hover/btn:opacity-100 transition-opacity">
+                Add shortcut
+              </span>
+            </div>
+          )}
           {onTest && (
             <div className="relative shrink-0 group/btn">
               <button
@@ -89,7 +124,7 @@ ModelRow.propTypes = {
     id: PropTypes.string.isRequired,
   }).isRequired,
   fullModel: PropTypes.string.isRequired,
-  alias: PropTypes.string,
+  aliases: PropTypes.arrayOf(PropTypes.string),
   copied: PropTypes.string,
   onCopy: PropTypes.func.isRequired,
   testStatus: PropTypes.oneOf(["ok", "error"]),
@@ -99,6 +134,8 @@ ModelRow.propTypes = {
   onTest: PropTypes.func,
   isTesting: PropTypes.bool,
   onDisable: PropTypes.func,
+  onAddAlias: PropTypes.func,
+  onRemoveAlias: PropTypes.func,
   caps: PropTypes.object,
   thinkingSuffix: PropTypes.string,
 };

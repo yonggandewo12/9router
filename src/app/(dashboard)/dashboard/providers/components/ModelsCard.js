@@ -1,14 +1,15 @@
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useMemo } from "react";
 import PropTypes from "prop-types";
 import { Card, Button, Modal } from "@/shared/components";
 import { getModelsByProviderId, getModelKind } from "@/shared/constants/models";
 import { getProviderAlias } from "@/shared/constants/providers";
+import { groupAliasesByModel } from "@/shared/utils/providerCustomModels";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 
 // ── ModelRow ───────────────────────────────────────────────────
-export function ModelRow({ model, fullModel, copied, onCopy, testStatus, isCustom, isFree, onDeleteAlias, onTest, isTesting }) {
+export function ModelRow({ model, fullModel, aliases, copied, onCopy, testStatus, isCustom, isFree, onDeleteAlias, onRemoveAlias, onTest, isTesting }) {
   const borderColor = testStatus === "ok" ? "border-green-500/40" : testStatus === "error" ? "border-red-500/40" : "border-border";
   const iconColor = testStatus === "ok" ? "#22c55e" : testStatus === "error" ? "#ef4444" : undefined;
 
@@ -21,6 +22,20 @@ export function ModelRow({ model, fullModel, copied, onCopy, testStatus, isCusto
         <div className="flex flex-col gap-1">
           <code className="text-xs text-text-muted font-mono bg-sidebar px-1.5 py-0.5 rounded">{fullModel}</code>
           {model.name && <span className="text-[9px] text-text-muted/70 italic pl-1">{model.name}</span>}
+          {aliases?.length > 0 && (
+            <span className="flex flex-wrap items-center gap-1 pl-1">
+              {aliases.map((alias) => (
+                <span key={alias} className="flex items-center gap-0.5 rounded bg-sidebar px-1 py-px font-mono text-[9px] text-primary/80">
+                  {alias}
+                  {onRemoveAlias && (
+                    <button onClick={() => onRemoveAlias(alias)} title="Remove shortcut" className="text-text-muted hover:text-red-500">
+                      <span className="material-symbols-outlined text-[10px]">close</span>
+                    </button>
+                  )}
+                </span>
+              ))}
+            </span>
+          )}
         </div>
         {onTest && (
           <div className="relative group/btn">
@@ -56,12 +71,14 @@ export function ModelRow({ model, fullModel, copied, onCopy, testStatus, isCusto
 ModelRow.propTypes = {
   model: PropTypes.shape({ id: PropTypes.string.isRequired }).isRequired,
   fullModel: PropTypes.string.isRequired,
+  aliases: PropTypes.arrayOf(PropTypes.string),
   copied: PropTypes.string,
   onCopy: PropTypes.func.isRequired,
   testStatus: PropTypes.oneOf(["ok", "error"]),
   isCustom: PropTypes.bool,
   isFree: PropTypes.bool,
   onDeleteAlias: PropTypes.func,
+  onRemoveAlias: PropTypes.func,
   onTest: PropTypes.func,
   isTesting: PropTypes.bool,
 };
@@ -135,18 +152,6 @@ export default function ModelsCard({ providerId, kindFilter, providerAliasOverri
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
-  const handleSetAlias = async (modelId, alias) => {
-    const fullModel = `${providerAlias}/${modelId}`;
-    try {
-      const res = await fetch("/api/models/alias", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: fullModel, alias }),
-      });
-      if (res.ok) await fetchData();
-    } catch (e) { console.log("set alias error:", e); }
-  };
-
   const handleDeleteAlias = async (alias) => {
     try {
       const res = await fetch(`/api/models/alias?alias=${encodeURIComponent(alias)}`, { method: "DELETE" });
@@ -215,6 +220,8 @@ export default function ModelsCard({ providerId, kindFilter, providerAliasOverri
 
   const displayModels = builtInModels;
 
+  const aliasesByModel = useMemo(() => groupAliasesByModel(modelAliases), [modelAliases]);
+
   return (
     <>
       <Card>
@@ -226,17 +233,15 @@ export default function ModelsCard({ providerId, kindFilter, providerAliasOverri
         <div className="flex flex-wrap gap-3">
           {displayModels.map((model) => {
             const fullModel = `${providerAlias}/${model.id}`;
-            const existingAlias = Object.entries(modelAliases).find(([, m]) => m === fullModel)?.[0];
             return (
               <ModelRow
                 key={model.id}
                 model={model}
-                fullModel={`${providerAlias}/${model.id}`}
-                alias={existingAlias}
+                fullModel={fullModel}
+                aliases={aliasesByModel[fullModel]}
                 copied={copied}
                 onCopy={copy}
-                onSetAlias={(alias) => handleSetAlias(model.id, alias)}
-                onDeleteAlias={() => handleDeleteAlias(existingAlias)}
+                onRemoveAlias={handleDeleteAlias}
                 testStatus={modelTestResults[model.id]}
                 onTest={() => handleTestModel(model.id)}
                 isTesting={testingModelId === model.id}
@@ -250,10 +255,11 @@ export default function ModelsCard({ providerId, kindFilter, providerAliasOverri
               key={`${model.id}-${model.type}`}
               model={{ id: model.id, name: model.name }}
               fullModel={`${providerAlias}/${model.id}`}
+              aliases={aliasesByModel[`${providerAlias}/${model.id}`]}
               copied={copied}
               onCopy={copy}
-              onSetAlias={() => {}}
               onDeleteAlias={() => handleDeleteCustomModel(model.id)}
+              onRemoveAlias={handleDeleteAlias}
               testStatus={modelTestResults[model.id]}
               onTest={() => handleTestModel(model.id)}
               isTesting={testingModelId === model.id}

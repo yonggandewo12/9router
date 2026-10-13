@@ -2,6 +2,17 @@ function modelType(model) {
   return model?.kind || model?.type || "llm";
 }
 
+// {alias → "provider/model"} indexed the other way: one name points at one
+// target, but a target can be reachable under several names.
+export function groupAliasesByModel(modelAliases = {}) {
+  const byModel = {};
+  for (const [alias, fullModel] of Object.entries(modelAliases)) {
+    if (typeof fullModel !== "string") continue;
+    (byModel[fullModel] ??= []).push(alias);
+  }
+  return byModel;
+}
+
 export function getProviderCustomModelRows({
   customModels = [],
   modelAliases = {},

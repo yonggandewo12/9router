@@ -49,6 +49,7 @@ function AddCompatibleModal({ variant, isOpen, onClose, onCreated }) {
   const [checkModelId, setCheckModelId] = useState("");
   const [validating, setValidating] = useState(false);
   const [validationResult, setValidationResult] = useState(null);
+  const [createError, setCreateError] = useState(null);
 
   // openai: reset baseUrl when apiType changes; anthropic: reset checks when opened
   useEffect(() => {
@@ -56,6 +57,7 @@ function AddCompatibleModal({ variant, isOpen, onClose, onCreated }) {
       setFormData((prev) => ({ ...prev, baseUrl: config.defaultBaseUrl }));
     } else if (isOpen) {
       setValidationResult(null);
+      setCreateError(null);
       setCheckKey("");
       setCheckModelId("");
     }
@@ -64,6 +66,7 @@ function AddCompatibleModal({ variant, isOpen, onClose, onCreated }) {
   const handleSubmit = async () => {
     if (!formData.name.trim() || !formData.prefix.trim() || !formData.baseUrl.trim()) return;
     setSubmitting(true);
+    setCreateError(null);
     try {
       const res = await fetch("/api/provider-nodes", {
         method: "POST",
@@ -82,8 +85,11 @@ function AddCompatibleModal({ variant, isOpen, onClose, onCreated }) {
         setFormData(initialFormData());
         setCheckKey("");
         setValidationResult(null);
+      } else {
+        setCreateError(data.error || "Failed to create node");
       }
     } catch (error) {
+      setCreateError("Failed to create node");
       console.log(`Error creating ${config.errorLabel} node:`, error);
     } finally {
       setSubmitting(false);
@@ -148,7 +154,7 @@ function AddCompatibleModal({ variant, isOpen, onClose, onCreated }) {
           value={formData.prefix}
           onChange={(e) => setFormData({ ...formData, prefix: e.target.value })}
           placeholder={config.prefixPlaceholder}
-          hint="Required. Used as the provider prefix for model IDs."
+          hint="Required. Used as the provider prefix for model IDs. Must be a name no other provider or node already answers to."
         />
         {config.hasApiType && (
           <Select
@@ -189,6 +195,7 @@ function AddCompatibleModal({ variant, isOpen, onClose, onCreated }) {
           </Button>
           {renderValidationResult()}
         </div>
+        {createError && <p className="text-xs text-red-500">{createError}</p>}
         <div className="flex flex-col gap-2 sm:flex-row">
           <Button
             onClick={handleSubmit}

@@ -16,8 +16,10 @@ export default function EditCompatibleNodeModal({ isOpen, node, onSave, onClose,
   const [checkModelId, setCheckModelId] = useState("");
   const [validating, setValidating] = useState(false);
   const [validationResult, setValidationResult] = useState(null);
+  const [saveError, setSaveError] = useState(null);
 
   useEffect(() => {
+    setSaveError(null);
     if (node) {
       setFormData({
         name: node.name || "",
@@ -26,7 +28,7 @@ export default function EditCompatibleNodeModal({ isOpen, node, onSave, onClose,
         baseUrl: node.baseUrl || (isAnthropic ? "https://api.anthropic.com/v1" : "https://api.openai.com/v1"),
       });
     }
-  }, [node, isAnthropic]);
+  }, [isOpen, node, isAnthropic]);
 
   const apiTypeOptions = [
     { value: "chat", label: "Chat Completions" },
@@ -36,6 +38,7 @@ export default function EditCompatibleNodeModal({ isOpen, node, onSave, onClose,
   const handleSubmit = async () => {
     if (!formData.name.trim() || !formData.prefix.trim() || !formData.baseUrl.trim()) return;
     setSaving(true);
+    setSaveError(null);
     try {
       const payload = {
         name: formData.name,
@@ -45,7 +48,9 @@ export default function EditCompatibleNodeModal({ isOpen, node, onSave, onClose,
       if (!isAnthropic) {
         payload.apiType = formData.apiType;
       }
-      await onSave(payload);
+      const result = await onSave(payload);
+      // onSave keeps the modal open on failure so the typed prefix stays editable
+      if (result?.error) setSaveError(result.error);
     } finally {
       setSaving(false);
     }
@@ -90,7 +95,7 @@ export default function EditCompatibleNodeModal({ isOpen, node, onSave, onClose,
           value={formData.prefix}
           onChange={(e) => setFormData({ ...formData, prefix: e.target.value })}
           placeholder={isAnthropic ? "ac-prod" : "oc-prod"}
-          hint="Required. Used as the provider prefix for model IDs."
+          hint="Required. Used as the provider prefix for model IDs. Must be a name no other provider or node already answers to."
         />
         {!isAnthropic && (
           <Select
@@ -133,6 +138,7 @@ export default function EditCompatibleNodeModal({ isOpen, node, onSave, onClose,
             {validationResult === "success" ? "Valid" : "Invalid"}
           </Badge>
         )}
+        {saveError && <p className="text-xs text-red-500">{saveError}</p>}
         <div className="flex gap-2">
           <Button onClick={handleSubmit} fullWidth disabled={!formData.name.trim() || !formData.prefix.trim() || !formData.baseUrl.trim() || saving}>
             {saving ? "Saving..." : "Save"}

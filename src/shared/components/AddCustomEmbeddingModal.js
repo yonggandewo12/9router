@@ -19,10 +19,12 @@ export default function AddCustomEmbeddingModal({ isOpen, onClose, onCreated, on
   const [checkModelId, setCheckModelId] = useState("");
   const [validating, setValidating] = useState(false);
   const [validationResult, setValidationResult] = useState(null);
+  const [submitError, setSubmitError] = useState(null);
 
   useEffect(() => {
     if (!isOpen) return;
     setValidationResult(null);
+    setSubmitError(null);
     setCheckKey("");
     setCheckModelId("");
     if (isEdit) {
@@ -58,8 +60,11 @@ export default function AddCustomEmbeddingModal({ isOpen, onClose, onCreated, on
       if (res.ok) {
         if (isEdit) onSaved?.(data.node);
         else onCreated?.(data.node);
+      } else {
+        setSubmitError(data.error || (isEdit ? "Failed to save node" : "Failed to create node"));
       }
     } catch (error) {
+      setSubmitError(isEdit ? "Failed to save node" : "Failed to create node");
       console.log("Error saving custom embedding node:", error);
     } finally {
       setSubmitting(false);
@@ -121,8 +126,8 @@ export default function AddCustomEmbeddingModal({ isOpen, onClose, onCreated, on
           label="Prefix"
           value={formData.prefix}
           onChange={(e) => setFormData({ ...formData, prefix: e.target.value })}
-          placeholder="voyage"
-          hint="Required. Used as the provider prefix for model IDs (e.g. voyage/voyage-3)."
+          placeholder="embed-prod"
+          hint="Required. Used as the provider prefix for model IDs (e.g. embed-prod/voyage-3). Must be a name no other provider or node already answers to."
         />
         <Input
           label="Base URL"
@@ -154,6 +159,7 @@ export default function AddCustomEmbeddingModal({ isOpen, onClose, onCreated, on
           </Button>
           {renderValidationResult()}
         </div>
+        {submitError && <p className="text-xs text-red-500">{submitError}</p>}
         <div className="flex gap-2">
           <Button
             onClick={handleSubmit}

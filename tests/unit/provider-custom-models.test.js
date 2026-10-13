@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getProviderCustomModelRows } from "@/shared/utils/providerCustomModels.js";
+import { getProviderCustomModelRows, groupAliasesByModel } from "@/shared/utils/providerCustomModels.js";
 
 describe("provider custom model rows", () => {
   it("keeps identical model IDs separate per provider", () => {
@@ -80,5 +80,29 @@ describe("provider custom model rows", () => {
         type: "llm",
       },
     ]);
+  });
+});
+
+describe("groupAliasesByModel", () => {
+  it("keeps every shortcut of a model, not just the first", () => {
+    expect(groupAliasesByModel({
+      fast: "ollama/llama3",
+      "fast-again": "ollama/llama3",
+      other: "ollama/mistral",
+    })).toEqual({
+      "ollama/llama3": ["fast", "fast-again"],
+      "ollama/mistral": ["other"],
+    });
+  });
+
+  // Rows written straight into the kv table (migration, backup restore) can
+  // still hold the legacy {provider, model} shape, and this helper also gets
+  // fed plain client payloads.
+  it("skips targets a reader cannot treat as a string", () => {
+    expect(groupAliasesByModel({
+      legacy: { provider: "ollama", model: "llama3" },
+      number: 42,
+      good: "ollama/mistral",
+    })).toEqual({ "ollama/mistral": ["good"] });
   });
 });

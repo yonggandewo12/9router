@@ -13,7 +13,7 @@ import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 import { useModelCaps } from "@/shared/hooks/useModelCaps";
 import { translate } from "@/i18n/runtime";
 import { fetchSuggestedModels } from "@/shared/utils/providerModelsFetcher";
-import { getProviderCustomModelRows } from "@/shared/utils/providerCustomModels";
+import { getProviderCustomModelRows, groupAliasesByModel } from "@/shared/utils/providerCustomModels";
 import ModelRow from "./ModelRow";
 import PassthroughModelsSection from "./PassthroughModelsSection";
 import CompatibleModelsSection from "./CompatibleModelsSection";
@@ -384,10 +384,15 @@ export default function ProviderDetailPage() {
         setProviderNode(data.node);
         await fetchConnections();
         setShowEditNodeModal(false);
+      } else {
+        // The modal shows this instead of closing, so a refused prefix stays editable
+        return { error: data.error || "Failed to update provider node" };
       }
     } catch (error) {
       console.log("Error updating provider node:", error);
+      return { error: "Failed to update provider node" };
     }
+    return null;
   };
 
   const saveProviderStrategy = async (strategy, stickyLimit) => {
@@ -1179,7 +1184,6 @@ export default function ProviderDetailPage() {
           customModels={customModels}
           copied={copied}
           onCopy={copy}
-          onSetAlias={handleSetAlias}
           onDeleteAlias={handleDeleteAlias}
           onAddCustomModel={(modelId) => handleAddCustomModel(modelId, "llm", providerStorageAlias)}
           onDeleteCustomModel={(modelId) => handleDeleteCustomModel(modelId, "llm", providerStorageAlias)}
@@ -1205,6 +1209,14 @@ export default function ProviderDetailPage() {
       type: "llm",
     });
 
+    // A model can be reachable under several shortcuts, and old rows store the
+    // provider id where new ones store its alias
+    const aliasesByModel = groupAliasesByModel(modelAliases);
+    const aliasesFor = (fullModel, legacyModel) => [
+      // Most of the time the two spellings are the same string
+      ...new Set([...(aliasesByModel[fullModel] || []), ...(aliasesByModel[legacyModel] || [])]),
+    ];
+
     return (
       <div className="flex flex-wrap gap-3">
         {/* Custom models first */}
@@ -1213,10 +1225,9 @@ export default function ProviderDetailPage() {
             key={`${model.source}-${model.fullModel}`}
             model={{ id: model.id, name: model.name }}
             fullModel={`${providerDisplayAlias}/${model.id}`}
-            alias={model.alias}
+            aliases={aliasesFor(model.fullModel, `${providerId}/${model.id}`)}
             copied={copied}
             onCopy={copy}
-            onSetAlias={() => {}}
             onDeleteAlias={() => {
               if (model.source === "custom") {
                 handleDeleteCustomModel(model.id, "llm", providerStorageAlias);
@@ -1224,6 +1235,8 @@ export default function ProviderDetailPage() {
                 handleDeleteAlias(model.alias);
               }
             }}
+            onRemoveAlias={handleDeleteAlias}
+            onAddAlias={(alias) => handleSetAlias(model.id, alias, providerStorageAlias)}
             testStatus={modelTestResults[model.id]}
             onTest={connections.length > 0 || isFreeNoAuth ? () => handleTestModel(model.id) : undefined}
             isTesting={testingModelIds.has(model.id)}
@@ -1236,20 +1249,16 @@ export default function ProviderDetailPage() {
 
         {displayModels.map((model) => {
           const fullModel = `${providerStorageAlias}/${model.id}`;
-          const oldFormatModel = `${providerId}/${model.id}`;
-          const existingAlias = Object.entries(modelAliases).find(
-            ([, m]) => m === fullModel || m === oldFormatModel
-          )?.[0];
           return (
             <ModelRow
               key={model.id}
               model={model}
               fullModel={`${providerDisplayAlias}/${model.id}`}
-              alias={existingAlias}
+              aliases={aliasesFor(fullModel, `${providerId}/${model.id}`)}
               copied={copied}
               onCopy={copy}
-              onSetAlias={(alias) => handleSetAlias(model.id, alias, providerStorageAlias)}
-              onDeleteAlias={() => handleDeleteAlias(existingAlias)}
+              onAddAlias={(alias) => handleSetAlias(model.id, alias, providerStorageAlias)}
+              onRemoveAlias={handleDeleteAlias}
               testStatus={modelTestResults[model.id]}
               onTest={connections.length > 0 || isFreeNoAuth ? () => handleTestModel(model.id) : undefined}
               isTesting={testingModelIds.has(model.id)}
