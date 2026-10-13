@@ -98,3 +98,33 @@ describe("Schema migrations", () => {
     expect(idx).toContain("idx_pn_type");
   });
 });
+
+describe("export/import roundtrip", () => {
+  // A restored backup used to keep whatever the current database had hidden:
+  // disabledModels was neither exported nor wiped, so models stayed invisible
+  // with nothing in the restored config to account for it.
+  it("carries disabledModels both ways", async () => {
+    const db = await import("@/lib/db/index.js");
+    await db.disableModels("ark", ["glm-4.7"]);
+    await db.disableModels("ollama", ["llama-2"]);
+
+    const backup = await db.exportDb();
+    expect(backup.disabledModels).toEqual({ ark: ["glm-4.7"], ollama: ["llama-2"] });
+
+    await db.disableModels("gone-provider", ["mystery"]);
+    const restored = await db.importDb(backup);
+    expect(restored.disabledModels).toEqual({ ark: ["glm-4.7"], ollama: ["llama-2"] });
+    expect(await db.getDisabledModels()).toEqual({ ark: ["glm-4.7"], ollama: ["llama-2"] });
+  });
+
+  it("treats a backup without the key as 'nothing was hidden'", async () => {
+    const db = await import("@/lib/db/index.js");
+    await db.disableModels("ark", ["glm-4.7"]);
+    const older = await db.exportDb();
+    delete older.disabledModels;
+
+    await db.disableModels("temp", ["y"]);
+    await db.importDb(older);
+    expect(await db.getDisabledModels()).toEqual({});
+  });
+});
