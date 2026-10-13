@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { deleteCustomModelsByProvider, deleteModelAliasesForProvider, deleteProviderConnectionsByProvider, deleteProviderNode, enableModels, getProviderConnections, getProviderNodeById, updateProviderConnection, updateProviderNode } from "@/models";
+import { getProviderByAlias } from "@/shared/constants/providers";
 
 // PUT /api/provider-nodes/[id] - Update provider node
 export async function PUT(request, { params }) {
@@ -80,6 +81,19 @@ export async function PUT(request, { params }) {
   }
 }
 
+// A prefix is what /v1/models advertises, so a client can only have copied
+// "<prefix>/model" back while some provider still advertised it. A node
+// advertises through its own connections; any other provider still holding the
+// same name — a built-in id/alias, or a sibling node's connection — owns those
+// rows, and deleting them would damage a provider that is alive. node.prefix is
+// user-typed and unvalidated, so "ollama" as a compatible-node prefix is a real
+// configuration, not a hypothetical.
+function prefixStillClaimed(prefix, nodeId, connections) {
+  if (getProviderByAlias(prefix)) return true;
+  return connections.some((conn) => conn.provider !== nodeId
+    && String(conn.providerSpecificData?.prefix || "").trim() === prefix);
+}
+
 // DELETE /api/provider-nodes/[id] - Delete provider node and its connections
 export async function DELETE(request, { params }) {
   try {
@@ -90,11 +104,17 @@ export async function DELETE(request, { params }) {
       return NextResponse.json({ error: "Provider node not found" }, { status: 404 });
     }
 
+    const nodeNames = [id];
+    const prefix = node.prefix?.trim();
+    if (prefix) {
+      const connections = await getProviderConnections();
+      if (!prefixStillClaimed(prefix, id, connections)) nodeNames.push(prefix);
+    }
+
     // Everything kv-scoped to this node must die with it, or the combo picker
     // shows ghost groups and shortcuts dangle on a dead provider. The node row
     // goes last: a cascade that throws mid-way would otherwise leave the
     // orphans behind an id that now 404s, with no way to retry.
-    const nodeNames = [id, node.prefix].filter(Boolean);
     await deleteProviderConnectionsByProvider(id);
     await deleteCustomModelsByProvider(nodeNames);
     await deleteModelAliasesForProvider(nodeNames);

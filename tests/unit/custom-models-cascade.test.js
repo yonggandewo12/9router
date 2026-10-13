@@ -239,4 +239,60 @@ describe("DELETE /api/provider-nodes/[id]", () => {
     ]);
     expect(await db.getProviderNodeById(node.id)).not.toBeNull();
   });
+
+  // A prefix is user-typed and unchecked, so "<prefix>/model" rows are only
+  // this node's if nothing else answers to that name. A node prefixed "ollama"
+  // is a thing people configure, and its rows are then indistinguishable from
+  // the live provider's — leaking a row beats deleting someone else's.
+  it("does not cascade under a prefix a built-in provider already answers to", async () => {
+    const node = await db.createProviderNode({
+      type: "openai-compatible", name: "Confusing node", prefix: "ollama", baseUrl: "http://127.0.0.1:9/v1",
+    });
+    await db.addCustomModel({ providerAlias: "ollama", id: "llama-4", type: "llm" });
+    await db.setModelAlias("ollama-keep", "ollama/llama-4");
+
+    vi.resetModules();
+    const route = await import("@/app/api/provider-nodes/[id]/route.js");
+    const res = await route.DELETE(
+      new Request(`http://x/api/provider-nodes/${node.id}`, { method: "DELETE" }),
+      { params: Promise.resolve({ id: node.id }) },
+    );
+
+    expect(res.status).toBe(200);
+    expect(await db.getProviderNodeById(node.id)).toBeNull();
+    expect((await db.getCustomModels()).some((m) => m.providerAlias === "ollama" && m.id === "llama-4")).toBe(true);
+    expect(await db.getModelAliases()).toMatchObject({ "ollama-keep": "ollama/llama-4" });
+    expect((await db.getDisabledModels()).ollama).toEqual(["llama-2"]);
+  });
+
+  it("does not cascade under a prefix a sibling node still advertises", async () => {
+    const twinA = await db.createProviderNode({
+      type: "openai-compatible", name: "Twin A", prefix: "twins", baseUrl: "http://127.0.0.1:9/v1",
+    });
+    const twinB = await db.createProviderNode({
+      type: "openai-compatible", name: "Twin B", prefix: "twins", baseUrl: "http://127.0.0.1:9/v1",
+    });
+    await db.createProviderConnection({
+      provider: twinB.id, authType: "apikey", name: "twin-b-key", apiKey: "not-a-secret",
+      providerSpecificData: { prefix: "twins" },
+    });
+
+    await db.addCustomModel({ providerAlias: "twins", id: "glm-4.7", type: "llm" });
+    await db.addCustomModel({ providerAlias: twinA.id, id: "glm-4.7", type: "llm" });
+    await db.setModelAlias("twins-fast", "twins/glm-4.7");
+
+    vi.resetModules();
+    const route = await import("@/app/api/provider-nodes/[id]/route.js");
+    const res = await route.DELETE(
+      new Request(`http://x/api/provider-nodes/${twinA.id}`, { method: "DELETE" }),
+      { params: Promise.resolve({ id: twinA.id }) },
+    );
+
+    expect(res.status).toBe(200);
+    const survivors = (await db.getCustomModels()).map((m) => `${m.providerAlias}/${m.id}`);
+    expect(survivors).toContain("twins/glm-4.7");
+    expect(survivors).not.toContain(`${twinA.id}/glm-4.7`);
+    expect(await db.getModelAliases()).toMatchObject({ "twins-fast": "twins/glm-4.7" });
+    expect(await db.getProviderNodeById(twinB.id)).not.toBeNull();
+  });
 });
