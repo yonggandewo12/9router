@@ -13,9 +13,10 @@ export {
   getApiKeys, getApiKeyById, getApiKeyByKey, createApiKey, updateApiKey, deleteApiKey, validateApiKey,
   getCombos, getComboById, getComboByName,
   createCombo, updateCombo, deleteCombo,
-  getModelAliases, setModelAlias, deleteModelAlias,
-  getCustomModels, addCustomModel, deleteCustomModel,
+  getModelAliases, setModelAlias, deleteModelAlias, deleteModelAliasesForProvider,
+  getCustomModels, addCustomModel, deleteCustomModel, deleteCustomModelsByProvider,
   getMitmAlias, setMitmAliasAll,
+  getDisabledModels, getDisabledByProvider, disableModels, enableModels,
   getPricing, getPricingForModel, updatePricing, resetPricing, resetAllPricing,
   exportDb, importDb,
 } from "@/lib/db/index.js";

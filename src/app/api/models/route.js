@@ -11,6 +11,11 @@ export async function GET() {
     const modelAliases = await getModelAliases();
     const disabled = await getDisabledModels();
 
+    // Canonical alias storage is {alias → "provider/model"} (every other reader
+    // filters by value — ModelSelectModal, /api/v1/models); index it once.
+    const aliasByModel = {};
+    for (const [a, full] of Object.entries(modelAliases)) aliasByModel[full] ??= a;
+
     const models = AI_MODELS
       .filter((m) => {
         const alias = getProviderAlias(m.provider) || m.provider;
@@ -26,7 +31,7 @@ export async function GET() {
           ...m,
           fullModel,
           routedModel,
-          alias: modelAliases[fullModel] || m.model,
+          alias: aliasByModel[fullModel] || m.model,
           caps: {
             vision: c.vision,
             search: c.search,
@@ -52,7 +57,7 @@ export async function GET() {
         name: m.name || m.id,
         fullModel,
         routedModel: fullModel,
-        alias: modelAliases[fullModel] || m.id,
+        alias: aliasByModel[fullModel] || m.id,
         caps: {
           vision: c.vision,
           search: c.search,
@@ -83,17 +88,14 @@ export async function PUT(request) {
 
     const modelAliases = await getModelAliases();
 
-    // Check if alias already exists for different model
-    const existingModel = Object.entries(modelAliases).find(
-      ([key, val]) => val === alias && key !== model
-    );
-
-    if (existingModel) {
+    // Canonical direction: key=alias, value="provider/model". Reject stealing an
+    // existing alias for a different model.
+    const existing = modelAliases[alias];
+    if (existing && existing !== model) {
       return NextResponse.json({ error: "Alias already in use" }, { status: 400 });
     }
 
-    // Update alias
-    await setModelAlias(model, alias);
+    await setModelAlias(alias, model);
 
     return NextResponse.json({ success: true, model, alias });
   } catch (error) {

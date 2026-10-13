@@ -54,6 +54,45 @@ export async function deleteCustomModel({ providerAlias, id, type = "llm" }) {
   await customKv.remove(customKey(providerAlias, id, type));
 }
 
+// Cascade for a dying provider/connection/node: customModels keys are prefixed
+// with the providerAlias, so deleting the owner must delete its rows too —
+// otherwise the combo picker keeps showing ghost groups for dead connections.
+// JS-side prefix filter (not LIKE) because aliases can contain LIKE wildcards.
+export async function deleteCustomModelsByProvider(providerAlias) {
+  if (!providerAlias) return 0;
+  const prefix = `${providerAlias}|`;
+  const db = await getAdapter();
+  let removed = 0;
+  db.transaction(() => {
+    const rows = db.all(`SELECT key FROM kv WHERE scope = 'customModels'`);
+    for (const { key } of rows) {
+      if (!key.startsWith(prefix)) continue;
+      db.run(`DELETE FROM kv WHERE scope = 'customModels' AND key = ?`, [key]);
+      removed++;
+    }
+  });
+  return removed;
+}
+
+// modelAliases are canonical {alias → "providerId/model"} (every reader filters
+// by value — ModelSelectModal, /api/v1/models). A dying node must also drop the
+// shortcuts that resolve through it, or they dangle and fail at request time.
+export async function deleteModelAliasesForProvider(providerId) {
+  if (!providerId) return 0;
+  const prefix = `${providerId}/`;
+  const db = await getAdapter();
+  let removed = 0;
+  db.transaction(() => {
+    const rows = db.all(`SELECT key, value FROM kv WHERE scope = 'modelAliases'`);
+    for (const { key, value } of rows) {
+      if (!String(parseJson(value, "")).startsWith(prefix)) continue;
+      db.run(`DELETE FROM kv WHERE scope = 'modelAliases' AND key = ?`, [key]);
+      removed++;
+    }
+  });
+  return removed;
+}
+
 // mitmAlias: key=toolName, value=mappings object
 export async function getMitmAlias(toolName) {
   if (toolName) {
