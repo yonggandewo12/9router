@@ -214,6 +214,7 @@ describe("DELETE /api/provider-nodes/[id]", () => {
     const reached = [];
     vi.doMock("@/models", () => ({
       getProviderNodeById: async (id) => (id === node.id ? { id, prefix: "halfdying" } : null),
+      getProviderNodes: async () => [],
       getProviderConnections: async () => [],
       updateProviderConnection: async () => {},
       updateProviderNode: async () => {},
@@ -294,5 +295,63 @@ describe("DELETE /api/provider-nodes/[id]", () => {
     expect(survivors).not.toContain(`${twinA.id}/glm-4.7`);
     expect(await db.getModelAliases()).toMatchObject({ "twins-fast": "twins/glm-4.7" });
     expect(await db.getProviderNodeById(twinB.id)).not.toBeNull();
+  });
+
+  // "pa"/"voyage" are perplexity-agent's and voyage-ai's uiAlias, "agnes-ai" is
+  // agnes's extra registry alias: neither predicate alone sees both, which is
+  // why the guard unions them.
+  it("does not cascade under the other spellings of a built-in provider", async () => {
+    const { RESERVED_PROVIDER_PREFIXES } = await import("@/sse/services/model.js");
+    const { getProviderByAlias } = await import("@/shared/constants/providers");
+    expect(RESERVED_PROVIDER_PREFIXES.has("agnes-ai")).toBe(true);
+    expect(getProviderByAlias("agnes-ai")).toBeNull();
+    expect(RESERVED_PROVIDER_PREFIXES.has("pa")).toBe(false);
+    expect(getProviderByAlias("pa")?.id).toBe("perplexity-agent");
+
+    vi.resetModules();
+    const route = await import("@/app/api/provider-nodes/[id]/route.js");
+    for (const prefix of ["pa", "agnes-ai"]) {
+      const node = await db.createProviderNode({
+        type: "openai-compatible", name: `Named ${prefix}`, prefix, baseUrl: "http://127.0.0.1:9/v1",
+      });
+      await db.addCustomModel({ providerAlias: prefix, id: "glm-4.7", type: "llm" });
+      await db.setModelAlias(`${prefix}-keep`, `${prefix}/glm-4.7`);
+
+      const res = await route.DELETE(
+        new Request(`http://x/api/provider-nodes/${node.id}`, { method: "DELETE" }),
+        { params: Promise.resolve({ id: node.id }) },
+      );
+
+      expect(res.status).toBe(200);
+      expect(await db.getProviderNodeById(node.id)).toBeNull();
+      expect((await db.getCustomModels()).some((m) => m.providerAlias === prefix)).toBe(true);
+      expect(await db.getModelAliases()).toHaveProperty(`${prefix}-keep`);
+    }
+  });
+
+  // The custom-embedding model card keys its rows on prefix alone, so a sibling
+  // node with the same prefix owns them even with no connection to advertise.
+  it("does not cascade under a prefix a sibling node claims without a connection", async () => {
+    const first = await db.createProviderNode({
+      type: "custom-embedding", name: "Embed A", prefix: "embeds", baseUrl: "http://127.0.0.1:9/v1",
+    });
+    const second = await db.createProviderNode({
+      type: "custom-embedding", name: "Embed B", prefix: "embeds", baseUrl: "http://127.0.0.1:9/v1",
+    });
+    await db.addCustomModel({ providerAlias: "embeds", id: "bge-m3", type: "embedding" });
+
+    vi.resetModules();
+    const route = await import("@/app/api/provider-nodes/[id]/route.js");
+    const drop = (nodeId) => route.DELETE(
+      new Request(`http://x/api/provider-nodes/${nodeId}`, { method: "DELETE" }),
+      { params: Promise.resolve({ id: nodeId }) },
+    );
+
+    expect((await drop(first.id)).status).toBe(200);
+    expect((await db.getCustomModels()).some((m) => m.providerAlias === "embeds")).toBe(true);
+
+    // Once the last claimant goes, the name is free again and does get cleaned up
+    expect((await drop(second.id)).status).toBe(200);
+    expect((await db.getCustomModels()).some((m) => m.providerAlias === "embeds")).toBe(false);
   });
 });

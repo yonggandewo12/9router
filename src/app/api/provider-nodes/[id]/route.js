@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { deleteCustomModelsByProvider, deleteModelAliasesForProvider, deleteProviderConnectionsByProvider, deleteProviderNode, enableModels, getProviderConnections, getProviderNodeById, updateProviderConnection, updateProviderNode } from "@/models";
+import { deleteCustomModelsByProvider, deleteModelAliasesForProvider, deleteProviderConnectionsByProvider, deleteProviderNode, enableModels, getProviderConnections, getProviderNodeById, getProviderNodes, updateProviderConnection, updateProviderNode } from "@/models";
+import { RESERVED_PROVIDER_PREFIXES } from "@/sse/services/model.js";
 import { getProviderByAlias } from "@/shared/constants/providers";
 
 // PUT /api/provider-nodes/[id] - Update provider node
@@ -81,17 +82,21 @@ export async function PUT(request, { params }) {
   }
 }
 
-// A prefix is what /v1/models advertises, so a client can only have copied
-// "<prefix>/model" back while some provider still advertised it. A node
-// advertises through its own connections; any other provider still holding the
-// same name — a built-in id/alias, or a sibling node's connection — owns those
-// rows, and deleting them would damage a provider that is alive. node.prefix is
-// user-typed and unvalidated, so "ollama" as a compatible-node prefix is a real
-// configuration, not a hypothetical.
-function prefixStillClaimed(prefix, nodeId, connections) {
-  if (getProviderByAlias(prefix)) return true;
-  return connections.some((conn) => conn.provider !== nodeId
-    && String(conn.providerSpecificData?.prefix || "").trim() === prefix);
+// A prefix joins the cascade only while it is this node's own name. node.prefix
+// is user-typed and checked only for "not empty", so it can coincide with a
+// built-in provider ("ollama" as a compatible-node prefix is a configuration
+// people create) or with a sibling node's. Claims are checked along the three
+// paths a name reaches the wire: RESERVED for request-time "<name>/model"
+// resolution (getProviderByAlias adds the uiAlias spelling RESERVED omits), a
+// sibling node's prefix for nodes with no connection yet — the custom-embedding
+// card keys its rows on prefix alone — and a connection's prefix for what
+// /v1/models advertises. Cascading under a claimed name would delete a live
+// provider's models and shortcuts; leaving a row behind is the cheaper mistake.
+function prefixStillClaimed(prefix, nodeId, nodes, connections) {
+  if (RESERVED_PROVIDER_PREFIXES.has(prefix) || getProviderByAlias(prefix)) return true;
+  const claimed = (name) => String(name || "").trim() === prefix;
+  return nodes.some((node) => node.id !== nodeId && claimed(node.prefix))
+    || connections.some((conn) => conn.provider !== nodeId && claimed(conn.providerSpecificData?.prefix));
 }
 
 // DELETE /api/provider-nodes/[id] - Delete provider node and its connections
@@ -107,8 +112,8 @@ export async function DELETE(request, { params }) {
     const nodeNames = [id];
     const prefix = node.prefix?.trim();
     if (prefix) {
-      const connections = await getProviderConnections();
-      if (!prefixStillClaimed(prefix, id, connections)) nodeNames.push(prefix);
+      const [nodes, connections] = await Promise.all([getProviderNodes(), getProviderConnections()]);
+      if (!prefixStillClaimed(prefix, id, nodes, connections)) nodeNames.push(prefix);
     }
 
     // Everything kv-scoped to this node must die with it, or the combo picker
