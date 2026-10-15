@@ -45,14 +45,15 @@ describe("antigravity retry (intentional since 3f9382de: 429=3, 503=3)", () => {
 });
 
 describe("OpenCode Free endpoint routing", () => {
-  const MUSE = "muse-spark-1.2-contributor-free";
+  // 1.2-contributor-free was retired from the curated list (opencode 1.19.0's CLI
+  // dropped it) but stays a valid family-matched id, so routing is asserted for both.
+  const MUSE = "muse-spark-1.3-contributor-free";
 
-  it("declares the Responses format only on the Muse Spark model", () => {
+  it("declares the Responses format on the curated Muse Spark model", () => {
     expect(opencode.transport.format).toBeUndefined();
-    const muse = opencode.models.find((m) => m.id === MUSE);
-    expect(muse?.targetFormat).toBe("openai-responses");
-    const muse13 = opencode.models.find((m) => m.id === "muse-spark-1.3-contributor-free");
-    expect(muse13?.targetFormat).toBe("openai-responses");
+    expect(opencode.models.find((m) => m.id === MUSE)?.targetFormat).toBe("openai-responses");
+    expect(opencode.models.map((m) => m.id)).not.toContain("muse-spark-1.2-contributor-free");
+    expect(opencode.models.map((m) => m.id)).not.toContain("jev-1.13-free");
   });
 
   it("routes Muse Spark to /responses and every other model to /chat/completions", () => {
@@ -64,6 +65,15 @@ describe("OpenCode Free endpoint routing", () => {
     expect(executor.buildUrl("muse-spark-2.0-contributor-free(xhigh)")).toBe("https://opencode.ai/zen/v1/responses");
     expect(executor.buildUrl("big-pickle")).toBe("https://opencode.ai/zen/v1/chat/completions");
     expect(executor.buildUrl("hy3-free")).toBe("https://opencode.ai/zen/v1/chat/completions");
+    // Family-matched passthrough ids are translated to a Responses body by chatCore
+    // (getModelTargetFormat), so the URL has to follow the same rule — a hardcoded
+    // model list here sent `input` to /chat/completions and upstream rejected it.
+    expect(executor.buildUrl("gpt-5.6-luna")).toBe("https://opencode.ai/zen/v1/responses");
+    expect(executor.buildUrl("grok-4.6(xhigh)")).toBe("https://opencode.ai/zen/v1/responses");
+    const body = { input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }], max_tokens: 128 };
+    executor.transformRequest("gpt-5.6-luna", body, true, {});
+    expect(body.store).toBe(false);
+    expect(body.max_output_tokens).toBe(128);
   });
 
   it("normalizes Chat token/thinking fields only for the Responses model", () => {

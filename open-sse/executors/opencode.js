@@ -1,13 +1,13 @@
 import crypto from "crypto";
 import { BaseExecutor } from "./base.js";
 import { PROVIDERS } from "../config/providers.js";
+import { getModelTargetFormat, PROVIDER_ID_TO_ALIAS } from "../config/providerModels.js";
 import { MEMORY_CONFIG } from "../config/runtimeConfig.js";
 import { getThinkingLevels } from "../providers/thinkingLevels.js";
+import { FORMATS } from "../translator/formats.js";
 import { injectReasoningContent } from "../utils/reasoningContentInjector.js";
 import { resolveSessionId } from "../utils/sessionManager.js";
-import { isMuseSparkModel } from "../providers/models/helpers.js";
 import { applyFingerprintTools } from "../utils/opencodeFingerprint.js";
-import { ANTHROPIC_API_VERSION } from "../providers/shared.js";
 import {
   normalizeResponsesInput,
   clampResponsesCallId,
@@ -33,11 +33,6 @@ function hasValidOpencodeVersion(ua) {
   const minor = parseInt(m[2], 10);
   return major > 1 || (major === 1 && minor >= 17);
 }
-// Models served by /zen/v1/responses; every other model stays on /chat/completions.
-const RESPONSES_MODELS = new Set([
-  "muse-spark-1.2-contributor-free",
-  "muse-spark-1.3-contributor-free",
-]);
 
 let lastTimestamp = 0;
 let counter = 0;
@@ -253,8 +248,12 @@ function baseModelId(model) {
 }
 
 function isResponsesModel(model) {
-  const base = baseModelId(model);
-  return RESPONSES_MODELS.has(base) || isMuseSparkModel(base);
+  // Resolved through the same registry/family lookup chatCore used to pick the body's
+  // wire format, so the URL can never disagree with what was translated. A hardcoded
+  // list here drifted: `oc/gpt-*` and `oc/grok-*` got a Responses body POSTed to
+  // /chat/completions, which upstream rejects.
+  const alias = PROVIDER_ID_TO_ALIAS.opencode || "opencode";
+  return getModelTargetFormat(alias, baseModelId(model)) === FORMATS.OPENAI_RESPONSES;
 }
 
 function resolveOpencodeSession(body, credentials, providerSessionId, clientTool) {

@@ -18,7 +18,12 @@ const input = [{
 
 describe("OpenCode Free Muse Spark thinking", () => {
   it("advertises reasoning and the requested model limits", () => {
-    expect(PROVIDER_MODELS.oc?.some((model) => model.id === MODEL)).toBe(true);
+    // Only 1.3 is curated now: opencode 1.19.0's CLI list dropped 1.2-contributor-free
+    // (a real run answers UnknownError) and /zen/v1/systemone answers 451 for
+    // jev-1.13-free, so both were retired from the registry on 2026-10-15. The retired
+    // id still resolves through the family/capability rules below, which is what a
+    // client configured with it sends.
+    expect(PROVIDER_MODELS.oc?.some((model) => model.id === MODEL)).toBe(false);
     expect(PROVIDER_MODELS.oc?.some((model) => model.id === "muse-spark-1.3-contributor-free")).toBe(true);
     for (const m of [MODEL, "muse-spark-1.3-contributor-free", "muse-spark-1.4-contributor-free", "muse-spark-2.0-contributor-free"]) {
       expect(getCapabilitiesForModel(PROVIDER, m)).toMatchObject({

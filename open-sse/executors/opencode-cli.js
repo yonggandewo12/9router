@@ -10,6 +10,7 @@ import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import os from "node:os";
 import { DATA_DIR } from "@/lib/dataDir.js";
 import { proxyAwareFetch, normalizeProxyUrl } from "../utils/proxyFetch.js";
@@ -17,6 +18,15 @@ import { getThinkingLevels } from "../providers/thinkingLevels.js";
 import { MEMORY_CONFIG, OPENCODE_CLI_CONFIG } from "../config/runtimeConfig.js";
 
 const WORKSPACE_DIR_NAME = "opencode-cli";
+// The pinned workspace is static per process: re-creating the dir, sweeping
+// attachments and re-reading the config on every turn would put 10+ sync syscalls
+// on the request path for nothing. Self-healing stays inside this window.
+const WORKSPACE_ENSURE_INTERVAL_MS = 60 * 1000;
+let workspaceEnsuredAt = 0;
+// The model id is client-controlled (this provider passes through any id) and becomes
+// one argv token. Whitespace or a control character inside it survives into cmd.exe's
+// line-based parser on the Windows path and truncates the whole command line.
+const MODEL_ID_RE = /^[A-Za-z0-9._:/@[\]()-]+$/;
 const CLI_PROVIDER_PREFIX = "opencode/";
 // opencode resolves its default model at session start; a user's global config may
 // point that default back at 9router, which would loop. Pin one of our own ids.
@@ -382,6 +392,9 @@ function removeAttachments(files) {
  */
 export function ensureCliWorkspace() {
   const dir = path.join(DATA_DIR, WORKSPACE_DIR_NAME);
+  const now = Date.now();
+  if (workspaceEnsuredAt && now - workspaceEnsuredAt < WORKSPACE_ENSURE_INTERVAL_MS) return dir;
+  workspaceEnsuredAt = now;
   fs.mkdirSync(dir, { recursive: true });
   sweepStaleAttachments(path.join(dir, ATTACHMENTS_DIR_NAME));
   const cfgPath = path.join(dir, "opencode.json");
@@ -392,8 +405,22 @@ export function ensureCliWorkspace() {
   );
   let current = null;
   try { current = fs.readFileSync(cfgPath, "utf8"); } catch { /* first run */ }
-  if (current !== wanted) fs.writeFileSync(cfgPath, wanted);
+  if (current !== wanted) writeConfigAtomically(cfgPath, wanted);
   return dir;
+}
+
+// Dev and production instances share one DATA_DIR, so a plain writeFileSync can be
+// read half-written by the other's CLI child (a torn config makes opencode fail the
+// turn). Rename is atomic, and each writer gets its own temp file.
+function writeConfigAtomically(cfgPath, wanted) {
+  const tmp = `${cfgPath}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`;
+  try {
+    fs.writeFileSync(tmp, wanted);
+    fs.renameSync(tmp, cfgPath);
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch { /* already gone */ }
+    throw e;
+  }
 }
 
 // ─── Request body → prompt text ──────────────────────────────────────────────
@@ -702,7 +729,22 @@ function fingerprint(turn) {
   return crypto.createHash("sha256").update(`${turn.role}\0${turn.text}`).digest("hex").slice(0, 16);
 }
 
-function recordSession({ key, turns, sid, replyText, systemHash }) {
+// Live-verified against opencode 1.19.0: continuing a session the CLI no longer
+// knows about exits 1, prints nothing on stdout and writes "Error: Session not found"
+// to stderr. The stored sid has to go on that failure — recordSession below refreshes
+// `lastUsed` for every failed turn, so without the delete a conversation whose session
+// aged out upstream keeps passing the dead `-s` and never recovers.
+const SESSION_GONE_RE = /session not found/i;
+// The CLI's session id is the only token this transport hands back to argv on the
+// next turn (`-s`), so adopt it only when it is a safe single argv token (`ses_` +
+// URL-safe characters). Anything else keeps the conversation on the full-replay path.
+const SESSION_ID_RE = /^ses_[0-9A-Za-z_-]{1,128}$/;
+
+function recordSession({ key, turns, sid, replyText, systemHash, error }) {
+  if (error && SESSION_GONE_RE.test(String(error.message || ""))) {
+    sessions.delete(key);
+    return;
+  }
   if (!sid) return;
   if (!replyText) {
     const existing = sessions.get(key);
@@ -710,6 +752,9 @@ function recordSession({ key, turns, sid, replyText, systemHash }) {
     return;
   }
   if (sessions.size >= MAX_SESSIONS) sessions.delete(sessions.keys().next().value);
+  // Re-insert: an overwrite keeps a Map's insertion position, which would make the
+  // hottest conversation the first one the cap evicts.
+  sessions.delete(key);
   sessions.set(key, {
     sid,
     reflected: turns.length + 1, // delivered turns + the reply we just made
@@ -719,14 +764,24 @@ function recordSession({ key, turns, sid, replyText, systemHash }) {
   });
 }
 
-// opencode sessions assume sequential turns; never overlap them.
+// One opencode session assumes sequential turns, so turns of the same conversation
+// never overlap. Distinct conversations are distinct sessions and DO run concurrently
+// in the shared project dir (verified with two parallel `opencode run`s on 1.19.0) —
+// queueing them behind each other would make a single 5-minute turn stall every other
+// chat on the connection, which is what clients that send no session header hit.
 function enqueueTurn(key, task) {
   const prev = chains.get(key) || Promise.resolve();
   const run = prev.then(task, task);
-  const guarded = run.catch(() => undefined);
+  // A task that started a CLI turn carries `release`: the queue must keep the
+  // conversation's next turn parked until that process settled, otherwise two turns
+  // of one opencode session overlap (and the later finish() overwrites the session
+  // record with the older sid, silently dropping the newer exchange from history).
+  const guarded = run.then((out) => out?.release).catch(() => undefined);
   chains.set(key, guarded);
   guarded.then(() => { if (chains.get(key) === guarded) chains.delete(key); });
-  return run;
+  // The caller gets its response as soon as it is built — streaming must not wait for
+  // the turn to finish, only the NEXT turn of the same conversation does.
+  return run.then((out) => out?.result ?? out);
 }
 
 // ─── CLI turn ────────────────────────────────────────────────────────────────
@@ -786,12 +841,17 @@ function resolveVariant(model, body) {
   return { base, variant: "" };
 }
 
-function errorFrame(message, code) {
+function errorFrame({ message, code, status } = {}) {
   const payload = {
     error: {
-      message: String(message || "OpenCode CLI error"),
+      // Bounded: an upstream message can carry a whole response body, and this string
+      // reaches the client, the request log and the dashboard.
+      message: String(message || "OpenCode CLI error").slice(0, 600),
       type: ERROR_TYPE,
       ...(code ? { code: String(code) } : {}),
+      // The SSE→JSON handlers read error.status to keep the real upstream code (a 403
+      // free-tier gate must not be reported as a generic 502 to the account loop).
+      ...(Number.isInteger(status) ? { status } : {}),
     },
   };
   return `data: ${JSON.stringify(payload)}\n\n`;
@@ -799,9 +859,20 @@ function errorFrame(message, code) {
 
 function describeErrorEvent(evt) {
   const data = evt?.error?.data || evt?.error || {};
+  const name = String(evt?.error?.name || data.name || "");
+  const raw = data.message || evt?.error?.message || name || "OpenCode CLI reported an error";
+  // A bare "Unexpected server error. Check server logs for details." tells the caller
+  // nothing (that is what a retired model id returns). The upstream envelope carries
+  // the discriminating tokens: the parsed error type (FreeTierError / RegionError /
+  // FreeUsageLimitError), else the CLI error name, plus its log ref.
+  let upstreamType = "";
+  try { upstreamType = String(JSON.parse(data.responseBody)?.error?.type || ""); } catch { /* not a JSON envelope */ }
+  const clues = [upstreamType || (name && name !== raw ? name : ""), data.ref && `ref ${data.ref}`]
+    .filter(Boolean)
+    .join(", ");
   return {
-    message: data.message || evt?.error?.message || data.name || "OpenCode CLI reported an error",
-    status: data.statusCode || data.status || null,
+    message: clues ? `${raw} [${clues}]` : raw,
+    status: Number(data.statusCode || data.status) || null,
   };
 }
 
@@ -822,12 +893,17 @@ export function runOpenCodeCli({ model, body, credentials, providerSessionId, si
   // prompt instead. The direct-spawn path (.exe / mac / linux) keeps argv, which is
   // verified working and preserves newlines through CreateProcess/execve untouched.
   const useStdin = needsShell(bin);
-  const identity = credentials?.connectionId || credentials?.id || "default";
-  const queueKey = `${identity}:${providerSessionId || "anon"}`;
-  return enqueueTurn(queueKey, async () => {
-    const { system, turns, images } = normalizeConversation(body);
-    if (!turns.length) return emptyResult("OpenCode CLI: request contained no text to send");
-    const key = sessionKey(credentials, providerSessionId, turns);
+  // Nothing below this line touches the queue: rejecting a malformed request must not
+  // wait behind whichever turn is currently running.
+  if (!MODEL_ID_RE.test(String(model || ""))) {
+    return emptyResult(`OpenCode CLI: unsupported model id "${String(model || "").slice(0, 60)}"`, 400, "invalid_model");
+  }
+  const { system, turns, images } = normalizeConversation(body);
+  if (!turns.length) return emptyResult("OpenCode CLI: request contained no text to send");
+  const key = sessionKey(credentials, providerSessionId, turns);
+  // One queue per conversation: an opencode session assumes sequential turns, while
+  // two different conversations are two different sessions and may run side by side.
+  return enqueueTurn(key, async () => {
     const plan = planPrompt({ key, system, turns, images });
     // NUL bytes make spawn throw ERR_INVALID_ARG_VALUE (execve forbids them in
     // argv); stripping at this single choke point keeps the argv, stdin, and
@@ -852,19 +928,21 @@ export function runOpenCodeCli({ model, body, credentials, providerSessionId, si
       title: cliTitle,
     });
     log?.info?.("OPENCODE", `CLI ${plan.sid ? "continue" : "new"} session model=${model} key=${key.slice(0, 56)} turns=${plan.replayed} images=${attachments.length} prompt=${Buffer.byteLength(plan.prompt)}B via=${useStdin ? "stdin" : "argv"}`);
-    return startTurn({ bin, args, dir, key, plan, turns, model, signal, log, attachments, proxyOptions, stdinPrompt: useStdin ? plan.prompt : null });
+    const turn = startTurn({ bin, args, dir, key, plan, turns, model, signal, log, attachments, proxyOptions, stdinPrompt: useStdin ? plan.prompt : null });
+    return { result: turn.response, release: turn.settled };
   });
 }
 
-function emptyResult(message, status = 400) {
+function emptyResult(message, status = 400, code) {
   // A JSON body (not an SSE error frame): chatCore routes non-ok responses through
   // parseUpstreamError, which JSON-parses the body — an SSE frame would surface as
   // raw "data: {...}" text to the client.
   const payload = JSON.stringify({
     error: {
-      message: String(message || "OpenCode CLI error"),
+      message: String(message || "OpenCode CLI error").slice(0, 600),
       type: ERROR_TYPE,
-      code: status === 499 ? "aborted" : "empty_prompt",
+      code: code || (status === 499 ? "aborted" : "empty_prompt"),
+      status,
     },
   });
   return Promise.resolve({
@@ -909,6 +987,14 @@ function startTurn({ bin, args, dir, key, plan, turns, model, signal, log, attac
   const created = Math.floor(Date.now() / 1000);
   const state = { sid: plan.sid, reply: "", usage: null, roleSent: false, done: false };
   let killChild = () => {};
+  // Resolved by finish() — the per-conversation queue waits on it (see enqueueTurn)
+  // while the caller only ever awaits `response`. The ceiling is a safety valve: a
+  // stream that errored before finish() ran would otherwise park this conversation
+  // forever, and the CLI child keeps running.
+  let settleTurn = () => {};
+  const settled = new Promise((resolve) => { settleTurn = resolve; });
+  const releaseCeiling = setTimeout(() => { killChild(); settleTurn(); }, OPENCODE_CLI_CONFIG.totalMs + OPENCODE_CLI_CONFIG.killGraceMs + 5000);
+  if (releaseCeiling.unref) releaseCeiling.unref();
 
   const stream = buildStream((emit, close) => {
     let stderrTail = "";
@@ -935,20 +1021,22 @@ function startTurn({ bin, args, dir, key, plan, turns, model, signal, log, attac
       clearTimeout(idleTimer);
       if (signal) signal.removeEventListener("abort", onAbort);
       if (error) {
-        emit(errorFrame(error.message, error.status));
+        emit(errorFrame({ message: error.message, code: error.code ?? error.status, status: error.status }));
       } else if (!state.reply.trim()) {
         // The CLI can exit 0 without any assistant text when upstream drops the
         // request — that is a failure, not an empty-but-successful reply.
         const detail = (stderrTail.trim() || strayOut.trim()).slice(0, 300);
-        emit(errorFrame(`OpenCode CLI returned no assistant text${detail ? `: ${detail}` : ""}`, "empty_reply"));
+        emit(errorFrame({ message: `OpenCode CLI returned no assistant text${detail ? `: ${detail}` : ""}`, code: "empty_reply" }));
       } else {
         if (!state.roleSent) chunk({ role: "assistant", content: "" });
         chunk({}, finishReason, state.usage || undefined);
         emit("data: [DONE]\n\n");
       }
-      recordSession({ key, turns, sid: state.sid, replyText: error ? null : state.reply, systemHash: plan.systemHash });
+      recordSession({ key, turns, sid: state.sid, replyText: error ? null : state.reply, systemHash: plan.systemHash, error });
       removeAttachments(attachments);
+      clearTimeout(releaseCeiling);
       close();
+      settleTurn();
     };
 
     // opencode `--format json` writes a `text` event only once a part completes, so
@@ -1045,7 +1133,7 @@ function startTurn({ bin, args, dir, key, plan, turns, model, signal, log, attac
       }
       // The CLI's reported session is authoritative: if -s was stale and it
       // started fresh, adopt the new id instead of re-recording the dead one.
-      if (evt.sessionID) state.sid = String(evt.sessionID);
+      if (typeof evt.sessionID === "string" && SESSION_ID_RE.test(evt.sessionID)) state.sid = evt.sessionID;
       if (evt.type === "text") {
         // `opencode run --format json` emits a `text` event only once a part is
         // complete (part.time.end), so each event is a whole part — not an
@@ -1075,11 +1163,17 @@ function startTurn({ bin, args, dir, key, plan, turns, model, signal, log, attac
       }
     };
 
+    // Decode as a stream, never per chunk: a pipe chunk boundary can land in the
+    // middle of a multi-byte character (every CJK reply), and `chunk.toString("utf8")`
+    // turns that half into U+FFFD — the line then fails JSON.parse and the whole text
+    // part is lost to strayOut.
+    const stdoutDecoder = new StringDecoder("utf8");
+    const stderrDecoder = new StringDecoder("utf8");
     let buf = "";
     child.stdout.on("data", (chunkData) => {
       if (state.done) return; // trailing output after an error/abort: ignore
       clearIdle(); // first byte ends the startup-idle phase; generation is silent by design
-      buf += chunkData.toString("utf8");
+      buf += stdoutDecoder.write(chunkData);
       let nl;
       while ((nl = buf.indexOf("\n")) !== -1) {
         const line = buf.slice(0, nl).trim();
@@ -1089,7 +1183,7 @@ function startTurn({ bin, args, dir, key, plan, turns, model, signal, log, attac
       }
     });
     child.stderr.on("data", (chunkData) => {
-      stderrTail = (stderrTail + chunkData.toString("utf8")).slice(-600);
+      stderrTail = (stderrTail + stderrDecoder.write(chunkData)).slice(-600);
     });
     child.on("close", (code) => {
       if (buf.trim()) onEvent(buf.trim());
@@ -1107,13 +1201,16 @@ function startTurn({ bin, args, dir, key, plan, turns, model, signal, log, attac
     });
   });
 
-  return jsonResponse(stream, 200, {
-    transformedBody: {
-      transport: "opencode-cli",
-      model: replyModel,
-      session: plan.sid || "new",
-      turns: plan.replayed,
-      promptBytes: Buffer.byteLength(plan.prompt),
-    },
-  });
+  return {
+    settled,
+    response: jsonResponse(stream, 200, {
+      transformedBody: {
+        transport: "opencode-cli",
+        model: replyModel,
+        session: plan.sid || "new",
+        turns: plan.replayed,
+        promptBytes: Buffer.byteLength(plan.prompt),
+      },
+    }),
+  };
 }

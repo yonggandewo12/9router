@@ -1,10 +1,20 @@
 // Free OpenCode models that don't use the "-free" id suffix
 const KNOWN_FREE_OPENCODE_MODELS = ["big-pickle"];
 
-// Upstream returns "Model is unavailable" for this id (2026-09-02) — re-enable when fixed
-// jev-1.13-free is still listed by /models but every call 500s with "Internal server error"
-// (2026-09-22), and the official CLI's own free list omits both of these.
-const DEAD_FREE_OPENCODE_MODELS = new Set(["deepseek-v4-flash-free", "jev-1.13-free"]);
+// Ids /zen/v1/models still lists but that no longer answer. Re-check from the
+// deployment network before pruning this set — it is the fallback for hosts without
+// the opencode CLI, where the intersection below cannot run.
+// deepseek-v4-flash-free: "Model is unavailable" (2026-09-02); the live id is now
+// deepseek-v4.1-flash-free, which the CLI does serve.
+// jev-1.13-free: every call failed (500 on 2026-09-22, 451 "Endpoint is
+// unavailable" on /zen/v1/systemone on 2026-10-15).
+// muse-spark-1.2-contributor-free: opencode 1.19.0's own `models opencode` list
+// omits it and a real run answers UnknownError (2026-10-15).
+const DEAD_FREE_OPENCODE_MODELS = new Set([
+  "deepseek-v4-flash-free",
+  "jev-1.13-free",
+  "muse-spark-1.2-contributor-free",
+]);
 
 export const FILTERS = {
   "openrouter-free": (models) =>

@@ -934,6 +934,206 @@ describe("transport selection", () => {
   });
 });
 
+describe("CLI failure recovery", () => {
+  it("drops a session the CLI no longer knows about so the next turn recovers", async () => {
+    // Live behaviour on opencode 1.19.0: `-s <gone>` exits 1, prints NOTHING on
+    // stdout and "Error: Session not found" on stderr. Keeping the cached id would
+    // mean every later turn replays the same dead `-s` forever (the failure path
+    // refreshes lastUsed, so the TTL sweeper never evicts it).
+    const ids = { credentials: { connectionId: "conn-gone" }, providerSessionId: "conv-gone" };
+    const first = await runOpenCodeCli({ model: "big-pickle", body: { messages: [USER("one")] }, ...ids });
+    children.at(-1).stdout.emit("data", Buffer.from(evt({ type: "text", sessionID: "ses_gone", part: { text: "the reply" } })));
+    children.at(-1).emit("close", 0);
+    await readAll(first.response);
+
+    const second = await runOpenCodeCli({
+      model: "big-pickle",
+      body: { messages: [USER("one"), ASSISTANT("the reply"), USER("two")] },
+      ...ids,
+    });
+    expect(lastArgs()).toContain("-s");
+    children.at(-1).stderr.emit("data", Buffer.from("Error: Session not found\n"));
+    children.at(-1).emit("close", 1);
+    const sse = await readAll(second.response);
+    expect(sse).toContain("Session not found");
+
+    const third = await runOpenCodeCli({
+      model: "big-pickle",
+      body: { messages: [USER("one"), ASSISTANT("the reply"), USER("two"), ASSISTANT("r2"), USER("three")] },
+      ...ids,
+    });
+    expect(lastArgs()).not.toContain("-s"); // full replay into a fresh session
+    children.at(-1).stdout.emit("data", Buffer.from(evt({ type: "text", sessionID: "ses_fresh", part: { text: "ok" } })));
+    children.at(-1).emit("close", 0);
+    await readAll(third.response);
+  });
+
+  it("keeps a transient failure from discarding a live session", async () => {
+    const ids = { credentials: { connectionId: "conn-transient" }, providerSessionId: "conv-transient" };
+    const first = await runOpenCodeCli({ model: "big-pickle", body: { messages: [USER("one")] }, ...ids });
+    children.at(-1).stdout.emit("data", Buffer.from(evt({ type: "text", sessionID: "ses_live", part: { text: "the reply" } })));
+    children.at(-1).emit("close", 0);
+    await readAll(first.response);
+
+    const second = await runOpenCodeCli({
+      model: "big-pickle",
+      body: { messages: [USER("one"), ASSISTANT("the reply"), USER("two")] },
+      ...ids,
+    });
+    children.at(-1).stdout.emit("data", Buffer.from(evt({
+      type: "error",
+      error: { name: "APIError", data: { message: "can only be used from within OpenCode", statusCode: 403 } },
+    })));
+    children.at(-1).emit("close", 1);
+    await readAll(second.response);
+
+    const third = await runOpenCodeCli({
+      model: "big-pickle",
+      body: { messages: [USER("one"), ASSISTANT("the reply"), USER("two")] },
+      ...ids,
+    });
+    expect(lastArgs()[lastArgs().indexOf("-s") + 1]).toBe("ses_live"); // still continuable
+    children.at(-1).emit("close", 0);
+    await readAll(third.response);
+  });
+
+  it("reassembles a text part whose UTF-8 bytes split across stdout chunks", async () => {
+    // The pipe hands over 64KB blocks, so a boundary can land inside a 3-byte CJK
+    // sequence. Per-chunk toString("utf8") turns it into U+FFFD and the reply arrives
+    // mangled.
+    const result = await runOpenCodeCli({
+      model: "big-pickle",
+      body: { messages: [USER("用中文回答")] },
+      credentials: { connectionId: "conn-utf8" },
+      providerSessionId: "conv-utf8",
+    });
+    const child = children.at(-1);
+    const line = Buffer.from(evt({ type: "text", sessionID: "ses_utf8", part: { text: "你好，世界" } }), "utf8");
+    const cut = line.indexOf(Buffer.from("好", "utf8")) + 1; // inside 好
+    child.stdout.emit("data", line.subarray(0, cut));
+    child.stdout.emit("data", line.subarray(cut));
+    child.emit("close", 0);
+    const sse = await readAll(result.response);
+    expect(sse).toContain("你好，世界");
+    expect(sse).not.toContain("\uFFFD");
+  });
+
+  it("keeps the upstream status and the discriminating error type in the frame", async () => {
+    const result = await runOpenCodeCli({
+      model: "big-pickle",
+      body: { messages: [USER("hi")] },
+      credentials: { connectionId: "conn-status" },
+      providerSessionId: "conv-status",
+    });
+    const child = children.at(-1);
+    child.stdout.emit("data", Buffer.from(evt({
+      type: "error",
+      error: {
+        name: "APIError",
+        data: {
+          message: "OpenCode's free tier can only be used from within OpenCode",
+          statusCode: 403,
+          responseBody: '{"type":"error","error":{"type":"FreeTierError","message":"…"}}',
+        },
+      },
+    })));
+    child.emit("close", 1);
+    const sse = await readAll(result.response);
+    const frame = JSON.parse(sse.split("\n\n")[0].slice(6));
+    // sseToJson/nonStreaming read error.status; without it every gate is a 502.
+    expect(frame.error.status).toBe(403);
+    expect(frame.error.code).toBe("403");
+    expect(frame.error.type).toBe("opencode_cli_error");
+    expect(frame.error.message).toContain("FreeTierError");
+  });
+
+  it("names the CLI error and log ref when upstream returns an opaque envelope", async () => {
+    // A retired model id answers exactly this: "Unexpected server error. Check server
+    // logs for details." — with no clue for the caller unless the name/ref ride along.
+    const result = await runOpenCodeCli({
+      model: "muse-spark-1.2-contributor-free",
+      body: { messages: [USER("hi")] },
+      credentials: { connectionId: "conn-opaque" },
+      providerSessionId: "conv-opaque",
+    });
+    const child = children.at(-1);
+    child.stdout.emit("data", Buffer.from(evt({
+      type: "error",
+      error: { name: "UnknownError", data: { message: "Unexpected server error. Check server logs for details.", ref: "err_cc905f51" } },
+    })));
+    child.emit("close", 1);
+    const frame = JSON.parse((await readAll(result.response)).split("\n\n")[0].slice(6));
+    expect(frame.error.message).toContain("UnknownError");
+    expect(frame.error.message).toContain("ref err_cc905f51");
+  });
+
+  it("never stores a session id that cannot be a safe argv token", async () => {
+    // The id the CLI reports becomes `-s <id>` on the next turn, so it must be one
+    // inert argv token — anything else falls back to a fresh full-replay session.
+    const ids = { credentials: { connectionId: "conn-badsid" }, providerSessionId: "conv-badsid" };
+    const first = await runOpenCodeCli({ model: "big-pickle", body: { messages: [USER("one")] }, ...ids });
+    children.at(-1).stdout.emit("data", Buffer.from(evt({ type: "text", sessionID: "ses_x\n--title pwn", part: { text: "the reply" } })));
+    children.at(-1).emit("close", 0);
+    await readAll(first.response);
+
+    const second = await runOpenCodeCli({
+      model: "big-pickle",
+      body: { messages: [USER("one"), ASSISTANT("the reply"), USER("two")] },
+      ...ids,
+    });
+    expect(lastArgs()).not.toContain("-s");
+    children.at(-1).emit("close", 0);
+    await readAll(second.response);
+  });
+
+  it("refuses a model id that cannot travel safely as one argv token", async () => {
+    const before = spawnMock.mock.calls.length;
+    const result = await runOpenCodeCli({
+      model: "big-pickle\n--auto",
+      body: { messages: [USER("hi")] },
+      credentials: { connectionId: "conn-badmodel" },
+      providerSessionId: "conv-badmodel",
+    });
+    expect(result.response.status).toBe(400);
+    expect(spawnMock.mock.calls.length).toBe(before); // nothing spawned, not even queued
+    const err = await result.response.json();
+    expect(err.error.code).toBe("invalid_model");
+  });
+});
+
+describe("per-conversation turn queue", () => {
+  it("runs separate conversations side by side and parks only the same one", async () => {
+    const ids = { credentials: { connectionId: "conn-queue" }, providerSessionId: "conv-queue" };
+    const a = await runOpenCodeCli({ model: "big-pickle", body: { messages: [USER("question A")] }, ...ids });
+    const b = await runOpenCodeCli({ model: "big-pickle", body: { messages: [USER("question B")] }, ...ids });
+    // Distinct conversations are distinct opencode sessions; verified live that two
+    // `opencode run` processes coexist in the pinned workspace dir.
+    expect(children).toHaveLength(2);
+
+    const a2Promise = runOpenCodeCli({
+      model: "big-pickle",
+      body: { messages: [USER("question A"), ASSISTANT("answer A"), USER("follow up A")] },
+      ...ids,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(children).toHaveLength(2); // the same conversation waits for its own turn
+
+    children[0].stdout.emit("data", Buffer.from(evt({ type: "text", sessionID: "ses_qa", part: { text: "answer A" } })));
+    children[0].emit("close", 0);
+    await readAll(a.response);
+
+    const a2 = await a2Promise;
+    expect(children).toHaveLength(3);
+    expect(lastArgs()[lastArgs().indexOf("-s") + 1]).toBe("ses_qa");
+    expect(lastArgs().at(-1)).toBe("user: follow up A");
+    children[1].stdout.emit("data", Buffer.from(evt({ type: "text", sessionID: "ses_qb", part: { text: "answer B" } })));
+    children[1].emit("close", 0);
+    children[2].stdout.emit("data", Buffer.from(evt({ type: "text", sessionID: "ses_qa", part: { text: "ok" } })));
+    children[2].emit("close", 0);
+    await Promise.all([readAll(b.response), readAll(a2.response)]);
+  });
+});
+
 describe("CLI child egress proxy (buildCliEnv)", () => {
   const kept = { ...process.env };
   afterEach(() => {

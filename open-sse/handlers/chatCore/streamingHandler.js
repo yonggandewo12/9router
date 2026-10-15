@@ -134,6 +134,11 @@ export function buildOnStreamComplete({ provider, model, connectionId, apiKey, r
     };
     const safeContent = contentObj?.content || "[Empty streaming response]";
     const safeThinking = contentObj?.thinking || null;
+    // An in-band error frame arrives with HTTP 200 already committed. Recording it as
+    // a success hid every free-tier gate / mid-stream refusal from the request detail
+    // and the failure stats, while the tokens upstream really spent still had to be
+    // billed — so keep the usage and correct only the status.
+    const failed = Boolean(meta?.streamError);
 
     saveRequestDetail(buildRequestDetail({
       provider, model, connectionId,
@@ -142,11 +147,16 @@ export function buildOnStreamComplete({ provider, model, connectionId, apiKey, r
       request: extractRequestConfig(body, stream),
       providerRequest: finalBody || translatedBody || null,
       providerResponse: safeContent,
-      response: { content: safeContent, thinking: safeThinking, type: "streaming" },
+      response: {
+        content: safeContent,
+        thinking: safeThinking,
+        type: "streaming",
+        ...(failed ? { error: meta.streamError.message, status: meta.streamError.status || HTTP_STATUS.BAD_GATEWAY } : {}),
+      },
       pxpipe,
       // A stream torn down by a client disconnect or the stall watchdog still spent
       // upstream tokens, so it is recorded — but not as a success.
-      status: meta?.aborted ? "aborted" : "success"
+      status: meta?.aborted ? "aborted" : failed ? "error" : "success"
     }, { id: streamDetailId })).catch(err => {
       console.error("[RequestDetail] Failed to update streaming content:", err.message);
     });

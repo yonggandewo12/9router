@@ -25,11 +25,15 @@ export default {
   },
   models: [
     // Endpoint formats differ per model, so declare non-chat models explicitly.
-    { id: "muse-spark-1.2-contributor-free", name: "Muse Spark 1.2 Contributor Free", targetFormat: "openai-responses" },
     { id: "muse-spark-1.3-contributor-free", name: "Muse Spark 1.3 Contributor Free", targetFormat: "openai-responses" },
-    // union-alpha deliberately absent: upstream dropped it ("Model is not
-    // supported", absent from their model list) — kept-out since v0.5.87.
-    { id: "jev-1.13-free", name: "Jev 1.13 Free", kind: "systemone" },
+    // Retired, verified 2026-10-15 against opencode 1.19.0 + live upstream:
+    // union-alpha — gone from their list, "/zen/v1/messages" says "not supported"
+    // (kept out since v0.5.87).
+    // muse-spark-1.2-contributor-free — still listed by /zen/v1/models but the
+    // official CLI no longer offers it (`opencode models opencode` omits it and a
+    // real run answers UnknownError), and the spoofed HTTP lane is hard-gated 403.
+    // It was also the first entry, i.e. getDefaultModel("oc") → a dead default.
+    // jev-1.13-free — POST /zen/v1/systemone answers 451 "Endpoint is unavailable".
   ],
   serviceKinds: ["llm", "systemone"],
   systemoneConfig: {

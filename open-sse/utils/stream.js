@@ -3,6 +3,7 @@ import { FORMATS } from "../translator/formats.js";
 import { trackPendingRequest, appendRequestLog } from "@/lib/usageDb.js";
 import { extractUsage, mergeUsage, hasValidUsage, estimateUsage, logUsage, addBufferToUsage, filterUsageForFormat, COLORS } from "./usageTracking.js";
 import { parseSSELine, hasValuableContent, fixInvalidId, formatSSE } from "./streamHelpers.js";
+import { HTTP_STATUS } from "../config/runtimeConfig.js";
 import { getOpenAIResponsesEventName, isOpenAIResponsesTerminalEvent, formatIncompleteOpenAIResponsesStreamFailure } from "./responsesStreamHelpers.js";
 import { dbg, isDebugEnabled } from "./debugLog.js";
 
@@ -62,6 +63,24 @@ export function createSSEStream(options = {}) {
 
   let buffer = "";
   let usage = null;
+  // An in-band failure frame (OpenAI/Responses `{error}` or Claude `{type:"error"}`)
+  // arrives after HTTP 200 was already committed, so it can no longer change the
+  // status code the client sees — but it must stop being filed as a successful
+  // request: the request detail, the monitor's error badge and any later triage read
+  // what this stream reports.
+  let streamError = null;
+  const noteInBandError = (parsed) => {
+    if (streamError || !parsed || typeof parsed !== "object") return;
+    const err = parsed.error || parsed.response?.error;
+    if (!err) return;
+    const message = typeof err === "string"
+      ? err
+      : String(err.message || err.type || err.error?.message || err.code || "");
+    const status = Number(typeof err === "object" ? (err.status ?? err.code) : null) || null;
+    // A bare `error: {}` carries no failure signal and must not fail the request.
+    if (!message && !status) return;
+    streamError = { message: (message || "Upstream stream error").slice(0, 300), status };
+  };
 
   // Per-stream decoder with stream:true to correctly handle multi-byte chars split across chunks
   const decoder = new TextDecoder("utf-8", { fatal: false });
@@ -112,14 +131,20 @@ export function createSSEStream(options = {}) {
     if (hasValidUsage(finalUsage)) {
       logUsage(isPassthrough ? provider : (state?.provider || targetFormat), finalUsage, model, connectionId, apiKey);
     } else {
-      appendRequestLog({ model, provider, connectionId, tokens: null, status: "200 OK" }).catch(() => { });
+      appendRequestLog({
+        model,
+        provider,
+        connectionId,
+        tokens: null,
+        status: streamError ? `FAILED ${streamError.status || HTTP_STATUS.BAD_GATEWAY}` : "200 OK",
+      }).catch(() => { });
     }
 
     if (onStreamComplete) {
       onStreamComplete({
         content: accumulatedContent,
         thinking: accumulatedThinking
-      }, finalUsage, ttftAt, { aborted });
+      }, finalUsage, ttftAt, { aborted, streamError });
     }
   };
 
@@ -187,7 +212,7 @@ export function createSSEStream(options = {}) {
           if (trimmed.startsWith("data:") && !isDoneSentinel) {
             try {
               const parsed = JSON.parse(trimmed.slice(5).trim());
-
+              noteInBandError(parsed);
               const idFixed = fixInvalidId(parsed);
 
               // Ensure OpenAI-required fields are present on streaming chunks (Letta compat)
@@ -301,6 +326,7 @@ export function createSSEStream(options = {}) {
 
         const parsed = parseSSELine(trimmed, targetFormat);
         if (!parsed) continue;
+        noteInBandError(parsed);
 
         // Responses API same-format passthrough: preserve event framing + track terminal state
         const isOpenAIResponsesStream = targetFormat === FORMATS.OPENAI_RESPONSES;
@@ -457,13 +483,16 @@ export function createSSEStream(options = {}) {
     flush(controller) {
       const evtSummary = Object.entries(eventTypeCounts).map(([k, v]) => `${k}=${v}`).join(",") || "none";
       dbg("SSE", `flush | provider=${provider} | model=${model} | recvLines=${sseLineCount} | emitted=${sseEmittedCount} | events=[${evtSummary}]`);
-      trackPendingRequest(model, provider, connectionId, false);
+      trackPendingRequest(model, provider, connectionId, false, Boolean(streamError));
       try {
         const remaining = decoder.decode();
         if (remaining) buffer += remaining;
 
         if (mode === STREAM_MODE.PASSTHROUGH) {
           if (buffer) {
+            if (buffer.startsWith("data:")) {
+              try { noteInBandError(JSON.parse(buffer.slice(5).trim())); } catch { /* not JSON */ }
+            }
             let output = buffer;
             if (buffer.startsWith("data:") && !buffer.startsWith("data: ")) {
               output = "data: " + buffer.slice(5);
@@ -499,6 +528,7 @@ export function createSSEStream(options = {}) {
           // counts — so it has to go through.
           const isDoneSentinel = parsed?.done && targetFormat !== FORMATS.OLLAMA;
           if (parsed && !isDoneSentinel) {
+            noteInBandError(parsed);
             // Same accumulation the transform loop does, so finalizeStream() can
             // log a tail chunk's tokens instead of falling back to null.
             const extracted = extractUsage(parsed);
