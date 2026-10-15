@@ -1,18 +1,21 @@
 /**
- * Two account-state invariants in chatCore:
+ * Three account-state invariants in chatCore:
  *   1. A local translation failure happens BEFORE this request increments its
  *      pending counter. Decrementing on that path takes a unit off another
  *      in-flight request on the same model+account, which is what the concurrency
  *      limiter and the account-health view read.
  *   2. Whichever response the 401 retry drops has to be cancelled; an unread body
  *      keeps its socket parked until the kernel gives up.
+ *   3. A failed upstream answer has to reach usageHistory — the one record that is
+ *      always on — or the operator sees a green panel over a broken provider.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { executeMock, refreshCredentialsMock, trackPendingRequest } = vi.hoisted(() => ({
+const { executeMock, refreshCredentialsMock, trackPendingRequest, saveRequestUsage } = vi.hoisted(() => ({
   executeMock: vi.fn(),
   refreshCredentialsMock: vi.fn(),
   trackPendingRequest: vi.fn(),
+  saveRequestUsage: vi.fn(async () => {}),
 }));
 
 vi.mock("../../open-sse/executors/index.js", () => ({
@@ -31,6 +34,7 @@ vi.mock("@/lib/usageDb.js", () => ({
   trackPendingRequest,
   appendRequestLog: vi.fn(async () => {}),
   saveRequestDetail: vi.fn(async () => {}),
+  saveRequestUsage,
 }));
 
 // The translator returns null only when a registered route yields nothing; no client
@@ -103,5 +107,28 @@ describe("chatCore request hygiene", () => {
     expect(executeMock).toHaveBeenCalledTimes(2);
     expect(cancel).toHaveBeenCalled();
     expect(result.success).toBe(true);
+  });
+
+  it("files the upstream status in usageHistory when the upstream answer is an error", async () => {
+    // appendRequestLog is a no-op and saveRequestDetail is gated by observability, so
+    // without this the failed turn leaves no trace in the recent-logs line. A 503 is
+    // used rather than a 401 to stay off the credential-refresh retry backoff.
+    executeMock.mockResolvedValueOnce({
+      response: new Response(JSON.stringify({ error: { message: "upstream overloaded" } }), {
+        status: 503, headers: { "content-type": "application/json" },
+      }),
+      url: "https://api.openai.com/v1/chat/completions", headers: {}, transformedBody: null,
+    });
+
+    const result = await handleChatCore(args());
+
+    expect(result.status).toBe(503);
+    expect(saveRequestUsage).toHaveBeenCalledTimes(1);
+    const row = saveRequestUsage.mock.calls[0][0];
+    expect(row.status).toBe("FAILED 503");
+    expect(row.tokens).toEqual({ prompt_tokens: 0, completion_tokens: 0 });
+    expect(row.provider).toBe("openai");
+    expect(row.model).toBe("gpt-5");
+    expect(row.connectionId).toBe("conn-a");
   });
 });

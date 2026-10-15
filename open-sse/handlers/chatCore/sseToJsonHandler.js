@@ -4,7 +4,7 @@ import { createErrorResult } from "../../utils/error.js";
 import { HTTP_STATUS } from "../../config/runtimeConfig.js";
 import { FORMATS } from "../../translator/formats.js";
 import { PROVIDERS } from "../../config/providers.js";
-import { buildRequestDetail, extractRequestConfig, saveUsageStats, formatDoneLine } from "./requestDetail.js";
+import { buildRequestDetail, extractRequestConfig, saveUsageStats, saveFailureUsage, formatDoneLine } from "./requestDetail.js";
 import { ROLE, RESPONSES_ITEM } from "../../translator/schema/index.js";
 import { fromOpenAIFinish } from "../../translator/concerns/finishReason.js";
 
@@ -337,6 +337,7 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
       return { success: true, response: new Response(JSON.stringify(restoreToolNames(finalResp, toolNameMap)), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } }) };
     } catch (err) {
       console.error("[ChatCore] Responses API SSE→JSON failed:", err);
+      saveFailureUsage({ provider, model, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, status: HTTP_STATUS.BAD_GATEWAY });
       return createErrorResult(HTTP_STATUS.BAD_GATEWAY, "Failed to convert streaming response to JSON");
     }
   }
@@ -345,7 +346,10 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
   try {
     const sseText = await providerResponse.text();
     const parsed = parseSSEToOpenAIResponse(sseText, model);
-    if (!parsed) return createErrorResult(HTTP_STATUS.BAD_GATEWAY, "Invalid SSE response for non-streaming request");
+    if (!parsed) {
+      saveFailureUsage({ provider, model, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, status: HTTP_STATUS.BAD_GATEWAY });
+      return createErrorResult(HTTP_STATUS.BAD_GATEWAY, "Invalid SSE response for non-streaming request");
+    }
     if (parsed.error) {
       // Structured error chunks may carry the real upstream status (e.g. the
       // Qoder executor emits status 403 for billing envelopes). Preserve it so
@@ -355,6 +359,7 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
       const status = Number.isInteger(upstreamStatus) && upstreamStatus >= 400 && upstreamStatus <= 599
         ? upstreamStatus
         : HTTP_STATUS.BAD_GATEWAY;
+      saveFailureUsage({ provider, model, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, status });
       return createErrorResult(
         status,
         parsed.error.message || "Upstream SSE stream failed"

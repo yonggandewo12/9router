@@ -8,7 +8,7 @@ import { upstreamResponseHeaders } from "../../utils/upstreamHeaders.js";
 import { HTTP_STATUS } from "../../config/runtimeConfig.js";
 import { parseSSEToOpenAIResponse } from "./sseToJsonHandler.js";
 import { unwrapClineEnvelope } from "../../shared/clineEnvelope.js";
-import { buildRequestDetail, extractRequestConfig, extractUsageFromResponse, saveUsageStats, formatDoneLine } from "./requestDetail.js";
+import { buildRequestDetail, extractRequestConfig, extractUsageFromResponse, saveUsageStats, saveFailureUsage, formatDoneLine } from "./requestDetail.js";
 import { appendRequestLog, saveRequestDetail } from "@/lib/usageDb.js";
 import { decloakToolNames } from "../../utils/claudeCloaking.js";
 import { restoreToolNames } from "../../utils/opencodeFingerprint.js";
@@ -301,7 +301,7 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
     const sseText = await providerResponse.text();
     const parsed = parseSSEToOpenAIResponse(sseText, model);
     if (!parsed) {
-      appendLog({ status: `FAILED ${HTTP_STATUS.BAD_GATEWAY}` });
+      saveFailureUsage({ provider, model, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, status: HTTP_STATUS.BAD_GATEWAY });
       return createErrorResult(HTTP_STATUS.BAD_GATEWAY, "Invalid SSE response for non-streaming request");
     }
     // A provider can fail mid-stream after committing HTTP 200 (qoder queue
@@ -316,7 +316,7 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
       const status = Number.isInteger(upstreamStatus) && upstreamStatus >= 400 && upstreamStatus <= 599
         ? upstreamStatus
         : HTTP_STATUS.BAD_GATEWAY;
-      appendLog({ status: `FAILED ${status}` });
+      saveFailureUsage({ provider, model, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, status });
       return createErrorResult(status, parsed.error.message || "Upstream SSE stream failed");
     }
     responseBody = parsed;
@@ -324,7 +324,7 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
     try {
       responseBody = await providerResponse.json();
     } catch (err) {
-      appendLog({ status: `FAILED ${HTTP_STATUS.BAD_GATEWAY}` });
+      saveFailureUsage({ provider, model, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, status: HTTP_STATUS.BAD_GATEWAY });
       console.error(`[ChatCore] Failed to parse JSON from ${provider}:`, err.message);
       return createErrorResult(HTTP_STATUS.BAD_GATEWAY, `Invalid JSON response from ${provider}`);
     }

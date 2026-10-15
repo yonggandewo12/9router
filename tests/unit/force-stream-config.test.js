@@ -90,6 +90,8 @@ vi.mock("../../open-sse/translator/concerns/prefetch.js", () => ({
 vi.mock("../../open-sse/handlers/chatCore/requestDetail.js", () => ({
   buildRequestDetail: vi.fn((detail) => detail),
   extractRequestConfig: vi.fn((body, stream) => ({ body, stream })),
+  // The executor rejects on purpose below, so the failure exit files a usage row.
+  saveFailureUsage: vi.fn(),
 }));
 
 vi.mock("../../open-sse/utils/error.js", () => ({

@@ -176,6 +176,23 @@ describe("in-band stream error detection", () => {
     expect(saveRequestUsage.mock.calls[0][0].status).toBeUndefined();
   });
 
+  it("files the failure even when the turn produced no usage at all", () => {
+    // The live shape of a region-gated opencode 2.x turn: one error frame, no usage
+    // object. The empty-usage filter used to swallow exactly this row.
+    const { onStreamComplete } = buildOnStreamComplete({
+      provider: "opencode", model: "muse-spark-1.3-contributor-free", connectionId: "conn-1",
+      requestStartTime: Date.now(), body: { messages: [] }, stream: true,
+      translatedBody: null, finalBody: null, perf: {},
+    });
+    saveRequestUsage.mockClear();
+    onStreamComplete({ content: "" }, null, Date.now(), {
+      aborted: false, streamError: { message: "This model is not available in your country [RegionError]", status: 403 },
+    });
+    const row = saveRequestUsage.mock.calls[0][0];
+    expect(row.status).toBe("FAILED 403");
+    expect(row.tokens).toEqual({ prompt_tokens: 0, completion_tokens: 0 });
+  });
+
   it("files a 499 in-band frame as an abort, not a provider error", () => {
     const { onStreamComplete } = buildOnStreamComplete({
       provider: "opencode", model: "big-pickle", connectionId: "conn-1",

@@ -1,6 +1,7 @@
 import { saveRequestUsage, appendRequestLog, saveRequestDetail } from "@/lib/usageDb.js";
 import { COLORS } from "../../utils/stream.js";
 import { canonicalizeUsage } from "../../utils/usageTracking.js";
+import { HTTP_STATUS } from "../../config/runtimeConfig.js";
 
 const OPTIONAL_PARAMS = [
   "temperature", "top_p", "top_k",
@@ -127,12 +128,15 @@ export function formatDoneLine({ usage, latency }) {
 }
 
 export function saveUsageStats({ provider, model, tokens, connectionId, apiKey, endpoint, label = "USAGE", silent = false, status }) {
-  if (!tokens || typeof tokens !== "object") return;
+  const hasTokens = Boolean(tokens) && typeof tokens === "object";
+  const inTokens = hasTokens ? (tokens.input_tokens ?? tokens.prompt_tokens ?? 0) : 0;
+  const outTokens = hasTokens ? (tokens.output_tokens ?? tokens.completion_tokens ?? 0) : 0;
 
-  const inTokens = tokens.input_tokens ?? tokens.prompt_tokens ?? 0;
-  const outTokens = tokens.output_tokens ?? tokens.completion_tokens ?? 0;
-
-  if (inTokens === 0 && outTokens === 0) return;
+  // A failure that died before any token came back is exactly the row the operator
+  // needs, so an explicit status outranks the empty-usage filter; without it only
+  // the console line would ever mention the turn.
+  const failed = Boolean(status);
+  if (!failed && inTokens === 0 && outTokens === 0) return;
 
   if (!silent) {
     const time = new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -142,10 +146,8 @@ export function saveUsageStats({ provider, model, tokens, connectionId, apiKey, 
 
   // Canonicalize to one storage convention (prompt_tokens cache-inclusive) so
   // cached/cache-creation tokens survive to cost calc + stats. See canonicalizeUsage.
-  const normalized = canonicalizeUsage(tokens) || {
-    prompt_tokens: tokens.prompt_tokens ?? tokens.input_tokens ?? 0,
-    completion_tokens: tokens.completion_tokens ?? tokens.output_tokens ?? 0
-  };
+  // The fallback covers the failure path, where there is no usage object at all.
+  const normalized = canonicalizeUsage(tokens) || { prompt_tokens: inTokens, completion_tokens: outTokens };
 
   saveRequestUsage({
     provider: provider || "unknown",
@@ -160,4 +162,20 @@ export function saveUsageStats({ provider, model, tokens, connectionId, apiKey, 
     // failed in-band has to say so here or it is filed as "ok" everywhere.
     status: status || undefined
   }).catch(() => {});
+}
+
+// A failed upstream attempt spent no tokens, and every other record of it is
+// conditional: appendRequestLog is a no-op stub and saveRequestDetail returns
+// early when observability is off. usageHistory is the one surface that is always
+// on — the recent-logs line and the Usage panel's dot both read it — so failures
+// have to be filed here or they never appear anywhere.
+export function saveFailureUsage({ provider, model, connectionId, apiKey, endpoint, status }) {
+  // 499 is our own "the client hung up" marker. A cancelled turn is not a provider
+  // failure, and the streaming path already keeps it out of the failure column —
+  // filing it here would paint the Usage panel red for someone who hit stop.
+  if (Number(status) === HTTP_STATUS.CLIENT_CLOSED_REQUEST) return;
+  saveUsageStats({
+    provider, model, tokens: null, connectionId, apiKey, endpoint,
+    silent: true, status: `FAILED ${status}`
+  });
 }

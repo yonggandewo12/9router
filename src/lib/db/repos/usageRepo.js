@@ -247,7 +247,7 @@ export async function getActiveRequests() {
       };
     })
     .filter((e) => {
-      if (e.promptTokens === 0 && e.completionTokens === 0) return false;
+      if (e.promptTokens === 0 && e.completionTokens === 0 && e.status === "ok") return false;
       const minute = e.timestamp ? e.timestamp.slice(0, 16) : "";
       const key = `${e.model}|${e.provider}|${e.promptTokens}|${e.completionTokens}|${minute}`;
       if (seen.has(key)) return false;
@@ -405,7 +405,9 @@ export async function getUsageStats(period = "all") {
       };
     })
     .filter((e) => {
-      if (e.promptTokens === 0 && e.completionTokens === 0) return false;
+      // Zero-token rows are noise unless they are a failure — saveUsageStats only
+      // files those, and they are the whole reason the row exists.
+      if (e.promptTokens === 0 && e.completionTokens === 0 && e.status === "ok") return false;
       const minute = e.timestamp ? e.timestamp.slice(0, 16) : "";
       const key = `${e.model}|${e.provider}|${e.promptTokens}|${e.completionTokens}|${minute}`;
       if (seen.has(key)) return false;

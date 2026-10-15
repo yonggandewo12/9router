@@ -85,7 +85,10 @@ export default function RequestLogger() {
                   const status = parts[6];
                   const isPending = status.includes("PENDING");
                   const isFailed = status.includes("FAILED");
-                  const isSuccess = status.includes("OK");
+                  // usageHistory stores a success as lowercase "ok"; the old "200 OK"
+                  // spelling died with appendRequestLog, and matching it case-sensitively
+                  // left every successful row styled as still-in-flight (pulsing).
+                  const isSuccess = !isFailed && /ok|success/i.test(status);
 
                   return (
                     <tr key={i} className={`hover:bg-primary/5 transition-colors ${isPending ? 'bg-primary/5' : ''}`}>
