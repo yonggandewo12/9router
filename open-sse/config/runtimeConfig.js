@@ -8,6 +8,9 @@ export const HTTP_STATUS = {
   NOT_ACCEPTABLE: 406,
   REQUEST_TIMEOUT: 408,
   RATE_LIMITED: 429,
+  // nginx's "client closed request": our marker for a turn the caller hung up on,
+  // which must not be filed as a provider failure.
+  CLIENT_CLOSED_REQUEST: 499,
   SERVER_ERROR: 500,
   BAD_GATEWAY: 502,
   SERVICE_UNAVAILABLE: 503,

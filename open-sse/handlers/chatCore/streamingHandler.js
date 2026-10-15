@@ -138,7 +138,11 @@ export function buildOnStreamComplete({ provider, model, connectionId, apiKey, r
     // a success hid every free-tier gate / mid-stream refusal from the request detail
     // and the failure stats, while the tokens upstream really spent still had to be
     // billed — so keep the usage and correct only the status.
-    const failed = Boolean(meta?.streamError);
+    const streamErrorStatus = meta?.streamError?.status || null;
+    // 499 is our own "the client hung up" marker: the turn was cancelled, not failed,
+    // so it belongs with the aborts rather than the provider errors.
+    const clientGone = streamErrorStatus === HTTP_STATUS.CLIENT_CLOSED_REQUEST;
+    const failed = Boolean(meta?.streamError) && !clientGone;
 
     saveRequestDetail(buildRequestDetail({
       provider, model, connectionId,
@@ -156,13 +160,17 @@ export function buildOnStreamComplete({ provider, model, connectionId, apiKey, r
       pxpipe,
       // A stream torn down by a client disconnect or the stall watchdog still spent
       // upstream tokens, so it is recorded — but not as a success.
-      status: meta?.aborted ? "aborted" : failed ? "error" : "success"
+      status: (meta?.aborted || clientGone) ? "aborted" : failed ? "error" : "success"
     }, { id: streamDetailId })).catch(err => {
       console.error("[RequestDetail] Failed to update streaming content:", err.message);
     });
 
     // Persist stream usage to DB (no console line; the "📊 done" line below is authoritative)
-    saveUsageStats({ provider, model, tokens: usage, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, label: "STREAM USAGE", silent: true });
+    saveUsageStats({
+      provider, model, tokens: usage, connectionId, apiKey,
+      endpoint: clientRawRequest?.endpoint, label: "STREAM USAGE", silent: true,
+      status: failed ? `FAILED ${streamErrorStatus || HTTP_STATUS.BAD_GATEWAY}` : undefined
+    });
     if (log?.line) log.line(reqTag, "📊", formatDoneLine({ usage, latency }));
   };
 

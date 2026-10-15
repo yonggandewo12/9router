@@ -16,7 +16,7 @@ vi.mock("@/lib/usageDb.js", () => ({
 
 const { createSSEStream } = await import("open-sse/utils/stream.js");
 const { buildOnStreamComplete } = await import("open-sse/handlers/chatCore/streamingHandler.js");
-const { saveRequestDetail } = await import("@/lib/usageDb.js");
+const { saveRequestDetail, saveRequestUsage } = await import("@/lib/usageDb.js");
 
 const encoder = new TextEncoder();
 
@@ -154,5 +154,42 @@ describe("in-band stream error detection", () => {
     onStreamComplete({ content: "done" }, { prompt_tokens: 1, completion_tokens: 1 }, Date.now(), { aborted: false });
     expect(saveRequestDetail.mock.calls[0][0].status).toBe("success");
     expect(saveRequestDetail.mock.calls[0][0].response.error).toBeUndefined();
+  });
+
+  it("carries the failure into the usage row the recent-logs line reads", () => {
+    // appendRequestLog has been a no-op since the SQLite migration, so the usage row is
+    // the only place a streamed request's status is stored — without this the Usage
+    // panel's dot stays green for every gated turn.
+    const { onStreamComplete } = buildOnStreamComplete({
+      provider: "opencode", model: "muse-spark-1.3-contributor-free", connectionId: "conn-1",
+      requestStartTime: Date.now(), body: { messages: [] }, stream: true,
+      translatedBody: null, finalBody: null, perf: {},
+    });
+    const tokens = { prompt_tokens: 100, completion_tokens: 5 };
+
+    saveRequestUsage.mockClear();
+    onStreamComplete({ content: "partial" }, tokens, Date.now(), { aborted: false, streamError: { message: "FreeTierError", status: 403 } });
+    expect(saveRequestUsage.mock.calls[0][0].status).toBe("FAILED 403");
+
+    saveRequestUsage.mockClear();
+    onStreamComplete({ content: "done" }, tokens, Date.now(), { aborted: false });
+    expect(saveRequestUsage.mock.calls[0][0].status).toBeUndefined();
+  });
+
+  it("files a 499 in-band frame as an abort, not a provider error", () => {
+    const { onStreamComplete } = buildOnStreamComplete({
+      provider: "opencode", model: "big-pickle", connectionId: "conn-1",
+      requestStartTime: Date.now(), body: { messages: [] }, stream: true,
+      translatedBody: null, finalBody: null, perf: {},
+    });
+    saveRequestDetail.mockClear();
+    saveRequestUsage.mockClear();
+    onStreamComplete({ content: "" }, { prompt_tokens: 10, completion_tokens: 0 }, Date.now(), {
+      aborted: false, streamError: { message: "Aborted by client", status: 499 },
+    });
+    const row = saveRequestDetail.mock.calls[0][0];
+    expect(row.status).toBe("aborted");
+    expect(row.response.error).toBeUndefined();
+    expect(saveRequestUsage.mock.calls[0][0].status).toBeUndefined();
   });
 });

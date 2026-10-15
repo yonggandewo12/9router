@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
+import path from "node:path";
 
 const { spawnMock, DATA_DIR } = vi.hoisted(() => ({
   spawnMock: vi.fn(),
@@ -1099,6 +1100,52 @@ describe("CLI failure recovery", () => {
     const err = await result.response.json();
     expect(err.error.code).toBe("invalid_model");
   });
+
+  it("keeps the discriminating clue when the upstream message is long", async () => {
+    // The frame is capped, and the clue rides at the end of the message: capping the
+    // joined string would cut away exactly the token that says what went wrong.
+    const result = await runOpenCodeCli({
+      model: "big-pickle",
+      body: { messages: [USER("hi")] },
+      credentials: { connectionId: "conn-long" },
+      providerSessionId: "conv-long",
+    });
+    const child = children.at(-1);
+    child.stdout.emit("data", Buffer.from(evt({
+      type: "error",
+      error: {
+        name: "APIError",
+        data: {
+          message: "upstream said ".padEnd(2000, "x"),
+          statusCode: 403,
+          responseBody: '{"type":"error","error":{"type":"FreeTierError","message":"…"}}',
+        },
+      },
+    })));
+    child.emit("close", 1);
+    const frame = JSON.parse((await readAll(result.response)).split("\n\n")[0].slice(6));
+    expect(frame.error.message).toContain("FreeTierError");
+    expect(frame.error.message.length).toBeLessThanOrEqual(600);
+    expect(frame.error.status).toBe(403);
+  });
+
+  it("reports a client hang-up as 499, not as a provider failure", async () => {
+    // The account loop and the request bookkeeping branch on the status: a caller who
+    // cancelled must not be filed as an upstream 502.
+    const controller = new AbortController();
+    const result = await runOpenCodeCli({
+      model: "big-pickle",
+      body: { messages: [USER("hi")] },
+      credentials: { connectionId: "conn-abort" },
+      providerSessionId: "conv-abort",
+      signal: controller.signal,
+    });
+    controller.abort();
+    const frame = JSON.parse((await readAll(result.response)).split("\n\n")[0].slice(6));
+    expect(frame.error.status).toBe(499);
+    expect(frame.error.code).toBe("aborted");
+    expect(children.at(-1).killed).toBe(true);
+  });
 });
 
 describe("per-conversation turn queue", () => {
@@ -1205,5 +1252,24 @@ describe("CLI child egress proxy (buildCliEnv)", () => {
     children.at(-1).stdout.emit("data", Buffer.from(evt({ type: "text", sessionID: "ses_p", part: { text: "ok" } })));
     children.at(-1).emit("close", 0);
     await readAll(result.response);
+  });
+});
+
+describe("pinned workspace setup", () => {
+  it("retries on the next turn when the setup itself failed", async () => {
+    // The throttle is stamped only after the work succeeded: stamping first would make
+    // one failed mkdir (read-only DATA_DIR, ENOSPC) hand every turn a cwd that does not
+    // exist for the whole window.
+    const dir = path.join(DATA_DIR, "opencode-cli");
+    fs.rmSync(DATA_DIR, { recursive: true, force: true });
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(dir, "in the way"); // a file where the workspace dir must be
+    vi.resetModules();
+    const fresh = await import("../../open-sse/executors/opencode-cli.js");
+    expect(() => fresh.ensureCliWorkspace()).toThrow();
+
+    fs.rmSync(dir, { force: true });
+    expect(fresh.ensureCliWorkspace()).toBe(dir);
+    expect(fs.readFileSync(path.join(dir, "opencode.json"), "utf8")).toContain('"permission": "deny"');
   });
 });

@@ -15,7 +15,7 @@ import os from "node:os";
 import { DATA_DIR } from "@/lib/dataDir.js";
 import { proxyAwareFetch, normalizeProxyUrl } from "../utils/proxyFetch.js";
 import { getThinkingLevels } from "../providers/thinkingLevels.js";
-import { MEMORY_CONFIG, OPENCODE_CLI_CONFIG } from "../config/runtimeConfig.js";
+import { HTTP_STATUS, MEMORY_CONFIG, OPENCODE_CLI_CONFIG } from "../config/runtimeConfig.js";
 
 const WORKSPACE_DIR_NAME = "opencode-cli";
 // The pinned workspace is static per process: re-creating the dir, sweeping
@@ -42,6 +42,9 @@ const MAX_PROMPT_BYTES = Math.min(
 );
 const MAX_SESSIONS = 1000;
 const ERROR_TYPE = "opencode_cli_error";
+// Ceiling for the message an error frame carries: upstream can hand back a whole
+// response body, and the string reaches the client, the request log and the dashboard.
+const ERROR_MESSAGE_MAX = 600;
 const ATTACHMENTS_DIR_NAME = "attachments";
 // Only the newest MAX_ATTACHMENTS images of the turns actually being sent are
 // attached; MAX_IMAGES_COLLECTED bounds collection so a long image-heavy history
@@ -394,7 +397,6 @@ export function ensureCliWorkspace() {
   const dir = path.join(DATA_DIR, WORKSPACE_DIR_NAME);
   const now = Date.now();
   if (workspaceEnsuredAt && now - workspaceEnsuredAt < WORKSPACE_ENSURE_INTERVAL_MS) return dir;
-  workspaceEnsuredAt = now;
   fs.mkdirSync(dir, { recursive: true });
   sweepStaleAttachments(path.join(dir, ATTACHMENTS_DIR_NAME));
   const cfgPath = path.join(dir, "opencode.json");
@@ -406,6 +408,10 @@ export function ensureCliWorkspace() {
   let current = null;
   try { current = fs.readFileSync(cfgPath, "utf8"); } catch { /* first run */ }
   if (current !== wanted) writeConfigAtomically(cfgPath, wanted);
+  // Stamped only once the dir and config are really there: stamping first would make
+  // a failed mkdir (read-only DATA_DIR, ENOSPC) skip the retry for a whole window and
+  // hand every turn a cwd that does not exist.
+  workspaceEnsuredAt = now;
   return dir;
 }
 
@@ -846,7 +852,7 @@ function errorFrame({ message, code, status } = {}) {
     error: {
       // Bounded: an upstream message can carry a whole response body, and this string
       // reaches the client, the request log and the dashboard.
-      message: String(message || "OpenCode CLI error").slice(0, 600),
+      message: String(message || "OpenCode CLI error").slice(0, ERROR_MESSAGE_MAX),
       type: ERROR_TYPE,
       ...(code ? { code: String(code) } : {}),
       // The SSE→JSON handlers read error.status to keep the real upstream code (a 403
@@ -870,8 +876,11 @@ function describeErrorEvent(evt) {
   const clues = [upstreamType || (name && name !== raw ? name : ""), data.ref && `ref ${data.ref}`]
     .filter(Boolean)
     .join(", ");
+  // The clue rides at the end and errorFrame caps the whole string, so a long upstream
+  // message would otherwise truncate away the one part worth reading.
+  const suffix = clues ? ` [${clues}]` : "";
   return {
-    message: clues ? `${raw} [${clues}]` : raw,
+    message: `${String(raw).slice(0, Math.max(0, ERROR_MESSAGE_MAX - suffix.length))}${suffix}`,
     status: Number(data.statusCode || data.status) || null,
   };
 }
@@ -939,7 +948,7 @@ function emptyResult(message, status = 400, code) {
   // raw "data: {...}" text to the client.
   const payload = JSON.stringify({
     error: {
-      message: String(message || "OpenCode CLI error").slice(0, 600),
+      message: String(message || "OpenCode CLI error").slice(0, ERROR_MESSAGE_MAX),
       type: ERROR_TYPE,
       code: code || (status === 499 ? "aborted" : "empty_prompt"),
       status,
@@ -1060,9 +1069,12 @@ function startTurn({ bin, args, dir, key, plan, turns, model, signal, log, attac
     }, OPENCODE_CLI_CONFIG.totalMs);
     if (totalTimer.unref) totalTimer.unref();
 
-    const onAbort = () => { killChild(); finish({ error: { message: "Aborted by client" } }); };
+    // 499 keeps a caller's own hang-up out of the provider-failure path: the account
+    // loop and the request bookkeeping both branch on the status.
+    const abortedError = { message: "Aborted by client", code: "aborted", status: HTTP_STATUS.CLIENT_CLOSED_REQUEST };
+    const onAbort = () => { killChild(); finish({ error: abortedError }); };
     if (signal) {
-      if (signal.aborted) { finish({ error: { message: "Aborted by client" } }); return; }
+      if (signal.aborted) { finish({ error: abortedError }); return; }
       signal.addEventListener("abort", onAbort, { once: true });
     }
 
