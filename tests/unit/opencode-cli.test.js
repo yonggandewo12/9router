@@ -29,6 +29,7 @@ import {
   planPrompt,
   runOpenCodeCli,
   isOpenCodeCliAvailable,
+  getCliInfo,
   listCliFreeModels,
 } from "../../open-sse/executors/opencode-cli.js";
 import { OPENCODE_CLI_CONFIG } from "../../open-sse/config/runtimeConfig.js";
@@ -74,6 +75,19 @@ function evt(obj) { return JSON.stringify(obj) + "\n"; }
 
 async function readAll(response) {
   return response.text();
+}
+
+// A forced transport still probes --version, because 1.x and 2.x take the thinking
+// level differently; feed that child so the call resolves.
+async function availableWithVersion(version = "opencode v2.0.29") {
+  const before = spawnMock.mock.calls.length;
+  const pending = isOpenCodeCliAvailable();
+  if (spawnMock.mock.calls.length > before) {
+    const child = children.at(-1);
+    child.stdout.emit("data", Buffer.from(`${version}\n`));
+    child.emit("close", 0);
+  }
+  return pending;
 }
 
 const USER = (text) => ({ role: "user", content: text });
@@ -219,6 +233,22 @@ describe("buildCliArgs", () => {
     expect(args).toContain("xhigh");
     expect(args).toContain("-s");
     expect(args.at(-1)).toBe("hi");
+  });
+
+  it("folds the thinking level into -m on 2.x, which removed --variant", () => {
+    // Live on opencode 2.0.29: `--variant` exits 1 with "Unrecognized flag" and dumps
+    // the help text to stdout, so every thinking-level turn died — and the non-zero
+    // exit with no assistant text also dropped the cached CLI verdict. 2.x takes the
+    // level as `provider/model#variant` instead.
+    const v2 = buildCliArgs({ model: "muse-spark-1.3-contributor-free(xhigh)", body: {}, sid: "ses_abc", prompt: "hi", cliMajor: 2 });
+    expect(v2.slice(0, 4)).toEqual(["run", "--format", "json", "-m"]);
+    expect(v2[4]).toBe("opencode/muse-spark-1.3-contributor-free#xhigh");
+    expect(v2).not.toContain("--variant");
+
+    // An unprobed binary keeps the 1.x flag rather than guessing the new syntax.
+    const unknown = buildCliArgs({ model: "muse-spark-1.3-contributor-free(xhigh)", body: {}, prompt: "hi" });
+    expect(unknown).toContain("--variant");
+    expect(unknown[4]).toBe("opencode/muse-spark-1.3-contributor-free");
   });
 
   it("passes an explicit --title so the CLI skips its title LLM call", () => {
@@ -772,6 +802,18 @@ describe("CLI free-model whitelist", () => {
     expect([...r1]).toEqual(["big-pickle", "nemotron-3.5-lightning-free"]);
   });
 
+  it("asks for the whole listing, because 2.x rejects a positional provider filter", async () => {
+    // Live on opencode 2.0.29: `models opencode` exits 1 with "Unexpected positional
+    // argument", which cost the entire whitelist; `models` exits 0 and prints
+    // "<provider>/<id>" lines, and only opencode/ ids are kept.
+    const pending = listCliFreeModels({ ttlMs: 0 });
+    expect(spawnMock.mock.calls.at(-1)[1]).toEqual(["models"]);
+    const child = children.at(-1);
+    child.stdout.emit("data", Buffer.from("opencode/big-pickle\nanthropic/claude-fable-5\nopencode/step-5-preview-free\n"));
+    child.emit("close", 0);
+    expect([...(await pending)]).toEqual(["big-pickle", "step-5-preview-free"]);
+  });
+
   it("returns null on a non-zero exit (caller falls back to suffix filtering)", async () => {
     const pending = listCliFreeModels({ ttlMs: 0 });
     children.at(-1).emit("close", 1);
@@ -888,7 +930,7 @@ describe("windows cmd.exe shim (prompt via stdin)", () => {
     process.env.OPENCODE_TRANSPORT = "cli";
     // Refresh the cached bin so getCliInfo() resolves the .cmd override rather than
     // a stale absolute .exe path cached by an earlier test (which would skip cmd.exe).
-    await isOpenCodeCliAvailable();
+    await availableWithVersion();
   });
   afterEach(() => {
     Object.defineProperty(process, "platform", platformDesc);
@@ -929,9 +971,30 @@ describe("transport selection", () => {
     expect(await isOpenCodeCliAvailable()).toBe(false);
   });
 
-  it("OPENCODE_TRANSPORT=cli forces it on", async () => {
+  it("OPENCODE_TRANSPORT=cli forces it on, and still learns the version", async () => {
     process.env.OPENCODE_TRANSPORT = "cli";
-    expect(await isOpenCodeCliAvailable()).toBe(true);
+    expect(await availableWithVersion()).toBe(true);
+    // The forced transport skips the health verdict, not the major: 2.x folds the
+    // thinking level into -m, and guessing wrong fails every such turn.
+    expect(getCliInfo().major).toBe(2);
+  });
+});
+
+describe("probed major drives the turn's argv", () => {
+  it("sends a thinking level the installed CLI actually accepts", async () => {
+    await availableWithVersion("opencode v2.0.29");
+    const result = await runOpenCodeCli({
+      model: "muse-spark-1.3-contributor-free(xhigh)",
+      body: { messages: [USER("hi")] },
+      credentials: { connectionId: "conn-v2turn" },
+      providerSessionId: "conv-v2turn",
+    });
+    const args = lastArgs();
+    expect(args[args.indexOf("-m") + 1]).toBe("opencode/muse-spark-1.3-contributor-free#xhigh");
+    expect(args).not.toContain("--variant");
+    children.at(-1).stdout.emit("data", Buffer.from(evt({ type: "text", sessionID: "ses_v2turn", part: { text: "ok" } })));
+    children.at(-1).emit("close", 0);
+    expect(await readAll(result.response)).toContain("[DONE]");
   });
 });
 
@@ -1046,6 +1109,35 @@ describe("CLI failure recovery", () => {
     expect(frame.error.code).toBe("403");
     expect(frame.error.type).toBe("opencode_cli_error");
     expect(frame.error.message).toContain("FreeTierError");
+  });
+
+  it("reads the same failure out of opencode 2.x's flattened error event", async () => {
+    // Captured live from opencode 2.0.29: no `error.data`, the type is `error.type`
+    // and the upstream envelope moved to `error.response.body`. Reading only the 1.x
+    // shape kept the status but silently dropped the one token that says why.
+    const result = await runOpenCodeCli({
+      model: "big-pickle",
+      body: { messages: [USER("hi")] },
+      credentials: { connectionId: "conn-v2" },
+      providerSessionId: "conv-v2",
+    });
+    const child = children.at(-1);
+    child.stdout.emit("data", Buffer.from(evt({
+      type: "error",
+      timestamp: 1792075533234,
+      sessionID: "ses_ebff97614ffeFJUeVDRAp2oeT1",
+      error: {
+        type: "provider.auth",
+        message: "OpenCode's free tier can only be used from within OpenCode. Download it at https://opencode.ai and keep building.",
+        status: 403,
+        response: { body: '{"type":"error","error":{"type":"FreeTierError","message":"OpenCode\'s free tier can only be used from within OpenCode."}}' },
+      },
+    })));
+    child.emit("close", 1);
+    const frame = JSON.parse((await readAll(result.response)).split("\n\n")[0].slice(6));
+    expect(frame.error.status).toBe(403);
+    expect(frame.error.message).toContain("FreeTierError");
+    expect(frame.error.message).toContain("free tier");
   });
 
   it("names the CLI error and log ref when upstream returns an opaque envelope", async () => {

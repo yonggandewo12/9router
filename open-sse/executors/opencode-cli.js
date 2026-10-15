@@ -137,21 +137,31 @@ function spawnVersionProbe(bin) {
     const settle = (value) => { if (!settled) { settled = true; resolve(value); } };
     try {
       child = spawn(bin, spawnArgs(bin, ["--version"]), {
-        stdio: ["ignore", "ignore", "ignore"],
+        stdio: ["ignore", "pipe", "ignore"],
         shell: needsShell(bin),
       });
-    } catch { settle(false); return; }
+    } catch { settle({ ok: false, major: null }); return; }
+    let out = "";
     const timer = setTimeout(() => {
       try { child.kill("SIGKILL"); } catch { /* ignore */ }
-      settle(false);
+      settle({ ok: false, major: null });
     }, OPENCODE_CLI_CONFIG.versionProbeMs);
     if (timer.unref) timer.unref();
-    child.on("error", () => { clearTimeout(timer); settle(false); });
-    child.on("close", (code) => { clearTimeout(timer); settle(code === 0); });
+    child.on("error", () => { clearTimeout(timer); settle({ ok: false, major: null }); });
+    child.stdout.on("data", (chunkData) => { out = (out + chunkData.toString("utf8")).slice(0, 200); });
+    child.on("close", (code) => { clearTimeout(timer); settle({ ok: code === 0, major: parseCliMajor(out) }); });
   });
 }
 
-let availability = null; // { bin, ok, checkedAt }
+// "opencode v2.0.29" and a bare "1.18.32" both reduce to the major, which is what
+// decides the argv shape (2.x dropped --variant). null when unparseable, so the
+// caller falls back to the flag form every probed 1.x build accepted.
+function parseCliMajor(out) {
+  const m = String(out || "").match(/(\d+)\s*\./);
+  return m ? Number(m[1]) : null;
+}
+
+let availability = null; // { bin, ok, checkedAt, major }
 let availabilityProbe = null; // in-flight dedupe: a TTL expiry must not fan out one probe per request
 
 /**
@@ -162,7 +172,13 @@ export async function isOpenCodeCliAvailable({ force = false } = {}) {
   const forced = envFlag("OPENCODE_TRANSPORT");
   if (forced === "http" || forced === "off") return false;
   if (forced === "cli" || forced === "on") {
-    availability = { bin: resolveOpencodeBin(), ok: true, checkedAt: Date.now() };
+    const bin = resolveOpencodeBin();
+    // Forcing the transport skips the health verdict, not the version: 1.x and 2.x
+    // take the thinking level differently, and guessing wrong fails every such turn.
+    const major = availability?.bin === bin && availability.major != null
+      ? availability.major
+      : (await spawnVersionProbe(bin)).major;
+    availability = { bin, ok: true, checkedAt: Date.now(), major };
     return true;
   }
   if (!force && availability && Date.now() - availability.checkedAt < OPENCODE_CLI_CONFIG.availabilityTtlMs) {
@@ -172,8 +188,8 @@ export async function isOpenCodeCliAvailable({ force = false } = {}) {
   availabilityProbe = (async () => {
     try {
       const bin = resolveOpencodeBin();
-      const ok = await spawnVersionProbe(bin);
-      availability = { bin, ok, checkedAt: Date.now() };
+      const { ok, major } = await spawnVersionProbe(bin);
+      availability = { bin, ok, checkedAt: Date.now(), major };
       return ok;
     } finally {
       availabilityProbe = null;
@@ -183,7 +199,7 @@ export async function isOpenCodeCliAvailable({ force = false } = {}) {
 }
 
 export function getCliInfo() {
-  return { bin: availability?.bin || resolveOpencodeBin(), ok: availability?.ok ?? null };
+  return { bin: availability?.bin || resolveOpencodeBin(), ok: availability?.ok ?? null, major: availability?.major ?? null };
 }
 
 // The child must egress through the same proxy the HTTP transport would use:
@@ -262,7 +278,11 @@ function spawnModelsListing(bin) {
     let child;
     const settle = (value) => { if (!settled) { settled = true; resolve(value); } };
     try {
-      child = spawn(bin, spawnArgs(bin, ["models", "opencode"]), {
+      // No positional provider filter: opencode 2.0.29 rejects it ("Unexpected
+      // positional argument", exit 1), which cost the whole whitelist. The listing is
+      // "<provider>/<id>" per line and only opencode/ ids are kept below, so asking
+      // for everything and filtering here works on 1.x and 2.x alike.
+      child = spawn(bin, spawnArgs(bin, ["models"]), {
         stdio: ["ignore", "pipe", "ignore"],
         shell: needsShell(bin),
       });
@@ -809,10 +829,14 @@ export function sessionTitle(turns) {
   return Array.from(flat).slice(0, 60).join("");
 }
 
-export function buildCliArgs({ model, body, sid, prompt, files, title }) {
+export function buildCliArgs({ model, body, sid, prompt, files, title, cliMajor = null }) {
   const { base, variant } = resolveVariant(model, body);
-  const args = ["run", "--format", "json", "-m", `${CLI_PROVIDER_PREFIX}${base}`];
-  if (variant) args.push("--variant", variant);
+  // 2.x dropped --variant ("Unrecognized flag", exit 1, help dumped to stdout —
+  // live-verified on 2.0.29) and takes the level inside the model id instead:
+  // "provider/model#variant". An unprobed major keeps the flag every 1.x accepted.
+  const foldsVariant = variant && cliMajor >= 2;
+  const args = ["run", "--format", "json", "-m", `${CLI_PROVIDER_PREFIX}${base}${foldsVariant ? `#${variant}` : ""}`];
+  if (variant && !foldsVariant) args.push("--variant", variant);
   // A fresh `run` otherwise spends an extra LLM call minting a session title;
   // supplying one skips it (verified: agent=title calls 1 → 0 per turn).
   if (title) args.push("--title", title);
@@ -864,15 +888,23 @@ function errorFrame({ message, code, status } = {}) {
 }
 
 function describeErrorEvent(evt) {
-  const data = evt?.error?.data || evt?.error || {};
-  const name = String(evt?.error?.name || data.name || "");
-  const raw = data.message || evt?.error?.message || name || "OpenCode CLI reported an error";
+  const err = evt?.error || {};
+  // 1.x nests the upstream detail under `error.data` (`name`, `responseBody`,
+  // `statusCode`); 2.x flattens it onto `error` itself and renames the fields
+  // (`type`, `response.body`, `status`) — live-captured on 2.0.29:
+  //   {"type":"error","sessionID":"ses_…","error":{"type":"provider.auth",
+  //    "message":"…free tier…","status":403,"response":{"body":"{\"type\":\"error\",
+  //    \"error\":{\"type\":\"FreeTierError\",…}}"}}}
+  const data = err.data || err;
+  const name = String(err.name || err.type || data.name || data.type || "");
+  const raw = data.message || err.message || name || "OpenCode CLI reported an error";
   // A bare "Unexpected server error. Check server logs for details." tells the caller
   // nothing (that is what a retired model id returns). The upstream envelope carries
   // the discriminating tokens: the parsed error type (FreeTierError / RegionError /
   // FreeUsageLimitError), else the CLI error name, plus its log ref.
   let upstreamType = "";
-  try { upstreamType = String(JSON.parse(data.responseBody)?.error?.type || ""); } catch { /* not a JSON envelope */ }
+  const envelope = data.responseBody ?? data.response?.body;
+  try { upstreamType = String(JSON.parse(envelope)?.error?.type || ""); } catch { /* not a JSON envelope */ }
   const clues = [upstreamType || (name && name !== raw ? name : ""), data.ref && `ref ${data.ref}`]
     .filter(Boolean)
     .join(", ");
@@ -881,7 +913,7 @@ function describeErrorEvent(evt) {
   const suffix = clues ? ` [${clues}]` : "";
   return {
     message: `${String(raw).slice(0, Math.max(0, ERROR_MESSAGE_MAX - suffix.length))}${suffix}`,
-    status: Number(data.statusCode || data.status) || null,
+    status: Number(data.statusCode ?? data.status) || null,
   };
 }
 
@@ -893,7 +925,8 @@ function describeErrorEvent(evt) {
  */
 export function runOpenCodeCli({ model, body, credentials, providerSessionId, signal, log, proxyOptions }) {
   const dir = ensureCliWorkspace();
-  const bin = getCliInfo().bin;
+  const cliInfo = getCliInfo();
+  const bin = cliInfo.bin;
   // cmd.exe (the only way to run a bare name or a .cmd/.bat shim on Windows) parses
   // its command line one line at a time, so a multi-line prompt in argv — which every
   // real request is, since the rendered prompt joins labels and turns with newlines —
@@ -935,6 +968,7 @@ export function runOpenCodeCli({ model, body, credentials, providerSessionId, si
       prompt: useStdin ? null : plan.prompt,
       files: attachments,
       title: cliTitle,
+      cliMajor: cliInfo.major,
     });
     log?.info?.("OPENCODE", `CLI ${plan.sid ? "continue" : "new"} session model=${model} key=${key.slice(0, 56)} turns=${plan.replayed} images=${attachments.length} prompt=${Buffer.byteLength(plan.prompt)}B via=${useStdin ? "stdin" : "argv"}`);
     const turn = startTurn({ bin, args, dir, key, plan, turns, model, signal, log, attachments, proxyOptions, stdinPrompt: useStdin ? plan.prompt : null });
