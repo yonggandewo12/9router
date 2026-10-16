@@ -47,6 +47,12 @@ const PATTERN_THINKING = [
   { provider: "codex", pattern: "*gpt-5.6-terra*", levels: [...CODEX_GPT_5_6_LEVELS, "ultra"] },
   { provider: "codex", pattern: "*gpt-5.6-luna*", levels: CODEX_GPT_5_6_LEVELS },
   { pattern: "*codex*", levels: ["low", "medium", "high", "xhigh"] }, // codex cannot disable thinking
+  // The free lane refuses every effort on this one: `opencode run` answered
+  // "Variant unavailable for opencode/mimo-v2.6-flash-free: high
+  // [provider.no-route]" (live, 2026-10-16, production log). The unqualified
+  // `*mimo*v2.6*` entry below was probed on other lanes, and PATTERN_THINKING is
+  // first-match-wins, so this provider-qualified row has to come first.
+  { provider: "opencode", pattern: "*mimo*v2.6*", levels: ["none"] },
   { pattern: "*mimo*v2.6*", levels: ["none", "low", "medium", "high", "xhigh"] },
   // mimo-v2.5-pro on opencode-go rejects reasoning_effort "max" (probed live); v2.5 accepts it.
   { pattern: "*mimo*v2.5-pro*", levels: ["none", "low", "medium", "high", "xhigh"] },

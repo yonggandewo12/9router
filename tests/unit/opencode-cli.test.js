@@ -37,6 +37,7 @@ import { translateRequest } from "../../open-sse/translator/index.js";
 import "../translator/registerAll.js";
 import { FORMATS } from "../../open-sse/translator/formats.js";
 import { resolveSessionId } from "../../open-sse/utils/sessionManager.js";
+import { getThinkingLevels } from "../../open-sse/providers/thinkingLevels.js";
 
 class FakeChild extends EventEmitter {
   constructor() {
@@ -298,6 +299,24 @@ describe("buildCliArgs", () => {
     // "none"/"auto" never become variants.
     const off = buildCliArgs({ model: "muse-spark-1.3-contributor-free(none)", body: {}, sid: null, prompt: "p" });
     expect(off).not.toContain("--variant");
+  });
+
+  it("drops the variant for opencode-free mimo — upstream answers provider.no-route", () => {
+    // Live production failure on 2026-10-16: a client asked oc/mimo-v2.6-flash-free
+    // with effort=high and the CLI refused the whole turn:
+    // "Variant unavailable for opencode/mimo-v2.6-flash-free: high [provider.no-route]".
+    // The lane's declared levels must therefore select nothing, on both the 1.x flag
+    // and the 2.x `model#variant` spelling.
+    for (const cliMajor of [1, 2]) {
+      const args = buildCliArgs({ model: "mimo-v2.6-flash-free", body: { reasoning_effort: "high" }, sid: null, prompt: "p", cliMajor });
+      expect(args).not.toContain("--variant");
+      expect(args[4]).toBe("opencode/mimo-v2.6-flash-free");
+    }
+    // Nothing selectable is left: "none" is the only entry and the caps strip it for
+    // a model that cannot disable thinking, so the picker offers no effort at all.
+    expect(getThinkingLevels("opencode", "mimo-v2.6-flash-free").filter((l) => l !== "none")).toEqual([]);
+    // The other lanes were probed separately — the fix is lane-scoped, not global.
+    expect(getThinkingLevels("opencode-go", "mimo-v2.6-flash-free")).toContain("high");
   });
 
   it("reads the effort from the Responses-style reasoning object too", () => {
@@ -898,6 +917,31 @@ describe("startup idle vs. silent generation", () => {
     expect(sse).toContain("the answer");
     expect(sse).toContain("[DONE]");
     expect(sse).not.toContain("produced no output");
+  });
+
+  it("beats an SSE comment through the silent generation window", async () => {
+    // A batch turn emits nothing until a part completes, so the client sits on an idle
+    // SSE response. Comment lines say "still working" without being content: clients
+    // per the SSE spec ignore them, stream.js drops them in translate mode, and the
+    // SSE→JSON aggregators only read `data:` lines.
+    const result = await runOpenCodeCli({
+      model: "muse-spark-1.3-contributor-free",
+      body: { messages: [USER("a long question")] },
+      credentials: { connectionId: "conn-beat" },
+      providerSessionId: "conv-beat",
+    });
+    const child = children.at(-1);
+    const drained = readAll(result.response);
+    child.stdout.emit("data", Buffer.from(evt({ type: "step_start", sessionID: "ses_beat" })));
+    await vi.advanceTimersByTimeAsync(OPENCODE_CLI_CONFIG.heartbeatMs * 2 + 200);
+    child.stdout.emit("data", Buffer.from(evt({ type: "text", part: { text: "the late answer" } })));
+    child.emit("close", 0);
+    const sse = await drained;
+    const beats = (sse.match(/^: opencode is generating$/gm) || []).length;
+    expect(beats).toBeGreaterThanOrEqual(2);
+    expect(sse.indexOf(": opencode is generating")).toBeLessThan(sse.indexOf("the late answer"));
+    expect(sse).toContain("[DONE]");
+    expect(sse).toContain("the late answer");
   });
 
   it("hard-stops a turn that exceeds the total ceiling", async () => {

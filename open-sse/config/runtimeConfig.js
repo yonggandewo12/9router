@@ -83,12 +83,16 @@ export const UPSTREAM_KEEPALIVE_MAX_MS = envMs("UPSTREAM_KEEPALIVE_MAX_MS", 600 
 // STARTUP grace (spawn → first byte, normally step_start), not an inter-chunk stall
 // timeout, and totalMs is the only ceiling on a long/reasoning turn. totalMs stays
 // under chatCore's STREAM_STALL_TIMEOUT_MS (360s) so the CLI's own timeout surfaces first.
+// heartbeatMs is how often the SSE stream says "still working" while the CLI is silent
+// (an SSE comment, ignored by spec-compliant clients) so proxies and clients do not
+// read a batch turn as a hung connection. 0 disables it.
 export const OPENCODE_CLI_CONFIG = {
   idleMs: envMs("OPENCODE_CLI_IDLE_TIMEOUT_MS", 180 * 1000),
   totalMs: envMs("OPENCODE_CLI_TOTAL_TIMEOUT_MS", 5 * 60 * 1000),
   versionProbeMs: envMs("OPENCODE_CLI_PROBE_TIMEOUT_MS", 8 * 1000),
   killGraceMs: envMs("OPENCODE_CLI_KILL_GRACE_MS", 2 * 1000),
   availabilityTtlMs: envMs("OPENCODE_CLI_PROBE_TTL_MS", 10 * 60 * 1000),
+  heartbeatMs: envMs("OPENCODE_CLI_HEARTBEAT_MS", 15 * 1000),
 };
 
 // Ceiling for the pre-first-frame SSE peek that looks for provider error

@@ -1042,6 +1042,8 @@ function startTurn({ bin, args, dir, key, plan, turns, model, signal, log, attac
   const stream = buildStream((emit, close) => {
     let stderrTail = "";
     let strayOut = ""; // non-JSON stdout: a broken CLI reports plain text here
+    // Declared up here: finish() runs on paths (early abort) that predate the spawn.
+    let beatTimer = null;
     const chunk = (delta, finishReason = null, usage) => {
       const body = {
         id: responseId,
@@ -1078,6 +1080,7 @@ function startTurn({ bin, args, dir, key, plan, turns, model, signal, log, attac
       recordSession({ key, turns, sid: state.sid, replyText: error ? null : state.reply, systemHash: plan.systemHash, error });
       removeAttachments(attachments);
       clearTimeout(releaseCeiling);
+      if (beatTimer) clearInterval(beatTimer);
       close();
       settleTurn();
     };
@@ -1149,6 +1152,16 @@ function startTurn({ bin, args, dir, key, plan, turns, model, signal, log, attac
       if (hard.unref) hard.unref();
     };
     killChild = kill;
+
+    // A batch turn keeps stdout silent until a part completes, so the client is left
+    // staring at an idle SSE response. An SSE comment every heartbeatMs says "still
+    // generating": spec-compliant clients ignore comment lines, stream.js drops them
+    // in translate mode, and the SSE→JSON aggregators only read `data:` lines — so it
+    // can never be mistaken for content, and it stops proxies timing the stream out.
+    if (OPENCODE_CLI_CONFIG.heartbeatMs > 0) {
+      beatTimer = setInterval(() => { if (!state.done) emit(": opencode is generating\n\n"); }, OPENCODE_CLI_CONFIG.heartbeatMs);
+      if (beatTimer.unref) beatTimer.unref();
+    }
 
     child.on("error", (err) => {
       const notFound = String(err?.message || "").includes("ENOENT");

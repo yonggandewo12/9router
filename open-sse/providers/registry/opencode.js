@@ -17,6 +17,13 @@ export default {
     headers: {
       "x-opencode-client": "desktop",
     },
+    // forceStream: the zen endpoints refuse stream:false. Read this together with the
+    // latency: on a host that has the `opencode` binary the turn is served by the CLI
+    // subprocess transport, and `opencode run --format json` only emits a text part
+    // once that part completes (upstream run.ts gates on `part.time.end`), so the
+    // answer arrives in one piece — first byte ≈ total wall time. That is the CLI's
+    // output granularity, not buffering on our side; the transport beats an SSE comment
+    // every OPENCODE_CLI_HEARTBEAT_MS so clients and proxies see liveness.
     forceStream: true,
     noAuth: true,
     quirks: {

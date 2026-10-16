@@ -16,6 +16,9 @@ vi.mock("@/lib/usageDb.js", () => ({
 const { createSSEStream } = await import("open-sse/utils/stream.js");
 const { buildOnStreamComplete } = await import("open-sse/handlers/chatCore/streamingHandler.js");
 const { saveRequestDetail, saveRequestUsage } = await import("@/lib/usageDb.js");
+// Translators self-register on import; without this a translate-mode stream yields
+// nothing at all and the content assertions below would pass vacuously.
+await import("../translator/registerAll.js");
 
 const encoder = new TextEncoder();
 
@@ -65,6 +68,55 @@ const content = (t) => `data: ${JSON.stringify({
   id: "chatcmpl-abcdef0123456", object: "chat.completion.chunk",
   choices: [{ index: 0, delta: { content: t }, finish_reason: null }],
 })}`;
+
+describe("SSE comment frames (the CLI batch heartbeat)", () => {
+  it("forwards a comment verbatim without counting it as content", async () => {
+    const { completed, clientSaw } = await passthrough([
+      ": opencode is generating",
+      content("real"),
+      ": opencode is generating",
+    ]);
+    expect(clientSaw.split(": opencode is generating").length - 1).toBe(2);
+    expect(completed.payload.content).toBe("real");
+    expect(completed.meta.streamError).toBeFalsy();
+  });
+
+  it("drops a comment in translate mode and keeps the translated stream clean", async () => {
+    const stream = createSSEStream({
+      mode: "translate",
+      targetFormat: "openai", // provider wire format
+      sourceFormat: "claude", // client wire format
+      provider: "opencode",
+      model: "big-pickle",
+      body: { model: "big-pickle", messages: [] },
+    });
+    const { drain, text } = attachReader(stream);
+    const writer = stream.writable.getWriter();
+    await writer.write(encoder.encode(": opencode is generating\n\n"));
+    await writer.write(encoder.encode(`${content("hello")}\n\n`));
+    await writer.write(encoder.encode("data: [DONE]\n\n"));
+    await writer.close();
+    await drain;
+    const out = text();
+    expect(out).not.toContain("opencode is generating");
+    expect(out).toContain("hello");
+    expect(out).toContain("event: content_block_delta");
+  });
+
+  it("is ignored by the SSE→JSON aggregator used for non-stream clients", async () => {
+    const { parseSSEToOpenAIResponse } = await import("open-sse/handlers/chatCore/sseToJsonHandler.js");
+    const raw = [
+      ": opencode is generating",
+      `data: ${JSON.stringify({ id: "chatcmpl-abcdef0123456", choices: [{ index: 0, delta: { role: "assistant", content: "" } }] })}`,
+      `data: ${JSON.stringify({ id: "chatcmpl-abcdef0123456", choices: [{ index: 0, delta: { content: "answer" }, finish_reason: "stop" }] })}`,
+      ": opencode is generating",
+      "data: [DONE]",
+    ].join("\n\n");
+    const parsed = parseSSEToOpenAIResponse(raw, "big-pickle");
+    expect(parsed.error).toBeUndefined();
+    expect(parsed.choices[0].message.content).toBe("answer");
+  });
+});
 
 describe("in-band stream error detection", () => {
   it("records the message and the upstream status instead of a success", async () => {
@@ -116,8 +168,10 @@ describe("in-band stream error detection", () => {
     const completed = [];
     const stream = createSSEStream({
       mode: "translate",
-      targetFormat: "claude",
-      sourceFormat: "openai",
+      // createSSEStream names these from the REQUEST point of view: targetFormat is
+      // what the provider speaks, sourceFormat what the client asked for.
+      targetFormat: "openai",
+      sourceFormat: "claude",
       provider: "opencode",
       model: "big-pickle",
       body: { model: "big-pickle", messages: [] },
