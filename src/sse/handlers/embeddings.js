@@ -14,6 +14,7 @@ import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
 import * as log from "../utils/logger.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
 import { saveRequestUsage } from "@/lib/usageDb.js";
+import { saveFailureUsage } from "open-sse/handlers/chatCore/requestDetail.js";
 
 function exactEmbeddingUsage(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw) || raw.estimated === true) return null;
@@ -149,11 +150,23 @@ export async function handleEmbeddings(request) {
           apiKey,
           endpoint: url.pathname,
           tokens: usage,
-          status: "success",
+          status: "ok",
         }).catch(() => {});
       }
       return result.response;
     }
+
+    // One row per attempted account, like the chat lane: chatCore files the
+    // upstream failure before its caller decides whether to fall back, so a
+    // failed embedding turn that never produced a usage row is still visible.
+    saveFailureUsage({
+      provider,
+      model,
+      connectionId: credentials.connectionId,
+      apiKey,
+      endpoint: url.pathname,
+      status: result.status,
+    });
 
     const { shouldFallback } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model);
 

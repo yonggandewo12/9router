@@ -100,7 +100,7 @@ describe("Codex image usage persistence", () => {
         cached_tokens: 111,
         reasoning_tokens: 22,
       },
-      status: "success",
+      status: "ok",
     });
   });
 

@@ -14,6 +14,7 @@ import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
 import * as log from "../utils/logger.js";
 import { checkAndRefreshToken } from "../services/tokenRefresh.js";
 import { saveRequestUsage } from "@/lib/usageDb.js";
+import { saveFailureUsage } from "open-sse/handlers/chatCore/requestDetail.js";
 
 /**
  * Handle System One (Jev) decision requests for the Next.js server.
@@ -136,11 +137,23 @@ export async function handleSystemone(request) {
             ...result.usage,
             total_tokens: result.usage.prompt_tokens + result.usage.completion_tokens,
           },
-          status: "success",
+          status: "ok",
         }).catch(() => {});
       }
       return result.response;
     }
+
+    // One row per attempted account, like the chat lane: a decision turn that
+    // failed upstream produced no usage, and usageHistory is the only record
+    // surface that is always on.
+    saveFailureUsage({
+      provider,
+      model,
+      connectionId: credentials.connectionId,
+      apiKey,
+      endpoint: url.pathname,
+      status: result.status,
+    });
 
     const { shouldFallback } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model);
 

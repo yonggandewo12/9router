@@ -1,4 +1,4 @@
-import { saveRequestUsage, appendRequestLog, saveRequestDetail } from "@/lib/usageDb.js";
+import { saveRequestUsage, saveRequestDetail } from "@/lib/usageDb.js";
 import { COLORS } from "../../utils/stream.js";
 import { canonicalizeUsage } from "../../utils/usageTracking.js";
 import { HTTP_STATUS } from "../../config/runtimeConfig.js";
@@ -157,18 +157,16 @@ export function saveUsageStats({ provider, model, tokens, connectionId, apiKey, 
     connectionId: connectionId || undefined,
     apiKey: apiKey || undefined,
     endpoint: endpoint || null,
-    // The usage row is what the recent-logs line and the Usage panel's dot read
-    // (appendRequestLog is a no-op since the SQLite migration), so a turn that
-    // failed in-band has to say so here or it is filed as "ok" everywhere.
+    // This row is what the recent-logs line and the Usage panel's dot read, so a
+    // turn that failed in-band has to say so here or it is filed as "ok" everywhere.
     status: status || undefined
   }).catch(() => {});
 }
 
-// A failed upstream attempt spent no tokens, and every other record of it is
-// conditional: appendRequestLog is a no-op stub and saveRequestDetail returns
-// early when observability is off. usageHistory is the one surface that is always
-// on — the recent-logs line and the Usage panel's dot both read it — so failures
-// have to be filed here or they never appear anywhere.
+// A failed upstream attempt spent no tokens, and the other record of it is
+// conditional: saveRequestDetail returns early when observability is off. usageHistory
+// is the one surface that is always on — the recent-logs line and the Usage panel's
+// dot both read it — so failures have to be filed here or they never appear anywhere.
 export function saveFailureUsage({ provider, model, connectionId, apiKey, endpoint, status }) {
   // 499 is our own "the client hung up" marker. A cancelled turn is not a provider
   // failure, and the streaming path already keeps it out of the failure column —
@@ -176,6 +174,6 @@ export function saveFailureUsage({ provider, model, connectionId, apiKey, endpoi
   if (Number(status) === HTTP_STATUS.CLIENT_CLOSED_REQUEST) return;
   saveUsageStats({
     provider, model, tokens: null, connectionId, apiKey, endpoint,
-    silent: true, status: `FAILED ${status}`
+    silent: true, status: `FAILED ${status || HTTP_STATUS.BAD_GATEWAY}`
   });
 }

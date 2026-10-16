@@ -15,6 +15,7 @@ import { updateProviderCredentials, checkAndRefreshToken } from "../services/tok
 import { handleComboChat } from "open-sse/services/combo.js";
 import * as log from "../utils/logger.js";
 import { saveRequestUsage } from "@/lib/usageDb.js";
+import { saveFailureUsage } from "open-sse/handlers/chatCore/requestDetail.js";
 
 // Providers that don't require credentials (noAuth)
 const NO_AUTH_PROVIDERS = new Set(["sdwebui", "comfyui"]);
@@ -35,7 +36,7 @@ function recordImageRequestUsage({ provider, model, connectionId, apiKey, endpoi
     apiKey: apiKey || undefined,
     endpoint: endpoint || null,
     tokens: usage,
-    status: "success",
+    status: "ok",
   }).catch(() => {});
 }
 
@@ -108,6 +109,9 @@ async function handleSingleModelImage(body, modelStr, { wantsStream, binaryOutpu
       binaryOutput,
     });
     if (result.success) return result.response;
+    // A local server (sdwebui/comfyui) that refused the job would otherwise appear
+    // in no log at all: usageHistory is the only record surface always on.
+    saveFailureUsage({ provider, model, apiKey, endpoint, status: result.status });
     return errorResponse(result.status || HTTP_STATUS.BAD_GATEWAY, result.error || "Image generation failed");
   }
 
@@ -163,6 +167,17 @@ async function handleSingleModelImage(body, modelStr, { wantsStream, binaryOutpu
     });
 
     if (result.success) return result.response;
+
+    // One row per attempted account, like the chat lane — a generation that
+    // failed before producing anything wrote no usage row at all.
+    saveFailureUsage({
+      provider,
+      model,
+      connectionId: credentials.connectionId,
+      apiKey,
+      endpoint,
+      status: result.status,
+    });
 
     const { shouldFallback } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model);
 
