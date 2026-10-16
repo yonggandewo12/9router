@@ -583,6 +583,14 @@ async function testOpencodeCliTurn(proxyOptions = null) {
         if (timer.unref) timer.unref();
       }),
     ]);
+    // A failure that lands before any content now comes back as a real status with a
+    // JSON body (that is what lets the combo fall back); a mid-stream failure is still
+    // an in-band frame on a 200 SSE body.
+    if (!response.ok) {
+      let msg = `HTTP ${response.status}`;
+      try { msg = JSON.parse(sse)?.error?.message || msg; } catch { /* non-JSON body */ }
+      return { valid: false, error: `OpenCode CLI: ${msg}` };
+    }
     const errorMatch = sse.match(/"error":\{"message":"([^"]+)"/);
     if (errorMatch) return { valid: false, error: `OpenCode CLI: ${errorMatch[1]}` };
     if (!sse.includes("data: [DONE]")) return { valid: false, error: "OpenCode CLI returned no reply" };

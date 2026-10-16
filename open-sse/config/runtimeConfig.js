@@ -93,6 +93,14 @@ export const OPENCODE_CLI_CONFIG = {
   killGraceMs: envMs("OPENCODE_CLI_KILL_GRACE_MS", 2 * 1000),
   availabilityTtlMs: envMs("OPENCODE_CLI_PROBE_TTL_MS", 10 * 60 * 1000),
   heartbeatMs: envMs("OPENCODE_CLI_HEARTBEAT_MS", 15 * 1000),
+  // How long to hold the (already-committed-to-200) response before the turn's first
+  // frame decides. The free-tier gate answers in 1.2–1.5s (live-measured), so a short
+  // peek turns a rejection into a real 4xx that the combo can fall back on and the
+  // ledger can record, instead of an HTTP 200 carrying an error frame. Successful
+  // turns are unaffected in substance: their first frame is the completed part, which
+  // arrives later than this window anyway, so the answer still streams out at the same
+  // time — only the response headers move back by peekMs. 0 disables the peek.
+  peekMs: envMs("OPENCODE_CLI_PEEK_MS", 2500),
 };
 
 // Ceiling for the pre-first-frame SSE peek that looks for provider error

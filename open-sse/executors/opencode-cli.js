@@ -972,6 +972,18 @@ export function runOpenCodeCli({ model, body, credentials, providerSessionId, si
     });
     log?.info?.("OPENCODE", `CLI ${plan.sid ? "continue" : "new"} session model=${model} key=${key.slice(0, 56)} turns=${plan.replayed} images=${attachments.length} prompt=${Buffer.byteLength(plan.prompt)}B via=${useStdin ? "stdin" : "argv"}`);
     const turn = startTurn({ bin, args, dir, key, plan, turns, model, signal, log, attachments, proxyOptions, stdinPrompt: useStdin ? plan.prompt : null });
+    // Hold the response just long enough to learn whether the turn died before any
+    // content. A 200 carrying an error frame is a success to combo.js (`result.ok`) and
+    // writes no usage row (`saveUsageStats` skips 0/0), so a gated turn used to be both
+    // invisible in the ledger and fatal to the caller's fallback chain.
+    const failure = OPENCODE_CLI_CONFIG.peekMs > 0 ? await turn.peeked : null;
+    if (failure) {
+      // Let the child exit before handing back: the queue has no `release` to hold on
+      // to once this task returns a plain result.
+      await turn.settled;
+      log?.warn?.("OPENCODE", `CLI failed before any output (${failure.status || failure.code || "?"}): ${String(failure.message).slice(0, 200)}`);
+      return emptyResult(failure.message, Number(failure.status) || 502, failure.code || "cli_failed");
+    }
     return { result: turn.response, release: turn.settled };
   });
 }
@@ -1039,6 +1051,17 @@ function startTurn({ bin, args, dir, key, plan, turns, model, signal, log, attac
   const releaseCeiling = setTimeout(() => { killChild(); settleTurn(); }, OPENCODE_CLI_CONFIG.totalMs + OPENCODE_CLI_CONFIG.killGraceMs + 5000);
   if (releaseCeiling.unref) releaseCeiling.unref();
 
+  // Resolved with the failure object when the turn's FIRST frame is an in-band error
+  // (nothing has been streamed to the client yet, so an HTTP status can still be
+  // chosen), or with null to mean "commit the 200 stream". The peekMs timer commits on
+  // its own so a slow-but-healthy turn never waits on it.
+  let settlePeek = () => {};
+  const peeked = new Promise((resolve) => { settlePeek = resolve; });
+  let peekSettled = false;
+  const peek = (failure) => { if (!peekSettled) { peekSettled = true; settlePeek(failure || null); } };
+  const peekTimer = OPENCODE_CLI_CONFIG.peekMs > 0 ? setTimeout(() => peek(null), OPENCODE_CLI_CONFIG.peekMs) : null;
+  if (peekTimer?.unref) peekTimer.unref();
+
   const stream = buildStream((emit, close) => {
     let stderrTail = "";
     let strayOut = ""; // non-JSON stdout: a broken CLI reports plain text here
@@ -1053,6 +1076,7 @@ function startTurn({ bin, args, dir, key, plan, turns, model, signal, log, attac
         choices: [{ index: 0, delta, logprobs: null, finish_reason: finishReason }],
       };
       if (usage) body.usage = usage;
+      peek(null); // real content: the 200 is now committed either way
       emit(`data: ${JSON.stringify(body)}\n\n`);
     };
     const delta = (text) => {
@@ -1064,14 +1088,22 @@ function startTurn({ bin, args, dir, key, plan, turns, model, signal, log, attac
       state.done = true;
       clearTimeout(totalTimer);
       clearTimeout(idleTimer);
+      if (peekTimer) clearTimeout(peekTimer);
       if (signal) signal.removeEventListener("abort", onAbort);
       if (error) {
+        // Nothing streamed yet → this failure can still become a real status, which is
+        // what combo fallback and the ledger key on. A client hang-up is NOT such a
+        // failure: chatCore already reports 499 through the stream path, and turning it
+        // into a non-2xx here would file the caller's own abort as a provider error.
+        if (!state.roleSent) peek(error.code === "aborted" ? null : error);
         emit(errorFrame({ message: error.message, code: error.code ?? error.status, status: error.status }));
       } else if (!state.reply.trim()) {
         // The CLI can exit 0 without any assistant text when upstream drops the
         // request — that is a failure, not an empty-but-successful reply.
         const detail = (stderrTail.trim() || strayOut.trim()).slice(0, 300);
-        emit(errorFrame({ message: `OpenCode CLI returned no assistant text${detail ? `: ${detail}` : ""}`, code: "empty_reply" }));
+        const empty = { message: `OpenCode CLI returned no assistant text${detail ? `: ${detail}` : ""}`, code: "empty_reply" };
+        if (!state.roleSent) peek(empty);
+        emit(errorFrame({ message: empty.message, code: "empty_reply" }));
       } else {
         if (!state.roleSent) chunk({ role: "assistant", content: "" });
         chunk({}, finishReason, state.usage || undefined);
@@ -1262,6 +1294,7 @@ function startTurn({ bin, args, dir, key, plan, turns, model, signal, log, attac
 
   return {
     settled,
+    peeked,
     response: jsonResponse(stream, 200, {
       transformedBody: {
         transport: "opencode-cli",

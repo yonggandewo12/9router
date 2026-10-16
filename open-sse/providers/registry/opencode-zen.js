@@ -116,7 +116,10 @@ export default {
     { id: "muse-spark-1.2-contributor-free", name: "Muse Spark 1.2 Contributor Free", targetFormat: "openai-responses", supportedFormats: ["openai-responses"] },
     // System One (Jev) decision models on the native /systemone endpoint
     { id: "jev-1.13", name: "Jev 1.13", kind: "systemone" },
-    { id: "jev-1.13-free", name: "Jev 1.13 Free", kind: "systemone" },
+    // jev-1.13-free retired (2026-10-16): that endpoint answers 451 "Upstream request
+    // failed: Endpoint is unavailable" — reproduced live and already recorded by this
+    // repo's own failure row (`jev-1.13-free | OPENCODE-ZEN | FAILED 451`). The paid
+    // jev-1.13 above is unaffected (same URL answers 401 AuthError without a key).
   ],
   serviceKinds: ["llm", "systemone"],
   systemoneConfig: {

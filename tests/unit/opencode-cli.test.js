@@ -62,6 +62,9 @@ beforeEach(() => {
     return child;
   });
   process.env.OPENCODE_TRANSPORT = "cli";
+  // These cases drive the stream by hand (emit after the await), so they must not sit
+  // through the real 2.5s peek. The peek itself has its own describe below.
+  OPENCODE_CLI_CONFIG.peekMs = 0;
 });
 
 function countFiles(args) {
@@ -1281,6 +1284,80 @@ describe("CLI failure recovery", () => {
     expect(frame.error.status).toBe(499);
     expect(frame.error.code).toBe("aborted");
     expect(children.at(-1).killed).toBe(true);
+  });
+});
+
+describe("first-frame peek (a pre-content failure must become a real status)", () => {
+  async function ticks(n = 4) {
+    for (let i = 0; i < n; i++) await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  it("returns 403 JSON so the combo can fall back instead of seeing a 200", async () => {
+    // combo.js decides on result.ok and saveUsageStats skips 0/0, so a 200 carrying an
+    // error frame was simultaneously "succeeded" to the fallback chain and invisible in
+    // the ledger. The gate answers in 1.2–1.5s (live-measured), well inside the peek.
+    OPENCODE_CLI_CONFIG.peekMs = 5000;
+    const pending = runOpenCodeCli({
+      model: "big-pickle",
+      body: { messages: [USER("hi")] },
+      credentials: { connectionId: "conn-peek" },
+      providerSessionId: "conv-peek",
+    });
+    await ticks();
+    const child = children.at(-1);
+    child.stdout.emit("data", Buffer.from(evt({
+      type: "error",
+      error: { name: "APIError", data: { message: "OpenCode's free tier can only be used from within OpenCode", statusCode: 403 } },
+    })));
+    child.emit("close", 1);
+    const result = await pending;
+    expect(result.response.status).toBe(403);
+    expect(result.response.headers.get("content-type")).toContain("application/json");
+    const body = await result.response.json();
+    expect(body.error.message).toContain("free tier");
+    expect(body.error.status).toBe(403);
+  });
+
+  it("commits the stream the moment content arrives, without waiting out the peek", async () => {
+    // The peek must not add latency to healthy turns: the first content frame settles it.
+    OPENCODE_CLI_CONFIG.peekMs = 30000;
+    const pending = runOpenCodeCli({
+      model: "big-pickle",
+      body: { messages: [USER("hi")] },
+      credentials: { connectionId: "conn-peek-ok" },
+      providerSessionId: "conv-peek-ok",
+    });
+    await ticks();
+    const child = children.at(-1);
+    child.stdout.emit("data", Buffer.from(evt({ type: "text", sessionID: "ses_peek_ok", part: { text: "partial" } })));
+    const result = await pending;
+    expect(result.response.status).toBe(200);
+    expect(result.response.headers.get("content-type")).toContain("text/event-stream");
+    child.emit("close", 0);
+    const sse = await result.response.text();
+    expect(sse).toContain("partial");
+    expect(sse).toContain("[DONE]");
+  });
+
+  it("leaves a client abort on the stream path, not a provider-error status", async () => {
+    // 499 must not be converted: chatCore would then file the caller's own hang-up as a
+    // provider failure (error badge, "error" detail row) instead of an abort.
+    OPENCODE_CLI_CONFIG.peekMs = 30000;
+    const controller = new AbortController();
+    const pending = runOpenCodeCli({
+      model: "big-pickle",
+      body: { messages: [USER("hi")] },
+      credentials: { connectionId: "conn-peek-abort" },
+      providerSessionId: "conv-peek-abort",
+      signal: controller.signal,
+    });
+    await ticks();
+    controller.abort(new Error("client closed"));
+    const result = await pending;
+    expect(result.response.status).toBe(200);
+    const sse = await result.response.text();
+    expect(sse).toContain("Aborted by client");
+    expect(sse).toContain('"code":"aborted"');
   });
 });
 
