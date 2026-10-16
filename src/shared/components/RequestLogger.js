@@ -8,6 +8,14 @@ export default function RequestLogger() {
   const [loading, setLoading] = useState(true);
   const [autoRefresh, setAutoRefresh] = useState(true);
 
+  // loading starts true, so the first fetch never has to set it again; every state
+  // write happens in a continuation, never on the effect's synchronous path.
+  const fetchLogs = () => fetch("/api/usage/request-logs")
+    .then((res) => (res.ok ? res.json() : null))
+    .then((data) => { if (data) setLogs(data); })
+    .catch((error) => console.error("Failed to fetch logs:", error))
+    .finally(() => setLoading(false));
+
   useEffect(() => {
     fetchLogs();
   }, []);
@@ -15,27 +23,10 @@ export default function RequestLogger() {
   useEffect(() => {
     let interval;
     if (autoRefresh) {
-      interval = setInterval(() => {
-        fetchLogs(false);
-      }, 3000);
+      interval = setInterval(fetchLogs, 3000);
     }
     return () => clearInterval(interval);
   }, [autoRefresh]);
-
-  const fetchLogs = async (showLoading = true) => {
-    if (showLoading) setLoading(true);
-    try {
-      const res = await fetch("/api/usage/request-logs");
-      if (res.ok) {
-        const data = await res.json();
-        setLogs(data);
-      }
-    } catch (error) {
-      console.error("Failed to fetch logs:", error);
-    } finally {
-      if (showLoading) setLoading(false);
-    }
-  };
 
   return (
     <div className="flex flex-col gap-4">
