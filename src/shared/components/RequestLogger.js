@@ -85,9 +85,8 @@ export default function RequestLogger() {
                   const status = parts[6];
                   const isPending = status.includes("PENDING");
                   const isFailed = status.includes("FAILED");
-                  // usageHistory stores a success as lowercase "ok"; the old "200 OK"
-                  // spelling died with appendRequestLog, and matching it case-sensitively
-                  // left every successful row styled as still-in-flight (pulsing).
+                  // usageHistory spells a success lowercase "ok"; matching "200 OK"
+                  // case-sensitively styled every successful row as still-in-flight.
                   const isSuccess = !isFailed && /ok|success/i.test(status);
 
                   return (

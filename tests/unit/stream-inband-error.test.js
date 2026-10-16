@@ -9,7 +9,6 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/usageDb.js", () => ({
   trackPendingRequest: vi.fn(),
-  appendRequestLog: vi.fn(async () => {}),
   saveRequestDetail: vi.fn(async () => {}),
   saveRequestUsage: vi.fn(async () => {}),
 }));
@@ -157,8 +156,8 @@ describe("in-band stream error detection", () => {
   });
 
   it("carries the failure into the usage row the recent-logs line reads", () => {
-    // appendRequestLog has been a no-op since the SQLite migration, so the usage row is
-    // the only place a streamed request's status is stored — without this the Usage
+    // Nothing else records a streamed turn's status: there is no separate request
+    // log, so the usage row is the only place it is stored — without this the Usage
     // panel's dot stays green for every gated turn.
     const { onStreamComplete } = buildOnStreamComplete({
       provider: "opencode", model: "muse-spark-1.3-contributor-free", connectionId: "conn-1",

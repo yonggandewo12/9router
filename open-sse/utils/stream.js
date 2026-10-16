@@ -1,9 +1,8 @@
 import { translateResponse, initState } from "../translator/index.js";
 import { FORMATS } from "../translator/formats.js";
-import { trackPendingRequest, appendRequestLog } from "@/lib/usageDb.js";
+import { trackPendingRequest } from "@/lib/usageDb.js";
 import { extractUsage, mergeUsage, hasValidUsage, estimateUsage, logUsage, addBufferToUsage, filterUsageForFormat, COLORS } from "./usageTracking.js";
 import { parseSSELine, hasValuableContent, fixInvalidId, formatSSE } from "./streamHelpers.js";
-import { HTTP_STATUS } from "../config/runtimeConfig.js";
 import { getOpenAIResponsesEventName, isOpenAIResponsesTerminalEvent, formatIncompleteOpenAIResponsesStreamFailure } from "./responsesStreamHelpers.js";
 import { dbg, isDebugEnabled } from "./debugLog.js";
 
@@ -128,16 +127,10 @@ export function createSSEStream(options = {}) {
       if (isPassthrough) usage = finalUsage; else state.usage = finalUsage;
     }
 
+    // A turn that spent no tokens is recorded by buildOnStreamComplete just below;
+    // this path only prints the ones that have usage to show.
     if (hasValidUsage(finalUsage)) {
       logUsage(isPassthrough ? provider : (state?.provider || targetFormat), finalUsage, model, connectionId, apiKey);
-    } else {
-      appendRequestLog({
-        model,
-        provider,
-        connectionId,
-        tokens: null,
-        status: streamError ? `FAILED ${streamError.status || HTTP_STATUS.BAD_GATEWAY}` : "200 OK",
-      }).catch(() => { });
     }
 
     if (onStreamComplete) {

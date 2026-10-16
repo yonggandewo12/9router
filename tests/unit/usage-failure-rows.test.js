@@ -1,10 +1,10 @@
 /**
  * A turn that dies before any token arrives — free-tier gate, region block, dead
  * upstream — used to be dropped by saveUsageStats' empty-usage filter, so nothing
- * recorded it: appendRequestLog (what every failure exit called) has been a no-op
- * since the SQLite migration, and saveRequestDetail returns early when observability
- * is off. usageHistory is the only always-on surface, and both the recent-logs line
- * and the Usage panel's dot read it.
+ * recorded it: the failure exits only wrote to a request log that no longer exists,
+ * and saveRequestDetail returns early when observability is off. usageHistory is the
+ * only always-on surface, and both the recent-logs line and the Usage panel's dot
+ * read it.
  *
  * Verified live 2026-10-15 against opencode 2.0.29 on port 20127: a RegionError 403
  * wrote no row at all, while the successful turns next to it wrote theirs.
@@ -13,7 +13,6 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/usageDb.js", () => ({
   trackPendingRequest: vi.fn(),
-  appendRequestLog: vi.fn(async () => {}),
   saveRequestDetail: vi.fn(async () => {}),
   saveRequestUsage: vi.fn(async () => {}),
 }));

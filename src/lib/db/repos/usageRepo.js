@@ -798,9 +798,9 @@ function formatLogDate(date = new Date()) {
   return `${pad(date.getDate())}-${pad(date.getMonth() + 1)}-${date.getFullYear()} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
-// No-op: request log is now derived from usageHistory table on read.
-export async function appendRequestLog() {}
-
+// The request log is derived from usageHistory on read — there is no separate log
+// to append to. Anything that has to be visible in the request log therefore has to
+// be written through saveRequestUsage (see requestDetail.js saveFailureUsage).
 export async function getRecentLogs(limit = 200) {
   try {
     const db = await getAdapter();

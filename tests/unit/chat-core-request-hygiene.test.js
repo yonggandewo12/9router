@@ -32,7 +32,6 @@ vi.mock("../../open-sse/utils/requestLogger.js", () => ({
 
 vi.mock("@/lib/usageDb.js", () => ({
   trackPendingRequest,
-  appendRequestLog: vi.fn(async () => {}),
   saveRequestDetail: vi.fn(async () => {}),
   saveRequestUsage,
 }));
@@ -110,9 +109,9 @@ describe("chatCore request hygiene", () => {
   });
 
   it("files the upstream status in usageHistory when the upstream answer is an error", async () => {
-    // appendRequestLog is a no-op and saveRequestDetail is gated by observability, so
-    // without this the failed turn leaves no trace in the recent-logs line. A 503 is
-    // used rather than a 401 to stay off the credential-refresh retry backoff.
+    // Nothing else records a failed turn: saveRequestDetail is gated by observability,
+    // so without this the row never reaches the recent-logs line. A 503 is used rather
+    // than a 401 to stay off the credential-refresh retry backoff.
     executeMock.mockResolvedValueOnce({
       response: new Response(JSON.stringify({ error: { message: "upstream overloaded" } }), {
         status: 503, headers: { "content-type": "application/json" },

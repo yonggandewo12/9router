@@ -10,7 +10,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 vi.mock("@/lib/usageDb.js", () => ({
-  appendRequestLog: vi.fn(async () => {}),
   saveRequestDetail: vi.fn(async () => {}),
   saveRequestUsage: vi.fn(async () => {}),
 }));
@@ -58,7 +57,6 @@ async function callHandler(providerResponse) {
     toolNameMap: null,
     customToolNames: null,
     trackDone: () => {},
-    appendLog: () => {},
     pxpipe: null,
     reqTag: "t",
     log: null,

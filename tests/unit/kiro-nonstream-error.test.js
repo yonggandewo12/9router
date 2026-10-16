@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/usageDb.js", () => ({
-  appendRequestLog: vi.fn(async () => {}),
   saveRequestDetail: vi.fn(async () => {}),
   saveRequestUsage: vi.fn(async () => {})
 }));
@@ -51,8 +50,7 @@ describe("Kiro non-streaming error propagation", () => {
       requestStartTime: Date.now(),
       connectionId: "test-connection",
       clientRawRequest: { endpoint: "/v1/chat/completions" },
-      trackDone: vi.fn(),
-      appendLog: vi.fn()
+      trackDone: vi.fn()
     });
     const json = await result.response.json();
 
