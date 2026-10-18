@@ -512,12 +512,17 @@ export class CursorExecutor extends BaseExecutor {
       const chunks = [];
       let responseHeaders = {};
       let settled = false;
+      let req = null;
 
       // Ensure client is always closed on settle
       const finish = (fn) => (...args) => {
         if (settled) return;
         settled = true;
         clearTimeout(hangTimeout);
+        // client.close() lets live streams run to completion, so a request that
+        // settles on a timeout, an abort or an error has to destroy its own
+        // stream — otherwise the session stays open for the life of the process.
+        try { req?.destroy(); } catch {}
         client.close();
         fn(...args);
       };
@@ -529,7 +534,7 @@ export class CursorExecutor extends BaseExecutor {
 
       client.on("error", finish(reject));
 
-      const req = client.request({
+      req = client.request({
         ":method": "POST",
         ":path": urlObj.pathname,
         ":authority": urlObj.host,
@@ -553,8 +558,13 @@ export class CursorExecutor extends BaseExecutor {
 
       if (signal) {
         const onAbort = finish(() => reject(new Error("Request aborted")));
-        if (signal.aborted) onAbort();
-        else signal.addEventListener("abort", onAbort, { once: true });
+        if (signal.aborted) {
+          // finish() already tore the stream down; writing the body now would
+          // only race a socket that is going away.
+          onAbort();
+          return;
+        }
+        signal.addEventListener("abort", onAbort, { once: true });
       }
 
       req.write(body);

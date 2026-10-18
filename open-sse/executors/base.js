@@ -165,6 +165,13 @@ export class BaseExecutor {
           body: bodyStr,
           signal: guard.signal
         }, proxyOptions);
+        // Known gap: the bound ends at headers. A streaming upstream that answers
+        // 200 with SSE headers and then sends nothing holds this request, its
+        // socket and the account's concurrency slot until the client gives up
+        // (live 2026-10-18: opencode/nemotron-3.5-lightning-free silent past 90s
+        // while its siblings answered the same body in 2-5s). A first-chunk
+        // ceiling belongs here but has to be earned per lane — a long-thinking
+        // model's first token can legitimately take minutes.
         guard.clear();
         const ct = response.headers?.get?.("content-type") || "";
         const cl = response.headers?.get?.("content-length") || "?";

@@ -18,6 +18,15 @@ const DEAD_FREE_OPENCODE_MODELS = new Set([
   "muse-spark-1.2-contributor-free",
 ]);
 
+// Deliberately NOT in the set above: nemotron-3.5-lightning-free. On 2026-10-18
+// the HTTP free lane accepted it and then sent nothing — headers, then silence
+// past 90s, three runs in a row, while super-vl/longcat/space-bunny answered the
+// same body in 2-5s. The model is not dead: `opencode run -m
+// opencode/nemotron-3.5-lightning-free` answers normally, so hosts with the CLI
+// (which execute() prefers) are fine and hiding it would cost them a working
+// model. The stall is specific to /inference/v1, and it is not the only one — see
+// the missing first-chunk ceiling in open-sse/executors/base.js.
+
 export const FILTERS = {
   "openrouter-free": (models) =>
     models

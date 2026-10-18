@@ -45,7 +45,10 @@ const h2 = vi.hoisted(() => {
     client.request = () => {
       const req = new Emitter();
       req.destroyed = false;
-      req.write = () => {};
+      req.writeCalls = 0;
+      req.write = () => {
+        req.writeCalls += 1;
+      };
       req.end = () => {};
       req.destroy = () => {
         if (req.destroyed) return;
@@ -110,7 +113,11 @@ describe("Cursor legacy HTTP/2 transport (makeHttp2Request)", () => {
     const pending = executor.makeHttp2Request("https://api2.cursor.sh/x", {}, Buffer.from("body"), controller.signal);
 
     await expect(pending).rejects.toThrow(/aborted/i);
-    expect(lastSession().client.closed).toBe(true);
+    const { client, req } = lastSession();
+    expect(client.closed).toBe(true);
+    // client.close() lets live streams finish, so the request has to kill its own.
+    expect(req.destroyed).toBe(true);
+    expect(req.writeCalls).toBe(0);
   });
 });
 
