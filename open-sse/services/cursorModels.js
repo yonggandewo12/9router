@@ -14,6 +14,7 @@ import { decodeMessage } from "../utils/cursorProtobuf.js";
 
 const FETCH_TIMEOUT_MS = 10_000;
 const CACHE_TTL_MS = 5 * 60 * 1000;
+const CACHE_MAX_ENTRIES = 64;
 
 // agent.v1.ModelDetails protobuf field numbers.
 const MODEL_ID_FIELD = 1;
@@ -252,6 +253,11 @@ export async function resolveCursorModels(credentials, options = {}) {
     const models = await fetchCursorCatalog(credentials, options.signal);
     if (!models?.length) return null;
     catalogCache.set(key, { expiresAt: now + CACHE_TTL_MS, models });
+    // Entries expire on read, never on a timer: without a cap every rotated
+    // credential leaves a catalog behind for the life of the process.
+    while (catalogCache.size > CACHE_MAX_ENTRIES) {
+      catalogCache.delete(catalogCache.keys().next().value);
+    }
     return { models };
   } catch (error) {
     options.log?.warn?.("CURSOR_MODELS", `Live model fetch failed: ${error?.message || error}`);

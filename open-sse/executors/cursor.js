@@ -270,6 +270,17 @@ const proxyIntentFailed = (proxyOptions) => {
   return true;
 };
 
+// The legacy openai-stream transport chooses between the h2 duplex and plain
+// fetch per request. Only fetch goes through proxyAwareFetch, so any connection
+// that actually resolves a proxy — or is strict enough to demand one — must take
+// that side. Without this, proxyPoolId/strictProxy were ignored on the h2 socket
+// and the turn left from the host's real IP behind a "proxied" connection.
+const needsFetchTransport = (proxyOptions) =>
+  proxyIntentFailed(proxyOptions)
+  || proxyOptions?.enabled === true
+  || proxyOptions?.connectionProxyEnabled === true
+  || Boolean(proxyOptions?.vercelRelayUrl);
+
 const CURSOR_STREAM_DEBUG = process.env.CURSOR_STREAM_DEBUG === "1";
 const debugLog = (...args) => {
   if (CURSOR_STREAM_DEBUG) console.log(...args);
@@ -530,7 +541,10 @@ export class CursorExecutor extends BaseExecutor {
       req.on("data", (chunk) => { chunks.push(chunk); });
       req.on("end", finish(() => {
         resolve({
-          status: responseHeaders[":status"],
+          // ":status" can be absent when the stream is reset before headers
+          // arrive; 0 keeps the caller out of the `!== 200` branch's trap of
+          // building a Response with status undefined, which becomes 200.
+          status: Number(responseHeaders[":status"] || 0),
           headers: responseHeaders,
           body: Buffer.concat(chunks)
         });
@@ -539,7 +553,8 @@ export class CursorExecutor extends BaseExecutor {
 
       if (signal) {
         const onAbort = finish(() => reject(new Error("Request aborted")));
-        signal.addEventListener("abort", onAbort, { once: true });
+        if (signal.aborted) onAbort();
+        else signal.addEventListener("abort", onAbort, { once: true });
       }
 
       req.write(body);
@@ -563,6 +578,7 @@ export class CursorExecutor extends BaseExecutor {
     let ended = false;
     let streamError = null;
     let req = null;
+    let rejectHeaders = null;
 
     const wake = (result) => {
       if (!waiting) return;
@@ -576,6 +592,7 @@ export class CursorExecutor extends BaseExecutor {
       streamError = error;
       ended = true;
       wake(null);
+      rejectHeaders?.(error);
     };
 
     const close = () => {
@@ -594,6 +611,14 @@ export class CursorExecutor extends BaseExecutor {
     });
 
     req.on("error", fail);
+    // A destroyed or dropped stream emits close, not error. Without this bridge
+    // both the head wait below and read() stay pending forever. A turn that ended
+    // cleanly already flipped `ended` on the end event, so fail only when the
+    // stream died without one — teardown must not be mistaken for an error.
+    req.on("close", () => {
+      if (ended) return;
+      fail(new Error("Cursor AgentService stream closed"));
+    });
     req.on("data", (chunk) => {
       if (waiting) wake({ value: chunk, done: false });
       else chunkQueue.push(chunk);
@@ -601,6 +626,26 @@ export class CursorExecutor extends BaseExecutor {
     req.on("end", () => {
       ended = true;
       wake({ value: undefined, done: true });
+    });
+
+    // The response head is the only proof upstream accepted the turn, so it needs
+    // the same first-chunk ceiling as the fetch transport: a silent socket must
+    // not hold the request and its account slot open indefinitely.
+    const headersDeadlineMs = this.config?.timeoutMs || STREAM_FIRST_CHUNK_TIMEOUT_MS;
+    const responseHeaders = new Promise((resolve, reject) => {
+      const deadline = setTimeout(
+        () => reject(new Error(`Cursor AgentService sent no response head within ${headersDeadlineMs}ms`)),
+        headersDeadlineMs
+      );
+      rejectHeaders = (error) => {
+        clearTimeout(deadline);
+        reject(error);
+      };
+      req.once("response", (hdrs) => {
+        clearTimeout(deadline);
+        rejectHeaders = null;
+        resolve(hdrs);
+      });
     });
 
     if (signal) {
@@ -611,17 +656,6 @@ export class CursorExecutor extends BaseExecutor {
       if (signal.aborted) onAbort();
       else signal.addEventListener("abort", onAbort, { once: true });
     }
-
-    const responseHeaders = new Promise((resolve, reject) => {
-      const onEarlyError = (error) => reject(error);
-      client.once("error", onEarlyError);
-      req.once("error", onEarlyError);
-      req.once("response", (hdrs) => {
-        client.off("error", onEarlyError);
-        req.off("error", onEarlyError);
-        resolve(hdrs);
-      });
-    });
 
     return {
       responseHeaders,
@@ -898,10 +932,20 @@ export class CursorExecutor extends BaseExecutor {
           attempt++;
           log?.info?.("CURSOR", `empty_turn on ${originalMessages.length}-message session; retry ${attempt}/${CURSOR_EMPTY_TURN_MAX_RETRIES} with tail-only frame`);
           workingMessages = tailOnlyCursorMessages(originalMessages);
-          session = openAgentSession(workingMessages);
-          const retryHeaders = await session.responseHeaders;
-          const retryStatus = Number(retryHeaders[":status"] || 0);
+          const retrySession = openAgentSession(workingMessages);
+          session = retrySession;
+          let retryStatus = 0;
+          try {
+            retryStatus = Number((await retrySession.responseHeaders)[":status"] || 0);
+          } catch {
+            retrySession.close();
+            wrapped(turnError);
+            return result;
+          }
           if (retryStatus !== 200) {
+            // consume() only closes the session it ran on; this fresh h2 client
+            // would otherwise keep its socket alive for the whole process.
+            retrySession.close();
             wrapped(turnError);
             return result;
           }
@@ -1042,8 +1086,7 @@ export class CursorExecutor extends BaseExecutor {
     const transformedBody = this.transformRequest(model, body, stream, credentials);
 
     try {
-      const shouldForceFetch = proxyOptions?.enabled === true || proxyOptions?.connectionProxyEnabled === true || !!proxyOptions?.vercelRelayUrl;
-      const response = (http2 && !shouldForceFetch)
+      const response = (http2 && !needsFetchTransport(proxyOptions))
         ? await this.makeHttp2Request(url, headers, transformedBody, signal)
         : await this.makeFetchRequest(url, headers, transformedBody, signal, proxyOptions);
 
@@ -1056,7 +1099,7 @@ export class CursorExecutor extends BaseExecutor {
             code: ""
           }
         }), {
-          status: response.status,
+          status: response.status || HTTP_STATUS.SERVER_ERROR,
           headers: { "Content-Type": "application/json" }
         });
         return { response: errorResponse, url, headers, transformedBody: body };

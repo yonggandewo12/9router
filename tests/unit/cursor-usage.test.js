@@ -69,7 +69,10 @@ describe("getUsageForProvider(cursor)", () => {
     expect(proxyAwareFetch.mock.calls[0][1].body).toBe("{}");
     expect(proxyAwareFetch.mock.calls[0][1].headers["content-type"]).toBe("application/json");
     expect(proxyAwareFetch.mock.calls[0][1].headers.authorization).toMatch(/^Bearer /);
+    // A silent Connect endpoint must not park the quota refresh forever.
+    expect(proxyAwareFetch.mock.calls[0][1].signal).toBeInstanceOf(AbortSignal);
     expect(proxyAwareFetch.mock.calls[1][0]).toBe(PLAN_URL);
+    expect(proxyAwareFetch.mock.calls[1][1].signal).toBeInstanceOf(AbortSignal);
   });
 
   it("maps cents to USD without absolute remaining", async () => {
@@ -116,6 +119,25 @@ describe("getUsageForProvider(cursor)", () => {
       total: 500,
       remainingPercentage: 96,
     });
+  });
+
+  it("rolls the monthly /auth/usage buckets forward to their real reset", async () => {
+    proxyAwareFetch
+      .mockResolvedValueOnce(jsonResponse({}))
+      .mockResolvedValueOnce(jsonResponse({
+        "gpt-4": { numRequests: 20, maxRequestUsage: 500 },
+        startOfMonth: "2026-06-25T05:42:21.000Z",
+      }))
+      .mockResolvedValueOnce(jsonResponse({ planInfo: { planName: "Enterprise" } }));
+
+    const usage = await getUsageForProvider({
+      provider: "cursor",
+      accessToken: "cursor-token",
+    });
+
+    // The payload only carries the period start, so the bucket resets one month
+    // later — verbatim startOfMonth is by definition already in the past.
+    expect(usage.quotas["gpt-4 requests"].resetAt).toBe("2026-07-25T05:42:21.000Z");
   });
 
   it("returns message on missing token / 401", async () => {

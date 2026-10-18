@@ -12,8 +12,22 @@ import { buildCursorHeaders } from "../../utils/cursorChecksum.js";
 
 const CURSOR_USAGE = U("cursor");
 
+// These are dashboard calls, so they need a ceiling: Cursor's Connect endpoints
+// can hold a connection open without ever answering, and a silent one would park
+// the whole quota refresh.
+const USAGE_TIMEOUT_MS = 15_000;
+
 function centsToUsd(cents) {
   return Number((toFiniteNumber(cents, 0) / 100).toFixed(2));
+}
+
+// A response we are throwing away still owns its connection until the body is
+// drained or cancelled.
+function discard(response) {
+  try {
+    const cancelled = response?.body?.cancel?.();
+    if (cancelled?.catch) cancelled.catch(() => {});
+  } catch { /* best-effort */ }
 }
 
 function remainingFromPercentUsed(percentUsed) {
@@ -36,6 +50,7 @@ async function postConnectJson(url, accessToken, machineId, proxyOptions) {
       method: "POST",
       headers: connectJsonHeaders(accessToken, machineId),
       body: "{}",
+      signal: AbortSignal.timeout(USAGE_TIMEOUT_MS),
     },
     proxyOptions,
   );
@@ -149,9 +164,28 @@ function addOnDemandQuota(quotas, data) {
   }
 }
 
+// /auth/usage buckets are monthly and the payload carries only the period
+// *start*, so the reset is the same clock time one month later. Handing back
+// startOfMonth itself pins the dashboard's "resets" to a date already past.
+function monthlyResetAt(periodStart) {
+  const iso = parseResetTime(periodStart);
+  if (!iso) return null;
+  const start = new Date(iso);
+  if (Number.isNaN(start.getTime())) return null;
+  if (start.getTime() > Date.now()) return iso;
+  const day = start.getUTCDate();
+  // Land on the 1st first: setUTCMonth from a 31-day source would otherwise
+  // overflow into the month after the one we want.
+  start.setUTCDate(1);
+  start.setUTCMonth(start.getUTCMonth() + 1);
+  const lastDay = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 0)).getUTCDate();
+  start.setUTCDate(Math.min(day, lastDay));
+  return start.toISOString();
+}
+
 function addAuthUsageQuotas(quotas, data) {
   if (!data || typeof data !== "object") return false;
-  const resetAt = parseResetTime(data.startOfMonth);
+  const resetAt = monthlyResetAt(data.startOfMonth);
   let added = false;
 
   for (const [key, bucket] of Object.entries(data)) {
@@ -190,6 +224,7 @@ export async function getCursorUsage(accessToken, providerSpecificData = {}, pro
     const periodResponse = await postConnectJson(periodUrl, token, machineId, proxyOptions);
 
     if (periodResponse.status === 401 || periodResponse.status === 403) {
+      discard(periodResponse);
       return {
         plan: "Cursor",
         message: "Cursor authentication failed. Reconnect the Cursor provider.",
@@ -214,6 +249,7 @@ export async function getCursorUsage(accessToken, providerSpecificData = {}, pro
             Authorization: `Bearer ${token.includes("::") ? token.split("::")[1] : token}`,
             Accept: "application/json",
           },
+          signal: AbortSignal.timeout(USAGE_TIMEOUT_MS),
         },
         proxyOptions,
       );
@@ -221,14 +257,18 @@ export async function getCursorUsage(accessToken, providerSpecificData = {}, pro
         addAuthUsageQuotas(quotas, await readJson(authResponse));
       } else if (!periodResponse.ok) {
         const errText = await periodResponse.text().catch(() => "");
+        discard(authResponse);
         return {
           plan: "Cursor",
           message: `Cursor usage API error (${periodResponse.status})${errText ? `: ${errText.slice(0, 120)}` : ""}`,
         };
+      } else {
+        discard(authResponse);
       }
     }
 
     if (Object.keys(quotas).length === 0) {
+      discard(periodResponse);
       return {
         plan: "Cursor",
         message: periodData?.displayMessage || "Cursor connected. No quota data returned for this plan.",
@@ -244,6 +284,8 @@ export async function getCursorUsage(accessToken, providerSpecificData = {}, pro
         if (typeof planName === "string" && planName.trim()) {
           plan = `Cursor ${planName.trim()}`;
         }
+      } else {
+        discard(planResponse);
       }
     }
 
