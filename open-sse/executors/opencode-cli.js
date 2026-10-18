@@ -860,7 +860,15 @@ export function buildCliArgs({ model, body, sid, prompt, files, title, cliMajor 
 // on this transport fails the whole turn, so it travels as no flag at all — the
 // models still think by default (the plain big-pickle run reported reasoning
 // tokens). Probe a new free id with `#low` before adding it here.
-const CLI_VARIANTLESS_MODELS = new Set(["big-pickle", "longcat-2.5-preview-free"]);
+// nemotron-3-ultra-free and nemotron-3.5-lightning-free join on the same live
+// result (2026-10-18): `#low` exits 1 with provider.no-route even though the
+// `*nemotron*` capability pattern claims reasoning.
+const CLI_VARIANTLESS_MODELS = new Set([
+  "big-pickle",
+  "longcat-2.5-preview-free",
+  "nemotron-3-ultra-free",
+  "nemotron-3.5-lightning-free",
+]);
 
 // The CLI only accepts variants the model actually offers; forwarding an arbitrary
 // reasoning_effort verbatim makes the whole request 400. Clamp to the model's

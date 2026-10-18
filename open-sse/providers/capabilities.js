@@ -249,6 +249,20 @@ export const PROVIDER_CAPABILITIES = {
     "deepseek-ai/deepseek-v4-pro": { reasoning: true, thinkingFormat: "openai", contextWindow: 1000000, maxOutput: 65536 },
     "deepseek-ai/deepseek-v4-flash": { reasoning: true, thinkingFormat: "openai", contextWindow: 1000000, maxOutput: 65536 },
   },
+  // OpenCode Free (no-key lane, /inference/v1). The rows this overrides come from
+  // models.dev, which describes the model, not this lane: probed live on 2026-10-18,
+  // an image part in a chat request to space-bunny-free and mimo-v2.6-flash-free is
+  // refused with 400 "Provider returned error" three times out of three, while
+  // deepseek-v4.1-flash-free answers the same request body. Declaring the modality
+  // this lane cannot serve is what makes the auto-strip path and combo seat choice
+  // send or route around an image correctly — a vision:true here only ever buys a
+  // hard 400. The keyed /zen/v1 lane was not probed, so this stays provider-scoped
+  // to the free lane; the provider override short-circuits before the pattern, so
+  // every field the pattern used to supply has to be restated.
+  "opencode": {
+    "space-bunny-free": { reasoning: true, thinkingFormat: "openai", contextWindow: 1048576, maxOutput: 524288 },
+    "mimo-v2.6-flash-free": { reasoning: true, thinkingFormat: "deepseek", thinkingCanDisable: false, contextWindow: 1048576, maxOutput: 131072 },
+  },
   // glm-5.3-flash on OpenCode Go is served by a backend that rejects the z.ai
   // `thinking` object (400: unknown field "thinking") and wants reasoning_effort.
   // Overrides the global entry, whose z.ai shape is correct for z.ai itself.

@@ -35,7 +35,7 @@ describe("isOpencodeFreeTierModel", () => {
       "mimo-v2.6-flash-free",
       "muse-spark-1.3-contributor-free",
       "big-pickle-free",
-      "deepseek-v4-flash-free",
+      "deepseek-v4.1-flash-free",
       "jev-1.13-free",
     ]) {
       expect(isOpencodeFreeTierModel(m)).toBe(true);

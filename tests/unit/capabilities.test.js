@@ -351,6 +351,38 @@ describe("OpenCode Free ids newer than the capability tables", () => {
     });
   });
 
+  it("drops the image modalities the OpenCode free lane refuses, keeping thinking and limits", () => {
+    // Live 2026-10-18 against POST /inference/v1/chat/completions: an image part in a
+    // chat request answers 400 "Provider returned error" 3/3 for both ids, while
+    // deepseek-v4.1-flash-free accepts the same body. Declaring the modality would
+    // buy a hard failure instead of the auto-strip (and would let a combo route an
+    // image here). The provider override short-circuits before the pattern, so the
+    // fields the pattern supplied have to survive it.
+    for (const provider of ["opencode", "oc"]) {
+      expect(getCapabilitiesForModel(provider, "space-bunny-free")).toMatchObject({
+        vision: false,
+        videoInput: false,
+        reasoning: true,
+        thinkingFormat: "openai",
+        contextWindow: 1048576,
+        maxOutput: 524288,
+      });
+      expect(getCapabilitiesForModel(provider, "mimo-v2.6-flash-free")).toMatchObject({
+        vision: false,
+        audioInput: false,
+        videoInput: false,
+        reasoning: true,
+        thinkingFormat: "deepseek",
+        thinkingCanDisable: false,
+        contextWindow: 1048576,
+        maxOutput: 131072,
+      });
+    }
+    // Scoped to the free lane: the same ids keep their models.dev modalities elsewhere.
+    expect(getCapabilitiesForModel("opencode-go", "space-bunny-free").vision).toBe(true);
+    expect(getCapabilitiesForModel(undefined, "mimo-v2.6-flash-free").vision).toBe(true);
+  });
+
   it("keeps per-id modalities and limits instead of a generic floor", () => {
     // text-only, small context — a shared pattern rule would overstate both.
     expect(getCapabilitiesForModel(undefined, "big-pickle")).toMatchObject({

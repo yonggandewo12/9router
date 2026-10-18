@@ -8,13 +8,14 @@ const CHAT_ONLY = ["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v4-flash-vi
   "glm-5.3-flash", "glm-5.3", "glm-5.2", "glm-5.1", "glm-5",
   "minimax-m3", "minimax-m2.7", "minimax-m2.5",
   "kimi-k3", "kimi-k2.7-code", "kimi-k2.6", "kimi-k2.5",
-  "big-pickle", "deepseek-v4-flash-free",
-  "mimo-v2.6-flash-free", "mimo-v2.5-free", "ling-3.0-flash-fin-free", "nemotron-3-ultra-free", "nemotron-3.5-lightning-free"];
+  "big-pickle", "deepseek-v4.1-flash-free",
+  "mimo-v2.6-flash-free", "nemotron-3-ultra-free", "nemotron-3.5-lightning-free",
+  "nemotron-3.5-super-vl-free", "glm-5.3-flash-free", "beam-free"];
 // Models that also expose the Anthropic /messages endpoint
 const CLAUDE_CAPABLE = ["claude-fable-5", "claude-fable-5-1", "claude-opus-5",
   "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-opus-4-5",
-  "claude-sonnet-5", "claude-sonnet-4-6", "claude-sonnet-4-5", "claude-sonnet-4",
-  "claude-haiku-4-5", "qwen3.6-plus", "qwen3.5-plus", "union-alpha"];
+  "claude-sonnet-5", "claude-sonnet-4-6", "claude-sonnet-4-5",
+  "claude-haiku-4-5", "qwen3.6-plus", "qwen3.5-plus"];
 // Models that also expose the OpenAI /responses endpoint
 const RESPONSES_CAPABLE = ["gpt-6-astra",
   "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
@@ -49,9 +50,22 @@ describe("OpenCode Zen model catalog", () => {
 });
 
 describe("OpenCode Zen per-model supportedFormats", () => {
-  it("declares [claude] for Claude + Qwen + union-alpha models", () => {
+  it("declares [claude] for Claude + Qwen models", () => {
     for (const m of CLAUDE_CAPABLE) {
       expect(getModelSupportedFormats("ocz", m)).toEqual(["claude"]);
+    }
+  });
+
+  it("keeps retired ids out of the catalog", () => {
+    // Each was probed on 2026-10-18 through the endpoint its own row used: 400
+    // "Model is unavailable" (union-alpha, claude-sonnet-4, deepseek-v4-flash-free,
+    // ling-3.0-flash-fin-free), 410 ModelDeprecated (mimo-v2.5-free), or the
+    // official CLI stopped offering it (muse-spark-1.2-contributor-free). A live
+    // keyed model answers 401 AuthError instead, so these are not a missing-key
+    // artifact — and a row here is a picker entry that can only ever fail.
+    const ids = (PROVIDER_MODELS["ocz"] || []).map((m) => m.id);
+    for (const dead of ["union-alpha", "claude-sonnet-4", "deepseek-v4-flash-free", "ling-3.0-flash-fin-free", "mimo-v2.5-free", "muse-spark-1.2-contributor-free", "jev-1.13-free"]) {
+      expect(ids).not.toContain(dead);
     }
   });
 

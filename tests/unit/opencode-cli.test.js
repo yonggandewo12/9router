@@ -288,13 +288,16 @@ describe("buildCliArgs", () => {
     expect(muse).toContain("low");
     expect(muse).not.toContain("-s");
 
-    // big-pickle and longcat-2.5-preview-free take reasoning_effort over HTTP but
+    // big-pickle, longcat-2.5-preview-free, nemotron-3-ultra-free and
+    // nemotron-3.5-lightning-free take reasoning_effort over HTTP but
     // have no variant route in the CLI's table: `opencode run -m
     // opencode/big-pickle#low` answers "Variant unavailable … [provider.no-route]"
-    // (live, 2026-10-18), so the effort must not reach argv on either spelling.
-    // space-bunny-free was probed the same day and does accept #low, so the level
-    // ladder keeps working there (see the muse cases above).
-    for (const id of ["big-pickle", "longcat-2.5-preview-free"]) {
+    // (live, 2026-10-18, same for both nemotron ids), so the effort must not reach
+    // argv on either spelling. The `*nemotron*` capability pattern is what makes
+    // this bite: it declares reasoning, so the level ladder offers a level the CLI
+    // cannot route. space-bunny-free and deepseek-v4.1-flash-free were probed the
+    // same day and do accept #low (see the muse cases above).
+    for (const id of ["big-pickle", "longcat-2.5-preview-free", "nemotron-3-ultra-free", "nemotron-3.5-lightning-free"]) {
       for (const cliMajor of [1, 2]) {
         const plain = buildCliArgs({ model: id, body: { reasoning_effort: "low" }, sid: null, prompt: "p", cliMajor });
         expect(plain).not.toContain("--variant");
