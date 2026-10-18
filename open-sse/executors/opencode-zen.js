@@ -18,8 +18,12 @@ const MAX_TOOL_NAME_LEN = 128;
 const OPENCODE_UA = "opencode/1.18.31";
 export const OPENCODE_SESSION_RE = /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/;
 const BASE62_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-// Free-tier fingerprint (mirrors opencode executor, PR #4132): upstream 403s
-// requests without the file-search quartet and without stream:true.
+// Free-tier fingerprint: upstream 403s requests without it and without
+// stream:true. This is the v1 quartet on purpose — it is what the /zen/v1 path
+// still accepts (probed live 2026-10-18: stub quartet → 200, no tools → 403),
+// while the v2 /inference/v1 path the opencode executor uses wants the exact
+// `read`/`shell` pair from utils/opencodeFingerprint.js. Two endpoints, two
+// gates: do not "unify" them or this lane 403s.
 const OPENCODE_FINGERPRINT_TOOLS = ["bash", "glob", "grep", "read"];
 
 function hasValidOpencodeVersion(ua) {
