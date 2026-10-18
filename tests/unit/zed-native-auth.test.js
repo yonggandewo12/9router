@@ -26,13 +26,17 @@ const originalDataDir = process.env.DATA_DIR;
 let startZedProxy, stopZedProxy, registerZedSession, getZedSessionStatus, clearZedSession;
 let generateAuthData, exchangeTokens;
 
+// DATA_DIR has to be set before the DB layer loads, so every heavy module is
+// imported dynamically — which drops the models/DB layer and the Next.js route
+// module into whichever worker runs this file, at first use. Under a loaded suite
+// that blew the 5000ms default for criterion 3 (import, not the flow under test).
 beforeAll(async () => {
   process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "9router-zed-auth-"));
   vi.resetModules();
   ({ startZedProxy, stopZedProxy, registerZedSession, getZedSessionStatus, clearZedSession } =
     await import("@/lib/oauth/utils/server.js"));
   ({ generateAuthData, exchangeTokens } = await import("@/lib/oauth/providers/index.js"));
-});
+}, 30000);
 
 afterAll(() => {
   fs.rmSync(process.env.DATA_DIR, { recursive: true, force: true });
@@ -151,7 +155,7 @@ describe("criterion 2 — stray callback MUST NOT kill session", () => {
 });
 
 describe("criterion 3 — real callback completes session + saves connection", () => {
-  it("user_id + access_token → done, decrypted token persisted", async () => {
+  it("user_id + access_token → done, decrypted token persisted", { timeout: 30000 }, async () => {
     const started = await startTestProxy();
     const auth = createZedNativeAuthData({}, { nativeAppPort: started.port });
     const state = `real-state-${Date.now()}`;
@@ -217,7 +221,7 @@ describe("criterion 5 — systemId stable authorize → exchange → stored", ()
 });
 
 describe("criterion 6 — register-session failure is distinguishable", () => {
-  it("route reports { success: false } when the verifier is missing", async () => {
+  it("route reports { success: false } when the verifier is missing", { timeout: 30000 }, async () => {
     const { POST } = await import("@/app/api/oauth/[provider]/[action]/route.js");
     const req = new Request("http://localhost/api/oauth/zed/register-session", {
       method: "POST",
