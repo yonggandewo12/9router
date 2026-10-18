@@ -850,12 +850,25 @@ export function buildCliArgs({ model, body, sid, prompt, files, title, cliMajor 
   return args;
 }
 
+// Declared levels come from the HTTP lane, and some free models accept a
+// reasoning_effort there but have no variant route in the CLI's own table:
+// `opencode run -m opencode/big-pickle#low` and the same for
+// longcat-2.5-preview-free answer "Variant unavailable … [provider.no-route]"
+// (live, 2026-10-18) while POST /inference/v1/chat/completions with
+// reasoning_effort low returns 200 for both. space-bunny-free does have a
+// variant route, so this is per model, not a free-tier rule. Forwarding the ask
+// on this transport fails the whole turn, so it travels as no flag at all — the
+// models still think by default (the plain big-pickle run reported reasoning
+// tokens). Probe a new free id with `#low` before adding it here.
+const CLI_VARIANTLESS_MODELS = new Set(["big-pickle", "longcat-2.5-preview-free"]);
+
 // The CLI only accepts variants the model actually offers; forwarding an arbitrary
 // reasoning_effort verbatim makes the whole request 400. Clamp to the model's
 // declared thinking levels (mirrors the HTTP path's normalizeOpencodeReasoning)
 // and drop the flag entirely for unsupported or "none"/"auto" values.
 function resolveVariant(model, body) {
   const { base, variant } = splitThinkingSuffix(model);
+  if (CLI_VARIANTLESS_MODELS.has(base)) return { base, variant: "" };
   const fromBody = typeof body?.reasoning_effort === "string" ? body.reasoning_effort
     : typeof body?.reasoning?.effort === "string" ? body.reasoning.effort
       : "";

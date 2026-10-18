@@ -15,6 +15,7 @@ import { resolveZedModels } from "open-sse/shared/zedAuth.js";
 import { resolveTraeEnterpriseModels } from "open-sse/shared/trae/enterprise.js";
 import { resolveCodeartsModels } from "open-sse/shared/codearts/api.js";
 import { resolveClineModels, resolveClinepassModels } from "open-sse/services/clinepassModels.js";
+import { NOUS_MODELS_URL, normalizeNousModels } from "open-sse/services/nous.js";
 import codexProvider from "open-sse/providers/registry/codex.js";
 
 const GEMINI_CLI_MODELS_URL = "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
@@ -87,6 +88,15 @@ export const createOpenAIModelsConfig = (url, providerPrefix = null) => ({
       : model;
   })
 });
+
+const normalizeRoutedNousModels = (data) => normalizeNousModels(data).map((model) => ({
+  ...model,
+  // Live upstream IDs include a vendor namespace (for example,
+  // stepfun/step-5-preview:free). Prefix the owning 9router provider so Basic
+  // Chat does not parse that namespace as the provider itself.
+  id: `nous/${model.id}`,
+  upstreamModelId: model.id,
+}));
 
 const getStaticProviderModels = (providerId) =>
   getModelsByProviderId(providerId).map((model) => ({
@@ -258,6 +268,10 @@ export const PROVIDER_MODELS_CONFIG = {
   },
   openai: createOpenAIModelsConfig("https://api.openai.com/v1/models"),
   openrouter: createOpenAIModelsConfig("https://openrouter.ai/api/v1/models"),
+  nous: {
+    ...createOpenAIModelsConfig(NOUS_MODELS_URL),
+    parseResponse: normalizeRoutedNousModels,
+  },
   anthropic: {
     url: "https://api.anthropic.com/v1/models",
     method: "GET",

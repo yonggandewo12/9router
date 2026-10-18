@@ -73,4 +73,26 @@ describe("aggregateComboCapabilities: resolveCaps override", () => {
     expect(caps).toEqual(aggregateComboCapabilities(["kimi/kimi-k3"]));
     expect(caps.contextWindow).toBe(getCapabilitiesForModel("kimi", "kimi-k3").contextWindow);
   });
+
+  it("claude-haiku-5-5 combo: the seat alias resolves through the provider table", () => {
+    // Both seats are 1M in their provider tables (opencode-go/commandcode entries).
+    // Up to v0.5.104 only commandcode had one, so an `ocg/` seat fell to the global
+    // *claude*haiku* pattern and the combo under-reported 200k without the server's
+    // seatCaps resolver; upstream's provider row (#4727) closed that gap. Pinned
+    // here because the pattern also carries the WRONG thinking shape for this id —
+    // claude-budget, which OpenCode Go rejects with 400 — so the format is asserted
+    // too: if the row is ever dropped, this fails instead of a silent 400 upstream.
+    const seats = ["ocg/claude-haiku-5-5", "cmc/claude-haiku-5-5"];
+    const seatCaps = (fullId) => {
+      const slash = fullId.indexOf("/");
+      if (slash <= 0) return null;
+      const providerId = { ocg: "opencode-go", cmc: "commandcode" }[fullId.slice(0, slash)] || fullId.slice(0, slash);
+      return getCapabilitiesForModel(providerId, fullId.slice(slash + 1));
+    };
+    expect(aggregateComboCapabilities(seats)).toMatchObject({ contextWindow: 1_000_000, thinkingFormat: "claude-adaptive" });
+    expect(aggregateComboCapabilities(seats, null, seatCaps).contextWindow).toBe(1_000_000);
+    // The divergence the resolver still guards: a provider with no static row for
+    // this id falls to the pattern, while the fed catalog knows the real limit.
+    expect(getCapabilitiesForModel(null, "claude-haiku-5-5").contextWindow).toBe(200_000);
+  });
 });

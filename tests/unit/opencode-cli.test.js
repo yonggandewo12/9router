@@ -288,10 +288,22 @@ describe("buildCliArgs", () => {
     expect(muse).toContain("low");
     expect(muse).not.toContain("-s");
 
-    // big-pickle declares no thinking levels → an arbitrary effort must not reach the CLI.
-    const plain = buildCliArgs({ model: "big-pickle", body: { reasoning_effort: "low" }, sid: null, prompt: "p" });
-    expect(plain).not.toContain("--variant");
-    expect(plain).not.toContain("low");
+    // big-pickle and longcat-2.5-preview-free take reasoning_effort over HTTP but
+    // have no variant route in the CLI's table: `opencode run -m
+    // opencode/big-pickle#low` answers "Variant unavailable … [provider.no-route]"
+    // (live, 2026-10-18), so the effort must not reach argv on either spelling.
+    // space-bunny-free was probed the same day and does accept #low, so the level
+    // ladder keeps working there (see the muse cases above).
+    for (const id of ["big-pickle", "longcat-2.5-preview-free"]) {
+      for (const cliMajor of [1, 2]) {
+        const plain = buildCliArgs({ model: id, body: { reasoning_effort: "low" }, sid: null, prompt: "p", cliMajor });
+        expect(plain).not.toContain("--variant");
+        expect(plain).not.toContain("low");
+        expect(plain).toContain(`opencode/${id}`);
+        const suffixed = buildCliArgs({ model: `${id}(high)`, body: {}, sid: null, prompt: "p", cliMajor });
+        expect(suffixed.join(" ")).not.toContain("high");
+      }
+    }
 
     // max is not selectable on Muse → clamps to the highest declared level (xhigh),
     // mirroring the HTTP transport's normalizeOpencodeReasoning.

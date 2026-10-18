@@ -58,18 +58,18 @@ describe("OpenCode Free endpoint routing", () => {
 
   it("routes Muse Spark to /responses and every other model to /chat/completions", () => {
     const executor = new OpenCodeExecutor();
-    expect(executor.buildUrl(MUSE)).toBe("https://opencode.ai/zen/v1/responses");
-    expect(executor.buildUrl(`${MUSE}(xhigh)`)).toBe("https://opencode.ai/zen/v1/responses");
-    expect(executor.buildUrl("muse-spark-1.3-contributor-free")).toBe("https://opencode.ai/zen/v1/responses");
-    expect(executor.buildUrl("muse-spark-1.4-contributor-free")).toBe("https://opencode.ai/zen/v1/responses");
-    expect(executor.buildUrl("muse-spark-2.0-contributor-free(xhigh)")).toBe("https://opencode.ai/zen/v1/responses");
-    expect(executor.buildUrl("big-pickle")).toBe("https://opencode.ai/zen/v1/chat/completions");
-    expect(executor.buildUrl("hy3-free")).toBe("https://opencode.ai/zen/v1/chat/completions");
+    expect(executor.buildUrl(MUSE)).toBe("https://opencode.ai/inference/v1/responses");
+    expect(executor.buildUrl(`${MUSE}(xhigh)`)).toBe("https://opencode.ai/inference/v1/responses");
+    expect(executor.buildUrl("muse-spark-1.3-contributor-free")).toBe("https://opencode.ai/inference/v1/responses");
+    expect(executor.buildUrl("muse-spark-1.4-contributor-free")).toBe("https://opencode.ai/inference/v1/responses");
+    expect(executor.buildUrl("muse-spark-2.0-contributor-free(xhigh)")).toBe("https://opencode.ai/inference/v1/responses");
+    expect(executor.buildUrl("big-pickle")).toBe("https://opencode.ai/inference/v1/chat/completions");
+    expect(executor.buildUrl("hy3-free")).toBe("https://opencode.ai/inference/v1/chat/completions");
     // Family-matched passthrough ids are translated to a Responses body by chatCore
     // (getModelTargetFormat), so the URL has to follow the same rule — a hardcoded
     // model list here sent `input` to /chat/completions and upstream rejected it.
-    expect(executor.buildUrl("gpt-5.6-luna")).toBe("https://opencode.ai/zen/v1/responses");
-    expect(executor.buildUrl("grok-4.6(xhigh)")).toBe("https://opencode.ai/zen/v1/responses");
+    expect(executor.buildUrl("gpt-5.6-luna")).toBe("https://opencode.ai/inference/v1/responses");
+    expect(executor.buildUrl("grok-4.6(xhigh)")).toBe("https://opencode.ai/inference/v1/responses");
     const body = { input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }], max_tokens: 128 };
     executor.transformRequest("gpt-5.6-luna", body, true, {});
     expect(body.store).toBe(false);

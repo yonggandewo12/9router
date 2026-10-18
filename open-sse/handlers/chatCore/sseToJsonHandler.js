@@ -3,55 +3,10 @@ import { restoreToolNames } from "../../utils/opencodeFingerprint.js";
 import { createErrorResult } from "../../utils/error.js";
 import { HTTP_STATUS } from "../../config/runtimeConfig.js";
 import { FORMATS } from "../../translator/formats.js";
+import { openAICompletionToClaudeMessage } from "../../translator/concerns/claudeMessage.js";
 import { PROVIDERS } from "../../config/providers.js";
 import { buildRequestDetail, extractRequestConfig, saveUsageStats, saveFailureUsage, formatDoneLine } from "./requestDetail.js";
 import { ROLE, RESPONSES_ITEM } from "../../translator/schema/index.js";
-import { fromOpenAIFinish } from "../../translator/concerns/finishReason.js";
-
-// Inlined (not imported from nonStreamingHandler.js) to avoid a circular
-// import: nonStreamingHandler already imports parseSSEToOpenAIResponse from
-// this module — same precedent as chatCompletionToResponses below.
-function chatCompletionToClaudeMessage(responseBody) {
-  const choice = responseBody?.choices?.[0];
-  if (!choice) return responseBody;
-  const message = choice.message || {};
-  const content = [];
-  const reasoning = message.reasoning_content || "";
-  if (reasoning) content.push({ type: "thinking", thinking: reasoning });
-  if (typeof message.content === "string" && message.content.length > 0) {
-    content.push({ type: "text", text: message.content });
-  }
-  for (const toolCall of message.tool_calls || []) {
-    const fn = toolCall.function || {};
-    let input = {};
-    if (typeof fn.arguments === "string" && fn.arguments) {
-      try { input = JSON.parse(fn.arguments); } catch { /* keep {} */ }
-    } else if (fn.arguments && typeof fn.arguments === "object") {
-      input = fn.arguments;
-    }
-    content.push({
-      type: "tool_use",
-      id: toolCall.id || `toolu_${Date.now()}_${content.length}`,
-      name: fn.name || toolCall.name || "",
-      input,
-    });
-  }
-  if (content.length === 0) content.push({ type: "text", text: "" });
-  const usage = responseBody.usage || {};
-  return {
-    id: String(responseBody.id || `msg_${Date.now()}`).replace(/^chatcmpl-/, ""),
-    type: "message",
-    role: "assistant",
-    model: responseBody.model || "unknown",
-    content,
-    stop_reason: fromOpenAIFinish(choice.finish_reason, FORMATS.CLAUDE),
-    stop_sequence: null,
-    usage: {
-      input_tokens: usage.prompt_tokens || usage.input_tokens || 0,
-      output_tokens: usage.completion_tokens || usage.output_tokens || 0,
-    },
-  };
-}
 
 // Responses-API providers (e.g. codex) may emit SSE without content-type + use Responses output shape
 const isResponsesProvider = (p) => PROVIDERS[p]?.format === FORMATS.OPENAI_RESPONSES;
@@ -330,7 +285,7 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
       // Claude-format clients must not receive the raw chat.completion body —
       // Anthropic SDKs parse it with content undefined and crash.
       if (sourceFormat === FORMATS.CLAUDE) {
-        finalResp = chatCompletionToClaudeMessage(finalResp);
+        finalResp = openAICompletionToClaudeMessage(finalResp);
       }
 
       return { success: true, response: new Response(JSON.stringify(restoreToolNames(finalResp, toolNameMap)), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } }) };
@@ -415,7 +370,7 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
     const finalBody = sourceFormat === FORMATS.OPENAI_RESPONSES
       ? chatCompletionToResponses(parsed, customToolNames)
       : sourceFormat === FORMATS.CLAUDE
-        ? chatCompletionToClaudeMessage(parsed)
+        ? openAICompletionToClaudeMessage(parsed)
         : parsed;
 
     return { success: true, response: new Response(JSON.stringify(restoreToolNames(finalBody, toolNameMap)), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } }) };
