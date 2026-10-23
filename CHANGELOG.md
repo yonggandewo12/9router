@@ -1,3 +1,22 @@
+# v0.6.12 (2026-10-24)
+
+One provider, one quota lane: **ZCode Start Plan** (`zcode`). Everything else in this release is the review pass that came with it — two test gaps that would have let a broken gate ship green, and one line of prompt-injection logic that was doing more work than it needed to.
+
+## Features
+- **ZCode Start Plan is now a provider.** ZCode (Zhipu's coding client) talks to its own lane — `https://zcode.z.ai/api/v1/zcode-plan/anthropic/v1/messages` — with the short HS256 JWT its CLI stores as `zcodejwttoken`, *not* with an API key. The login reuses the same CLI polling handshake as `glm` (`zcode.z.ai/api/v1/oauth/cli/init` → `poll/ready`) and keeps the returned `token` as the credential; the coding-plan API-key lane stays on `glm` where it was. Models: **GLM-5.3** and **GLM-5.3-Flash** — the only two the plan allows (GLM-5.2 / GLM-5-Turbo answer `3006 model not allowed`, measured).
+- **The lane has a prompt gate, and the router clears it.** A request whose system prompt is not the official ZCode agent prompt is answered **HTTP 405 `{code:3012, "request has been blocked due to unusual activity"}`**. Everything else about the request is free: dropping tools, dropping `metadata` and dropping every fingerprint header still passes, and the model id is case-insensitive. The executor therefore prepends the official two-block prompt **only when the incoming request does not already carry it** — a real ZCode client pointed at the router passes through untouched, and any other client gets the lane.
+- **The provider is wired end to end, not just into the registry.** Dashboard login (device-code entry + the poll-token hand-off), the connection test, API-key validation and the model catalog alias all know about `zcode`; `/v1/models` lists `zc/GLM-5.3-Flash` and `zc/GLM-5.3`.
+
+## Fixes
+- **The prompt gate now has tests that can actually fail.** The first version of the suite only exercised the pure helper — deleting the injection from the executor left all 9 tests green, because the executor was never the object under test. The suite now drives `transformRequest` itself and asserts that `getExecutor("zcode")` returns the custom executor, so an unregistered executor or a disconnected helper turns the suite red.
+- **The prompt constant is pinned, not just referenced.** The gate only ever sees those bytes, so the two blocks are asserted directly (count, first line, length, and no machine-specific path baked in). Dropping the second block is exactly the mutation that turns every request into a 3012.
+- **The injection stops re-joining the whole system prompt.** Agent prompts run to 100KB and the check ran per request, so the marker scan is now a per-block `some()` instead of building a joined copy of the prompt.
+
+## Notes
+- **Live-verified, end to end.** The executor reaches the lane and streams (HTTP 200, `text/event-stream`, TTFT ≈ 1.7s), and the full HTTP path was driven through an isolated instance: dashboard login → API key → provider → `/v1/chat/completions` (`zcode/GLM-5.3-Flash`, SSE) and `/v1/messages` (`zcode/GLM-5.3`, "ok"), plus the OAuth device-code endpoint returning a real `flow_id` + `authorize_url`.
+- **Bounds, stated plainly.** The JWT carries no `exp` and the flow has no refresh grant, so an expired credential means re-login (the same rule the official CLI follows). There is **no usage/quota panel for this provider yet** — the plan state is readable at `zcode.z.ai/api/v1/zcode-plan/billing/current`, but it is not wired into the Usage view. And the prompt the lane demands is the official ZCode agent prompt: the router ships it because the lane rejects anything else, which is a gate, not an authorisation.
+- **Fork identity unchanged**: `.github/workflows/` is still only `cleanup` / `npm-publish` / `test`, the package remains **`9router-proxy`** on the fork version line with root `9router-app` in sync, and no runtime dependency was added.
+
 # v0.6.11 (2026-10-18)
 
 Two things at once: the upstream **v0.5.100 → v0.5.104** line is merged in (143 files, +7405/−828), and the two providers that merge touched hardest — **Cursor** and **OpenCode** — got a deep review of their own afterwards. The merge is the feature content; the review is what keeps a Cursor turn from hanging the process. Fork identity is untouched: `.github/workflows/` is still only `cleanup` / `npm-publish` / `test`, and the published package stays **`9router-proxy`** on the fork version line.
