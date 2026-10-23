@@ -6,6 +6,7 @@ import { resolveOllamaLocalHost, resolveXiaomiTokenplanBaseUrl, PROVIDERS } from
 import { openaiToCommandCodeRequest } from "open-sse/translator/request/openai-to-commandcode.js";
 import { resolveQoderCredentials, resolveQoderModels } from "open-sse/services/qoderModels.js";
 import { probeBedrockCredentials } from "open-sse/executors/bedrock.js";
+import { ZCODE_SYSTEM_BLOCKS } from "open-sse/shared/zcode/systemPrompt.js";
 import {
   createNousApiKeyProbe,
   getNousApiKeyValidationError,
@@ -361,6 +362,25 @@ export async function POST(request) {
             // 400 = model resolution error but auth passed (e.g. agentrouter "no available channel")
             isValid = res.status !== 401 && res.status !== 403;
           }
+          break;
+        }
+        case "zcode": {
+          // The zcode-plan lane authenticates with the OAuth JWT (or a pasted
+          // one) as Bearer and rejects any request whose system prompt is not
+          // the official ZCode agent prompt (405 code:3012), so the probe has
+          // to carry ZCODE_SYSTEM_BLOCKS to say anything about the key.
+          const res = await fetch(PROVIDERS.zcode.baseUrl, {
+            method: "POST",
+            headers: { "Authorization": `Bearer ${apiKey}`, "content-type": "application/json" },
+            body: JSON.stringify({
+              model: getDefaultModel(provider) || "GLM-5.3-Flash",
+              max_tokens: 1,
+              system: ZCODE_SYSTEM_BLOCKS,
+              messages: [{ role: "user", content: "test" }],
+            }),
+            signal: AbortSignal.timeout(8000),
+          });
+          isValid = res.status !== 401 && res.status !== 403;
           break;
         }
         case "volcengine-ark":

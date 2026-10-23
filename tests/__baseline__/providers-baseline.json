@@ -1269,5 +1269,14 @@
     },
     "clientId": "hermes-cli",
     "tokenUrl": "https://portal.nousresearch.com/api/oauth/token"
+  },
+  "zcode": {
+    "baseUrl": "https://zcode.z.ai/api/v1/zcode-plan/anthropic/v1/messages",
+    "format": "claude",
+    "auth": {
+      "combined": true,
+      "header": "Authorization",
+      "scheme": "bearer"
+    }
   }
 }

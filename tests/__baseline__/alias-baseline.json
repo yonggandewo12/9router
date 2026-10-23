@@ -115,6 +115,9 @@
     "dv": "deveco",
     "devin": "devin",
     "devin-cli": "devin-cli",
+    "zcode": "zcode",
+    "zc": "zcode",
+    "zcode-plan": "zcode",
     "morph": "morph",
     "morphllm": "morph",
     "muse": "muse",
@@ -268,6 +271,7 @@
     "xiaomi-tokenplan": "xiaomi-tokenplan",
     "xquik": "xquik",
     "youcom": "youcom",
+    "zcode": "zcode",
     "zed": "zd"
   },
   "modelKeys": [
@@ -384,6 +388,7 @@
     "xiaomi-mimo",
     "xiaomi-mimo-tts-models",
     "xiaomi-tokenplan",
+    "zcode",
     "zd"
   ]
 }

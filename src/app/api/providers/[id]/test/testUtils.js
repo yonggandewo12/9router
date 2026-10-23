@@ -7,6 +7,7 @@ import { traeEnterpriseConfig } from "open-sse/shared/trae/enterprise.js";
 import { fetchCodeartsCurrentUser } from "open-sse/shared/codearts/api.js";
 import { refreshDevecoFromCredentials } from "open-sse/shared/deveco/auth.js";
 import { probeBedrockCredentials } from "open-sse/executors/bedrock.js";
+import { ZCODE_SYSTEM_BLOCKS } from "open-sse/shared/zcode/systemPrompt.js";
 import { resolveOllamaLocalHost, PROVIDERS } from "open-sse/config/providers.js";
 import { CODEX_CLI_VERSION } from "open-sse/config/appConstants.js";
 import { isOpenCodeCliAvailable, runOpenCodeCli } from "open-sse/executors/opencode-cli.js";
@@ -190,6 +191,26 @@ const OAUTH_TEST_CONFIG = {
       stream: false,
     }),
     refreshable: true,
+    useApiKey: true,
+  },
+  // ZCode Start Plan — the stored JWT is the model credential. The lane's 3012
+  // gate rejects probes without the official agent prompt, so the body carries
+  // ZCODE_SYSTEM_BLOCKS. No refresh grant: expiry means re-login.
+  zcode: {
+    url: PROVIDERS.zcode?.baseUrl,
+    method: "POST",
+    authHeader: "Authorization",
+    authPrefix: "Bearer ",
+    extraHeaders: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "GLM-5.3-Flash",
+      max_tokens: 1,
+      system: ZCODE_SYSTEM_BLOCKS,
+      messages: [{ role: "user", content: "ping" }],
+      stream: false,
+    }),
+    refreshable: false,
+    // The credential is the same JWT in both modes (OAuth token or pasted key).
     useApiKey: true,
   },
 };

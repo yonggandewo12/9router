@@ -32,6 +32,7 @@ import zed from "./zed.js";
 import codearts from "./codearts.js";
 import deveco from "./deveco.js";
 import glm from "./glm.js";
+import zcode from "./zcode.js";
 import minimaxCode from "./minimax-code.js";
 import minimaxCodeGlobal from "./minimax-code-global.js";
 import nous from "./nous.js";
@@ -66,6 +67,7 @@ const PROVIDERS = {
   codearts,
   deveco,
   glm,
+  zcode,
   "minimax-code": minimaxCode,
   "minimax-code-global": minimaxCodeGlobal,
   nous,

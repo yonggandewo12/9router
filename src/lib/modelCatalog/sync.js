@@ -26,6 +26,7 @@ const LIMIT_TOLERANCE = 0.1;
 export const PROVIDER_ALIASES = {
   "github": "github-copilot",
   "glm": "zai",
+  "zcode": "zai",
   "glm-cn": "zhipuai",
   "claude": "anthropic",
   "gemini": "google",

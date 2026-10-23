@@ -228,6 +228,10 @@ export const WINDSURF_CONFIG = {
 // refresh grant).
 export const GLM_OAUTH_CONFIG = { ...PROVIDER_OAUTH["glm"] };
 
+// ZCode Start Plan — same CLI polling handshake as glm, but the poll's `token`
+// (the zcodejwt the client stores locally) is itself the model credential.
+export const ZCODE_OAUTH_CONFIG = { ...PROVIDER_OAUTH["zcode"] };
+
 // Zed hosted LLM aggregator — RSA keypair native-app auth (NOT OAuth).
 // Client generates ephemeral RSA-2048 keypair; user signs in at zed.dev/native_app_signin;
 // Zed redirects to local callback with access_token RSA-encrypted against our public key.
