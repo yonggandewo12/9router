@@ -511,12 +511,16 @@ export const PROVIDER_MODELS_CONFIG = {
         // a model Huawei just granted this account appears in this click.
         result = await resolveCodeartsModels(connection, {
           forceRefresh: true,
+          log: console,
           proxyOptions: {
             connectionProxyEnabled: proxy.connectionProxyEnabled === true,
             connectionProxyUrl: proxy.connectionProxyUrl || "",
             connectionNoProxy: proxy.connectionNoProxy || "",
             vercelRelayUrl: proxy.vercelRelayUrl || "",
             strictProxy: proxy.strictProxy === true,
+          },
+          onCredentialsRefreshed: async (refreshed) => {
+            await updateProviderCredentials(connection.id, refreshed);
           },
         });
       } catch (error) {

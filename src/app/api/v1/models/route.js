@@ -168,15 +168,21 @@ const LIVE_MODEL_RESOLVERS = {
   },
   // CodeArts answers with the AK/SK the login minted, which rotate hourly, so
   // listings ride the shared 10-minute catalog cache instead of forcing a fetch.
+  // The resolver renews that pair when it is stale and hands the new one back
+  // here — without that the listing signs with a dead credential on every call.
   codearts: async (conn) => {
     const proxy = await resolveConnectionProxyConfig(conn.providerSpecificData || {});
     const result = await resolveCodeartsModels(conn, {
+      log: console,
       proxyOptions: {
         connectionProxyEnabled: proxy.connectionProxyEnabled === true,
         connectionProxyUrl: proxy.connectionProxyUrl || "",
         connectionNoProxy: proxy.connectionNoProxy || "",
         vercelRelayUrl: proxy.vercelRelayUrl || "",
         strictProxy: proxy.strictProxy === true,
+      },
+      onCredentialsRefreshed: async (refreshed) => {
+        await updateProviderCredentials(conn.id, refreshed);
       },
     });
     return result?.models?.length ? { models: result.models } : null;

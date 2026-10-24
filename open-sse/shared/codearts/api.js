@@ -5,7 +5,8 @@
 // from the executor and are reusable from Next.js API routes.
 import { signHuaweiRequest } from "./signer.js";
 import { proxyAwareFetch } from "../../utils/proxyFetch.js";
-import { CODEARTS_API_BASE, CODEARTS_USER_AGENT } from "./auth.js";
+import { CODEARTS_API_BASE, CODEARTS_USER_AGENT, refreshCodeartsFromCredentials } from "./auth.js";
+import { shouldRefreshCredentials, withCredentialRefreshLock } from "../../services/oauthCredentialManager.js";
 
 // The published "CodeArts Agent" app whose model list the CLI reads.
 export const CODEARTS_AGENT_ID = "a8bcb36232554267a5142361cc25a393";
@@ -96,19 +97,88 @@ export function mapCodeartsModel(raw) {
 }
 
 /**
+ * A CodeArts AK/SK is a temporary STS credential that rotates hourly, and the
+ * dashboard reads this catalog long before any chat happens — so the stored
+ * pair is routinely dead by the time we sign with it. Signing anyway costs an
+ * HTTPS round trip that MUST be rejected, on every single /v1/models call, and
+ * logs the failure each time: a connection that is only ever listed (never
+ * chatted through) has no other path that would renew it. So renew here, and
+ * back off when renewal itself cannot succeed (no refresh token, no DPoP pair,
+ * revoked grant) instead of hammering the same dead grant.
+ */
+const REFRESH_BACKOFF_MS = 10 * 60 * 1000;
+const refreshBackoff = new Map();
+
+function mergeCodeartsCredentials(credentials, patch) {
+  return {
+    ...credentials,
+    ...patch,
+    providerSpecificData: {
+      ...(credentials?.providerSpecificData || {}),
+      ...(patch.providerSpecificData || {}),
+    },
+  };
+}
+
+/** @returns {Promise<{credentials: object, patch: object} | null>} null = do not retry now. */
+async function refreshCodeartsForCatalog(credentials, { proxyOptions, log, reason }) {
+  const ak = credentials?.providerSpecificData?.accessKeyId || "";
+  const backoffUntil = refreshBackoff.get(ak);
+  if (backoffUntil && backoffUntil > Date.now()) return null;
+
+  let patch = null;
+  try {
+    patch = await withCredentialRefreshLock("codearts", credentials, () =>
+      refreshCodeartsFromCredentials(credentials, { log, proxyOptions })
+    );
+  } catch (error) {
+    log?.warn?.("CODEARTS_MODELS", `credential refresh threw (${reason}): ${error?.message || error}`);
+    patch = null;
+  }
+
+  if (!patch || patch.error || !patch.providerSpecificData?.accessKeyId) {
+    refreshBackoff.set(ak, Date.now() + REFRESH_BACKOFF_MS);
+    log?.warn?.(
+      "CODEARTS_MODELS",
+      `cannot renew the temporary AK/SK (${reason}): ${patch?.message || patch?.error || "no credentials returned"} — reconnect the account`
+    );
+    return null;
+  }
+  refreshBackoff.delete(ak);
+  return { credentials: mergeCodeartsCredentials(credentials, patch), patch };
+}
+
+/**
  * GET /v1/agent-center/agents/detail → the account's live model list.
+ * @param {object} [options.onCredentialsRefreshed] persist a renewed AK/SK back
+ *   to the connection store (same contract as resolveCopilotModels).
  * @returns {Promise<{models: Array<object>} | null>} null when the account has
  *   no catalog (never throws on an empty list — callers fall back to static).
  */
-export async function resolveCodeartsModels(credentials, { proxyOptions = null, baseUrl = CODEARTS_API_BASE, forceRefresh = false } = {}) {
-  const keys = codeartsKeys(credentials);
+export async function resolveCodeartsModels(
+  credentials,
+  { proxyOptions = null, baseUrl = CODEARTS_API_BASE, forceRefresh = false, onCredentialsRefreshed = null, log = null } = {}
+) {
+  let creds = credentials;
+
+  // Expired on arrival: renewing first is what keeps the listing off the 401
+  // path entirely. Nothing to renew with → report "no live catalog" quietly and
+  // let the caller serve the static list.
+  if (shouldRefreshCredentials("codearts", credentials)) {
+    const renewed = await refreshCodeartsForCatalog(credentials, { proxyOptions, log, reason: "expired" });
+    if (!renewed) return null;
+    creds = renewed.credentials;
+    await persistRefreshedCredentials(renewed.patch, credentials, onCredentialsRefreshed, log);
+  }
+
+  const keys = codeartsKeys(creds);
   const cacheKey = `${baseUrl}|${keys.accessKeyId}`;
   const cached = catalogCache.get(cacheKey);
   if (!forceRefresh && cached && cached.expiresAt > Date.now()) return cached.result;
 
   const url = `${baseUrl.replace(/\/+$/, "")}/v1/agent-center/agents/detail?agent_id=${CODEARTS_AGENT_ID}`;
-  const data = await signedJson({
-    credentials,
+  const request = (credentialSet) => signedJson({
+    credentials: credentialSet,
     method: "GET",
     url,
     headers: {
@@ -123,9 +193,38 @@ export async function resolveCodeartsModels(credentials, { proxyOptions = null, 
     proxyOptions,
   });
 
+  let data;
+  try {
+    data = await request(creds);
+  } catch (error) {
+    // The credential can be stale without carrying a future expiry (rotated by
+    // another process, revoked server-side): one renew + one replay, no more.
+    const authRejected = error?.status === 401 || error?.status === 403;
+    const renewed = authRejected
+      ? await refreshCodeartsForCatalog(credentials, { proxyOptions, log, reason: `HTTP ${error.status}` })
+      : null;
+    if (!renewed) throw error;
+    creds = renewed.credentials;
+    await persistRefreshedCredentials(renewed.patch, credentials, onCredentialsRefreshed, log);
+    data = await request(creds);
+  }
+
   const rawModels = Array.isArray(data?.gpts?.models) ? data.gpts.models : [];
   const models = rawModels.map(mapCodeartsModel).filter(Boolean);
   const result = models.length ? { models, raw: rawModels } : null;
   cacheCatalog(cacheKey, result);
   return result;
+}
+
+async function persistRefreshedCredentials(patch, original, onCredentialsRefreshed, log) {
+  if (typeof onCredentialsRefreshed !== "function") return;
+  try {
+    // `existingProviderSpecificData` is the store's own baseline — the fields a
+    // refresh never returns (proxy config, user ids, …) ride along on it.
+    await onCredentialsRefreshed({ ...patch, existingProviderSpecificData: original?.providerSpecificData || {} });
+  } catch (error) {
+    // The catalog is already served from the renewed credential; a store write
+    // failure must not turn a good listing into an error.
+    log?.warn?.("CODEARTS_MODELS", `could not persist the renewed AK/SK: ${error?.message || error}`);
+  }
 }

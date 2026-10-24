@@ -1,7 +1,7 @@
 // 华为云码道 (CodeArts): every snap-access call is signed with Huawei's
 // SDK-HMAC-SHA256 over the temporary AK/SK minted by the DPoP login, so the
 // wiring has to hold together without a bearer token anywhere.
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import crypto from "node:crypto";
 import http from "node:http";
 
@@ -447,10 +447,15 @@ describe("CodeArts agent catalog", () => {
 
   // A signed GET the gateway either accepts or 400s — assert the exact wire
   // shape once on a loopback server instead of hitting Huawei per test run.
-  async function startCatalogServer(payload) {
+  async function startCatalogServer(payload, acceptAccessKeyId = null) {
     const seen = [];
     const server = http.createServer((req, res) => {
       seen.push(req.headers);
+      if (acceptAccessKeyId && !String(req.headers.authorization || "").includes(`Access=${acceptAccessKeyId}`)) {
+        res.writeHead(401, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error_msg: "signature do not match" }));
+        return;
+      }
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(payload));
     });
@@ -508,6 +513,86 @@ describe("CodeArts agent catalog", () => {
 
   it("refuses to sign a request without the temporary AK/SK", () => {
     expect(() => codeartsKeys({ providerSpecificData: {} })).toThrow(/AK\/SK/);
+  });
+
+  // The stored AK/SK is a temporary STS credential that rotates hourly, and the
+  // dashboard lists models long before any chat. Signing with a dead pair costs
+  // a rejected round trip on EVERY /v1/models call and logs it forever, because
+  // a connection that is only listed never reaches the executor's refresh.
+  describe("catalog credential renewal", () => {
+    beforeEach(() => vi.mocked(refreshCodeartsFromCredentials).mockClear());
+
+    const oldAk = () => `TESTAKOLD${Date.now()}${Math.floor(Math.random() * 1e4)}`;
+    const newAk = () => `TESTAKNEW${Date.now()}${Math.floor(Math.random() * 1e4)}`;
+    const expiredCreds = (accessKeyId) => ({
+      id: "conn-1",
+      expiresAt: new Date(Date.now() - 60_000).toISOString(),
+      providerSpecificData: { accessKeyId, secretAccessKey: "SK", securityToken: "ST" },
+    });
+    const renewedPatch = (accessKeyId) => ({
+      accessToken: "ST-new",
+      expiresIn: 3600,
+      providerSpecificData: { accessKeyId, secretAccessKey: "SK-new", securityToken: "ST-new" },
+    });
+
+    it("renews an expired AK/SK and signs the catalog with the new pair", async () => {
+      const nextAk = newAk();
+      const srv = await startCatalogServer(CATALOG_PAYLOAD, nextAk);
+      const persisted = [];
+      try {
+        vi.mocked(refreshCodeartsFromCredentials).mockResolvedValueOnce(renewedPatch(nextAk));
+        const result = await resolveCodeartsModels(expiredCreds(oldAk()), {
+          baseUrl: srv.baseUrl,
+          onCredentialsRefreshed: (patch) => { persisted.push(patch); },
+        });
+
+        expect(result.models.map((m) => m.id)).toEqual(["GLM-5.2", "openpangu-2.0-pro"]);
+        // One request only, and it carried the RENEWED key — the dead pair was
+        // never spent on a call that had to be rejected.
+        expect(srv.seen).toHaveLength(1);
+        expect(String(srv.seen[0].authorization)).toContain(`Access=${nextAk}`);
+        expect(persisted).toHaveLength(1);
+        expect(persisted[0].providerSpecificData.accessKeyId).toBe(nextAk);
+        expect(persisted[0].existingProviderSpecificData.secretAccessKey).toBe("SK");
+      } finally {
+        await srv.close();
+      }
+    });
+
+    it("reports no live catalog without spending a request when renewal is impossible", async () => {
+      const deadAk = oldAk();
+      const srv = await startCatalogServer(CATALOG_PAYLOAD, "never-used");
+      try {
+        vi.mocked(refreshCodeartsFromCredentials).mockResolvedValueOnce({ error: "invalid_grant", message: "CodeArts refresh token missing — reconnect the account" });
+        expect(await resolveCodeartsModels(expiredCreds(deadAk), { baseUrl: srv.baseUrl })).toBeNull();
+        expect(srv.seen).toHaveLength(0);
+
+        // Backoff: the same dead grant must not be re-attempted (and re-logged)
+        // on the next listing.
+        expect(await resolveCodeartsModels(expiredCreds(deadAk), { baseUrl: srv.baseUrl })).toBeNull();
+        expect(vi.mocked(refreshCodeartsFromCredentials)).toHaveBeenCalledTimes(1);
+      } finally {
+        await srv.close();
+      }
+    });
+
+    it("renews once and replays when the gateway rejects the stored pair", async () => {
+      const staleAk = oldAk();
+      const nextAk = `TESTAK401${Date.now()}`;
+      const srv = await startCatalogServer(CATALOG_PAYLOAD, nextAk);
+      try {
+        vi.mocked(refreshCodeartsFromCredentials).mockResolvedValueOnce(renewedPatch(nextAk));
+        const creds = { id: "conn-2", expiresAt: new Date(Date.now() + 3600_000).toISOString(), providerSpecificData: { accessKeyId: staleAk, secretAccessKey: "SK", securityToken: "ST" } };
+        const result = await resolveCodeartsModels(creds, { baseUrl: srv.baseUrl });
+
+        expect(result.models).toHaveLength(2);
+        expect(srv.seen).toHaveLength(2);
+        expect(String(srv.seen[0].authorization)).toContain(`Access=${staleAk}`);
+        expect(String(srv.seen[1].authorization)).toContain(`Access=${nextAk}`);
+      } finally {
+        await srv.close();
+      }
+    });
   });
 });
 
