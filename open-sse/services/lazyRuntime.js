@@ -11,7 +11,6 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import { getWritableDataDir } from "../utils/writableDataDir.js";
 
@@ -46,6 +45,54 @@ function npmInstall(pkg, version) {
 
 const inflight = new Map();
 
+// Entry file of an installed package, resolved from package.json alone.
+// createRequire().resolve() cannot be used here: Next's webpack build folds
+// `createRequire(<dynamic path>)` to `void 0` in the published CLI bundle, so
+// every lazy load threw "Cannot read properties of undefined (reading
+// 'resolve')" before the on-demand install could run (0.6.15 and earlier).
+// fs-only resolution survives bundling and costs one small JSON read.
+function pickExportTarget(value) {
+  if (!value) return null;
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const hit = pickExportTarget(item);
+      if (hit) return hit;
+    }
+    return null;
+  }
+  if (typeof value !== "object") return null;
+  // Subpath map wins over bare conditions ({".": ...} / {".": {import: ...}}).
+  if (value["."] !== undefined) {
+    const hit = pickExportTarget(value["."]);
+    if (hit) return hit;
+  }
+  for (const condition of ["import", "node", "require", "default"]) {
+    const hit = pickExportTarget(value[condition]);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+export function resolvePackageEntry(rootDir, pkg) {
+  if (!rootDir || !pkg || pkg.includes("/") || pkg.includes("\\")) return null;
+  const pkgDir = path.join(rootDir, "node_modules", pkg);
+  let meta;
+  try {
+    meta = JSON.parse(fs.readFileSync(path.join(pkgDir, "package.json"), "utf8"));
+  } catch {
+    return null;
+  }
+  const relative = pickExportTarget(meta.exports) || meta.module || meta.main || "index.js";
+  let entry = path.resolve(pkgDir, relative);
+  try {
+    if (fs.statSync(entry).isDirectory()) entry = path.join(entry, "index.js");
+  } catch {
+    return null;
+  }
+  return pathToFileURL(entry).href;
+}
+
 async function load(pkg) {
   // 1) Resolvable from the app install (dev machine / traced standalone).
   try {
@@ -54,11 +101,17 @@ async function load(pkg) {
     if (!isModuleMissing(error)) throw error;
   }
   // 2) Already present in the runtime dir from a previous install.
-  const runtimeRequire = createRequire(path.join(getRuntimeDir(), "package.json"));
-  try {
-    return await import(pathToFileURL(runtimeRequire.resolve(pkg)).href);
-  } catch (error) {
-    if (!isModuleMissing(error)) throw error;
+  const runtimeDir = getRuntimeDir();
+  const existing = resolvePackageEntry(runtimeDir, pkg);
+  if (existing) {
+    try {
+      // webpackIgnore: without it the bundle replaces this with a chunk-map
+      // lookup that always throws "Cannot find module '<file url>'" — the
+      // runtime dir lives outside the webpack output by design.
+      return await import(/* webpackIgnore: true */ existing);
+    } catch (error) {
+      if (!isModuleMissing(error)) throw error;
+    }
   }
   // 3) Download on demand, then import from the runtime dir.
   // An unmapped name has no pinned version, and installing `latest` into the
@@ -80,7 +133,14 @@ async function load(pkg) {
       `install it manually: cd "${dir}" && npm install ${pkg}@${version}`
     );
   }
-  return import(pathToFileURL(createRequire(path.join(dir, "package.json")).resolve(pkg)).href);
+  const installed = resolvePackageEntry(dir, pkg);
+  if (!installed) {
+    throw new Error(
+      `${pkg}@${version} installed into "${dir}" but no entry file could be resolved — ` +
+      `check that the package ships a package.json with main/exports`
+    );
+  }
+  return import(/* webpackIgnore: true */ installed);
 }
 
 export function loadRuntimeDep(pkg) {

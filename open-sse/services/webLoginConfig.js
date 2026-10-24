@@ -7,6 +7,29 @@
 
 /** @typedef {{ type: "cookie" | "localStorage", name: string }} TokenSource */
 
+/**
+ * localStorage values may be wrapped as {"value":"<token>","__version":"0"}.
+ * The login page writes that envelope with `value: null` before the user has
+ * signed in, so presence of the key means nothing — unwrap it and return null
+ * unless the inner value is a non-empty string.
+ */
+export function unwrapLocalStorageToken(raw) {
+  if (typeof raw !== "string" || !raw.trim()) return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    // Not JSON — the raw value is the token.
+    return raw;
+  }
+  // A JSON object is the storage envelope, never a token: only its `value`
+  // counts, and only when it is a non-empty string.
+  if (parsed && typeof parsed === "object") {
+    return typeof parsed.value === "string" && parsed.value.trim() ? parsed.value : null;
+  }
+  return raw;
+}
+
 export const WEB_LOGIN_CONFIGS = {
   "grok-web": {
     loginUrl: "https://grok.com/",
@@ -43,6 +66,8 @@ export const WEB_LOGIN_CONFIGS = {
   },
   // deepseek-web stores its credential in localStorage, not a cookie.
   // Stored as JSON {"value":"<base64-token>","__version":"0"} or raw token.
+  // The sign-in page writes {"value":null,...} to every visitor, so a bare
+  // length check on the envelope would end the capture before login happens.
   "deepseek-web": {
     loginUrl: "https://chat.deepseek.com/sign_in",
     cookieDomain: ".deepseek.com",
@@ -50,14 +75,8 @@ export const WEB_LOGIN_CONFIGS = {
     // The executor expects the raw token value, not a cookie header.
     credentialFrom: "localStorageValue",
     validateToken: (value) => {
-      if (typeof value !== "string" || !value.trim()) return false;
-      try {
-        const parsed = JSON.parse(value);
-        const token = typeof parsed?.value === "string" ? parsed.value : value;
-        return typeof token === "string" && token.length >= 20;
-      } catch {
-        return value.length >= 20;
-      }
+      const token = unwrapLocalStorageToken(value);
+      return typeof token === "string" && token.trim().length >= 20;
     },
   },
   "uc-web": {

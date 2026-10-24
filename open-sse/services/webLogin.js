@@ -13,7 +13,7 @@ import { mkdirSync, readdirSync, rmSync } from "node:fs";
 import path from "node:path";
 import { join } from "node:path";
 import { loadRuntimeDep } from "./lazyRuntime.js";
-import { getWebLoginConfig } from "./webLoginConfig.js";
+import { getWebLoginConfig, unwrapLocalStorageToken } from "./webLoginConfig.js";
 import { getWritableDataDir } from "../utils/writableDataDir.js";
 import { pruneProfileCaches, formatBytes } from "./browserProfileCache.js";
 import { resolveSystemChromeExecutable } from "../executors/browserExecutableCheck.js";
@@ -215,13 +215,10 @@ async function runLogin(session, config) {
 
       if (config.credentialFrom === "localStorageValue") {
         const source = config.tokenSources[0];
-        let val = found.localStorageValues[source.name];
-        try {
-          const parsed = JSON.parse(val);
-          if (parsed && typeof parsed.value === "string") val = parsed.value;
-        } catch {
-          // not JSON, keep raw
-        }
+        const val = unwrapLocalStorageToken(found.localStorageValues[source.name]);
+        // The sign-in page writes a placeholder envelope before login; only a
+        // real token ends the capture.
+        if (!val) continue;
         session.credential = val;
       } else {
         session.credential = found.cookieHeader;
