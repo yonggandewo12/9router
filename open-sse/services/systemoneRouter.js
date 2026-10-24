@@ -10,6 +10,10 @@ export const MAX_STATE_CHARS = 2000;
 export const MAX_STICKY_SESSIONS = 5000;
 export const STICKY_SESSION_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours
 
+// TTL sweep throttle for the sticky store (see pruneStickyComboSessions).
+const PRUNE_INTERVAL_MS = 60 * 1000;
+let lastPruneAt = 0;
+
 /**
  * In-memory session stickiness store for smart-routed combos.
  * Key: `${comboName}:${sessionId}` -> Value: { model, lastUsed }
@@ -204,7 +208,6 @@ export function setStickyComboModel(comboName, sessionId, model) {
   const key = `${comboName}:${sessionId}`;
   comboSessionModelStore.set(key, { model, lastUsed: Date.now() });
 }
-
 /**
  * Clear a sticky session mapping (e.g. after a model fails or resets).
  *
@@ -228,26 +231,28 @@ export function clearStickyComboSession(comboName, sessionId = null) {
 }
 
 /**
- * Prune old or excess sticky sessions to prevent unbounded memory growth.
+ * Prune expired and excess sticky sessions.
+ *
+ * Two triggers, deliberately different:
+ *  - TTL sweep: throttled to once a minute and independent of size. Expired
+ *    entries are also the only way a renamed combo or a removed member (a key
+ *    that is NEVER read again, so the read path in getStickyComboModel cannot
+ *    reach it) leaves the store.
+ *  - LRU drop: only at the ceiling, keeping the normal case O(1).
+ * A large store is at worst ~600KB, so the sweep is affordable.
  */
-export function pruneStickyComboSessions() {
-  if (comboSessionModelStore.size < MAX_STICKY_SESSIONS) return;
-
-  const now = Date.now();
-  // Remove expired
-  for (const [k, v] of comboSessionModelStore.entries()) {
-    if (now - v.lastUsed > STICKY_SESSION_TTL_MS) {
-      comboSessionModelStore.delete(k);
+export function pruneStickyComboSessions(now = Date.now()) {
+  if (now - lastPruneAt >= PRUNE_INTERVAL_MS) {
+    lastPruneAt = now;
+    for (const [k, v] of comboSessionModelStore.entries()) {
+      if (now - v.lastUsed > STICKY_SESSION_TTL_MS) comboSessionModelStore.delete(k);
     }
   }
 
-  // If still above ceiling, drop oldest entries
-  if (comboSessionModelStore.size >= MAX_STICKY_SESSIONS) {
-    const sorted = [...comboSessionModelStore.entries()].sort((a, b) => a[1].lastUsed - b[1].lastUsed);
-    const toDrop = sorted.slice(0, Math.floor(MAX_STICKY_SESSIONS / 4));
-    for (const [k] of toDrop) {
-      comboSessionModelStore.delete(k);
-    }
+  if (comboSessionModelStore.size < MAX_STICKY_SESSIONS) return;
+  const sorted = [...comboSessionModelStore.entries()].sort((a, b) => a[1].lastUsed - b[1].lastUsed);
+  for (const [k] of sorted.slice(0, Math.floor(MAX_STICKY_SESSIONS / 4))) {
+    comboSessionModelStore.delete(k);
   }
 }
 
@@ -256,4 +261,10 @@ export function pruneStickyComboSessions() {
  */
 export function resetStickyComboStore() {
   comboSessionModelStore.clear();
+  lastPruneAt = 0;
+}
+
+/** Test-only: current sticky-store size, so the TTL sweep can be observed. */
+export function __stickyStoreSizeForTest() {
+  return comboSessionModelStore.size;
 }

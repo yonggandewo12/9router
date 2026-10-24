@@ -20,7 +20,7 @@ import { CLAUDE_BLOCK, RESPONSES_ITEM } from "../translator/schema/blocks.js";
 import { CLAUDE_EVENT, CLAUDE_DELTA, RESPONSES_EVENT, RESPONSES_EVENT_PREFIX } from "../translator/schema/streamEvents.js";
 import { toOpenAIFinish } from "../translator/concerns/finishReason.js";
 import { FORMATS } from "../translator/formats.js";
-import { EMPTY_PEEK_DEADLINE_MS } from "../config/runtimeConfig.js";
+import { EMPTY_PEEK_DEADLINE_MS, STREAM_STALL_TIMEOUT_MS } from "../config/runtimeConfig.js";
 import { parseSSELine } from "../utils/streamHelpers.js";
 
 // OpenAI chat content test. A chunk counts as content only if it carries
@@ -184,7 +184,21 @@ export async function peekStreamForContent(body, { deadlineMs = EMPTY_PEEK_DEADL
     if (res === "__deadline__") {
       // Fail-open: commit whatever we have. Hand the STILL-PENDING read to the caller so its
       // chunk is replayed, not dropped (fixes the content-dropping deadline race).
-      return settle({ outcome: "content", timedOut: true, head: headChunks, reader, pendingRead, finishReason: state.finishReason });
+      //
+      // The peek's own timer is cleared here, and the handed-off read may never settle —
+      // an upstream that opened the stream, sent a frame, then froze would hang
+      // reconstructStream's pull() (and the client's stream) with NO ceiling at all. The
+      // resumed read therefore gets the same stall budget any other stream frame gets.
+      clearTimeout(timer);
+      timer = null;
+      const resumedRead = new Promise((resolve) => {
+        const stall = setTimeout(() => resolve({ done: true, value: undefined }), STREAM_STALL_TIMEOUT_MS);
+        pendingRead.then(
+          (r) => { clearTimeout(stall); resolve(r); },
+          (err) => { clearTimeout(stall); resolve(Promise.reject(err)); }
+        );
+      });
+      return { outcome: "content", timedOut: true, head: headChunks, reader, pendingRead: resumedRead, finishReason: state.finishReason };
     }
     const { done, value } = res;
     pendingRead = null;

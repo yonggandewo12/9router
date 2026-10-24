@@ -13,6 +13,7 @@ import {
   isNousApiKeyAccepted,
 } from "open-sse/services/nous.js";
 import { normalizeProviderId } from "@/lib/providerNormalization";
+import { hasWebIdentityProbe, fetchWebIdentity } from "open-sse/services/webIdentity.js";
 
 // Probe a webSearch/webFetch provider using its searchConfig/fetchConfig.
 // Returns true if API key is accepted (status !== 401 && !== 403).
@@ -647,6 +648,27 @@ export async function POST(request) {
         }
 
         default: {
+          // Cookie-auth web providers (deepseek-web, gemini-web, muse-web, chatgpt-web,
+          // uc-web, …) have no key endpoint to probe. Without this they would fall to the
+          // generic OpenAI probe below, which sends the cookie jar as
+          // `Authorization: Bearer <jar>` to an HTML page — the 200 that page returns marks
+          // a DEAD session as valid. Use the session-identity probe instead, which is the
+          // only check that can tell a live jar from a stale one.
+          if (hasWebIdentityProbe(provider)) {
+            const identity = await fetchWebIdentity(provider, apiKey);
+            if (identity.status === "valid") {
+              isValid = true;
+            } else if (identity.status === "invalid") {
+              isValid = false;
+              error = identity.error || "Session is no longer valid";
+            } else {
+              // Inconclusive (network hiccup) must not mark a healthy session broken.
+              isValid = true;
+              error = `Could not verify the session: ${identity.error}`;
+            }
+            break;
+          }
+
           // Generic probe for OpenAI-compatible providers (config-driven from PROVIDERS)
           const cfg = PROVIDERS[provider];
           if (!cfg || cfg.format !== "openai" || !cfg.baseUrl) {

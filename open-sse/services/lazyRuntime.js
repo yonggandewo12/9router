@@ -61,7 +61,16 @@ async function load(pkg) {
     if (!isModuleMissing(error)) throw error;
   }
   // 3) Download on demand, then import from the runtime dir.
-  const version = LAZY_DEP_VERSIONS[pkg] || "latest";
+  // An unmapped name has no pinned version, and installing `latest` into the
+  // proxy process is a supply-chain decision nobody made: declare the version
+  // in LAZY_DEP_VERSIONS instead of guessing one.
+  const version = LAZY_DEP_VERSIONS[pkg];
+  if (!version) {
+    throw new Error(
+      `${pkg} is missing and has no pinned runtime version — add it to ` +
+      `LAZY_DEP_VERSIONS in open-sse/services/lazyRuntime.js (never install "latest" at runtime).`
+    );
+  }
   const dir = getRuntimeDir();
   const res = await npmInstall(pkg, version);
   if (!res.ok) {

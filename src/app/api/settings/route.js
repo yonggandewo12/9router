@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getSettings, updateSettings } from "@/lib/localDb";
 import { applyOutboundProxyEnv } from "@/lib/network/outboundProxy";
+import { CUSTOM_PROMPT_MAX_CHARS } from "open-sse/config/runtimeConfig.js";
 import { resetComboRotation } from "open-sse/services/combo.js";
 import bcrypt from "bcryptjs";
 
@@ -73,6 +74,21 @@ export async function PATCH(request) {
     if (Object.prototype.hasOwnProperty.call(body, "oidcClientSecret")) {
       if (!body.oidcClientSecret || !String(body.oidcClientSecret).trim()) {
         delete body.oidcClientSecret;
+      }
+    }
+
+    // The custom system prompt is appended to EVERY outbound request, so an
+    // oversized or non-string value here bills, slows and can be rejected by
+    // the upstream for every API-key tenant. Bound it at the write boundary.
+    if (Object.prototype.hasOwnProperty.call(body, "customPrompt")) {
+      if (typeof body.customPrompt !== "string") {
+        return NextResponse.json({ error: "customPrompt must be a string" }, { status: 400 });
+      }
+      if (body.customPrompt.length > CUSTOM_PROMPT_MAX_CHARS) {
+        return NextResponse.json(
+          { error: `customPrompt is limited to ${CUSTOM_PROMPT_MAX_CHARS} characters` },
+          { status: 400 }
+        );
       }
     }
 

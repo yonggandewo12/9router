@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { injectCustomPrompt } from "../../open-sse/rtk/customPrompt.js";
 import { FORMATS } from "../../open-sse/translator/formats.js";
 import { ROLE } from "../../open-sse/translator/schema/roles.js";
+import { CUSTOM_PROMPT_MAX_CHARS } from "../../open-sse/config/runtimeConfig.js";
 
 const SEP = "\n\n";
 
@@ -58,5 +59,19 @@ describe("injectCustomPrompt", () => {
     const body = { instructions: "hello", input: [] };
     injectCustomPrompt(body, FORMATS.OPENAI_RESPONSES, "MY PROMPT");
     expect(body.instructions).toBe(`hello${SEP}MY PROMPT`);
+  });
+
+  // The prompt rides along on EVERY request, so an over-ceiling value (a restored
+  // backup, a direct DB edit) must be dropped rather than billed forever.
+  it("drops a prompt over the ceiling without touching the body", () => {
+    const body = { messages: [{ role: ROLE.SYSTEM, content: "hello" }] };
+    expect(injectCustomPrompt(body, FORMATS.OPENAI, "x".repeat(CUSTOM_PROMPT_MAX_CHARS + 1))).toBe(false);
+    expect(body.messages[0].content).toBe("hello");
+  });
+
+  it("accepts a prompt exactly at the ceiling", () => {
+    const body = { messages: [{ role: ROLE.SYSTEM, content: "hello" }] };
+    expect(injectCustomPrompt(body, FORMATS.OPENAI, "x".repeat(CUSTOM_PROMPT_MAX_CHARS))).toBe(true);
+    expect(body.messages[0].content).toContain("xxxx");
   });
 });

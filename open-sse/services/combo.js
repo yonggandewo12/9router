@@ -563,7 +563,11 @@ export async function handleComboChat({
           clearStickyComboSession(comboName, sessionId);
         }
         // Drain/close the discarded stream in the background so its usage logging still runs.
-        peeked.response.body?.cancel?.().catch(() => {});
+        // An async rejection here means the upstream stream never settles and its socket stays
+        // held — say so instead of swallowing it, otherwise the leak has no trace.
+        peeked.response.body?.cancel?.().catch((err) => {
+          log.warn("COMBO", `discarded stream ${modelStr} not drained: ${err?.message || err}`);
+        });
         lastError = `empty generation (${reasonLabel})`;
         lastStatus = 502;
         continue;

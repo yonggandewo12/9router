@@ -13,6 +13,9 @@ import {
   buildChoiceCriteria,
   parseSystemOneRouteAnswer,
   resetStickyComboStore,
+  pruneStickyComboSessions,
+  STICKY_SESSION_TTL_MS,
+  __stickyStoreSizeForTest as stickyStoreSize,
 } from "../../open-sse/services/systemoneRouter.js";
 
 const log = { info: () => {}, warn: () => {}, debug: () => {}, error: () => {} };
@@ -548,13 +551,9 @@ describe("System One Smart Combo Router", () => {
         calls.push(model);
         return okResponse(`Answer from ${model}`);
       });
-      const resolveSmartChoice = vi.fn(async () => ({
-        choice: "ds/deepseek-v4",
-        confidence: 0.9,
-      }));
 
       // 85 looks like a percent; unclamped it would reject every decision.
-      await handleComboChat({
+      const res = await handleComboChat({
         body: { messages: [{ role: "user", content: "Task" }] },
         models: ["cx/gpt-5-mini", "ds/deepseek-v4"],
         handleSingleModel,
@@ -564,10 +563,66 @@ describe("System One Smart Combo Router", () => {
         smartPolicy: "custom",
         confidenceThreshold: 85,
         sessionId: "session-clamp",
-        resolveSmartChoice,
+        resolveSmartChoice: async () => ({ choice: "ds/deepseek-v4", confidence: 0.9 }),
       });
 
+      expect(res.ok).toBe(true);
       expect(calls[0]).toBe("ds/deepseek-v4");
+    });
+  });
+
+  describe("sticky follows the model that actually serves", () => {
+    // A vision request makes autoSwitch float the vision model to the front, so
+    // the model that serves (and holds the session's prompt cache) is NOT the
+    // router's pick / the locked model. The sticky entry must name the server,
+    // otherwise the next turn "retains cache" on a model that never ran.
+    const visionBody = {
+      messages: [{ role: "user", content: [{ type: "text", text: "what is in this image?" }, { type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } }] }],
+    };
+    const MODELS = ["deepseek/deepseek-chat", "anthropic/claude-sonnet-4.6"];
+
+    function firstServed(handleSingleModel) {
+      return handleSingleModel.mock.calls[0][1];
+    }
+
+    it("corrects the sticky entry under smart-switch when autoSwitch reorders", async () => {
+      setStickyComboModel("vision-combo", "s-smart", "deepseek/deepseek-chat");
+      const handleSingleModel = vi.fn(async (_b, model) => okResponse(`from ${model}`));
+
+      await handleComboChat({
+        body: visionBody,
+        models: MODELS,
+        handleSingleModel,
+        log,
+        comboName: "vision-combo",
+        comboStrategy: "smart",
+        smartPolicy: "smart",
+        sessionId: "s-smart",
+        resolveSmartChoice: async () => ({ choice: "deepseek/deepseek-chat", confidence: 0.99 }),
+      });
+
+      expect(firstServed(handleSingleModel)).toBe("anthropic/claude-sonnet-4.6");
+      expect(getStickyComboModel("vision-combo", "s-smart", MODELS)).toBe("anthropic/claude-sonnet-4.6");
+    });
+
+    it("corrects the sticky entry under strict lock when autoSwitch reorders", async () => {
+      setStickyComboModel("vision-combo", "s-strict", "deepseek/deepseek-chat");
+      const handleSingleModel = vi.fn(async (_b, model) => okResponse(`from ${model}`));
+
+      await handleComboChat({
+        body: visionBody,
+        models: MODELS,
+        handleSingleModel,
+        log,
+        comboName: "vision-combo",
+        comboStrategy: "smart",
+        smartPolicy: "strict",
+        sessionId: "s-strict",
+        resolveSmartChoice: null,
+      });
+
+      expect(firstServed(handleSingleModel)).toBe("anthropic/claude-sonnet-4.6");
+      expect(getStickyComboModel("vision-combo", "s-strict", MODELS)).toBe("anthropic/claude-sonnet-4.6");
     });
   });
 
@@ -589,6 +644,18 @@ describe("System One Smart Combo Router", () => {
       });
 
       expect(res.status).toBe(429);
+    });
+  });
+
+  describe("sticky store hygiene", () => {
+    it("reclaims expired sessions below the size ceiling", () => {
+      setStickyComboModel("gc-combo", "dead-session", "cx/gpt-5-mini");
+      expect(stickyStoreSize()).toBe(1);
+
+      // A renamed combo / removed member is never read again, so only the
+      // size-independent TTL sweep can reclaim it.
+      pruneStickyComboSessions(Date.now() + STICKY_SESSION_TTL_MS + 1000);
+      expect(stickyStoreSize()).toBe(0);
     });
   });
 });

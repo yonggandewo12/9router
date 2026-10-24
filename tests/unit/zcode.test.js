@@ -93,11 +93,35 @@ describe("zcode system-prompt gate", () => {
   });
 
   it("leaves a real ZCode system prompt untouched", () => {
-    const body = {
-      system: [{ type: "text", text: "You are an interactive ZCode agent that helps" }],
-      messages: [],
-    };
+    const body = { system: ZCODE_SYSTEM_BLOCKS, messages: [] };
     expect(withZcodeSystemPrompt(body)).toBe(body);
+  });
+
+  // Live-measured 2026-10-24: a system whose second block merely CONTAINS the
+  // marker text (not the official block verbatim) answers 3012 when forwarded,
+  // but passes once re-wrapped behind the official pair.
+  it("re-wraps a near-official prompt instead of forwarding it into 3012", () => {
+    const out = withZcodeSystemPrompt({
+      system: [
+        { type: "text", text: "You are ZCode, an interactive coding agent" },
+        { type: "text", text: "You are an interactive ZCode agent that helps (trimmed)" },
+      ],
+      messages: [],
+    });
+    expect(out.system).toHaveLength(ZCODE_SYSTEM_BLOCKS.length + 1);
+    expect(out.system.slice(0, -1)).toEqual(ZCODE_SYSTEM_BLOCKS);
+    expect(out.system.at(-1).text).toContain("(trimmed)");
+  });
+
+  // Verbatim copies of the official blocks are not re-merged into the appended
+  // block — the pair is prepended anyway, and duplicating ~7KB would bill twice.
+  it("drops verbatim official blocks from the merged client block", () => {
+    const out = withZcodeSystemPrompt({
+      system: [...ZCODE_SYSTEM_BLOCKS, { type: "text", text: "extra guidance" }, { type: "text", text: "more" }, { type: "text", text: "even more" }],
+      messages: [],
+    });
+    expect(out.system).toHaveLength(ZCODE_SYSTEM_BLOCKS.length + 1);
+    expect(out.system.at(-1).text).toBe("extra guidance\n\nmore\n\neven more");
   });
 
   // A client prompt that merely QUOTES the marker is not the official layout —
@@ -155,7 +179,10 @@ describe("zcode system-prompt gate", () => {
     expect(out.max_tokens).toBe(32);
   });
 
-  it("does not double-inject through the executor's transformRequest", () => {
+  // A block that starts with the official first line but is not the official
+  // pair verbatim is NOT treated as the official layout — it gets the pair
+  // prepended once, and the client text survives in the appended block.
+  it("does not double-inject the pair through the executor's transformRequest", () => {
     const body = {
       model: "GLM-5.3",
       max_tokens: 32,
@@ -163,7 +190,8 @@ describe("zcode system-prompt gate", () => {
       messages: [{ role: "user", content: "hi" }],
     };
     const out = new ZcodeExecutor().transformRequest("GLM-5.3", body, true, { accessToken: "tok" });
-    expect(out.system).toHaveLength(1);
+    expect(out.system).toHaveLength(ZCODE_SYSTEM_BLOCKS.length + 1);
+    expect(out.system.slice(0, ZCODE_SYSTEM_BLOCKS.length)).toEqual(ZCODE_SYSTEM_BLOCKS);
   });
 
   // Malformed blocks (non-string text) must not crash the request path — they

@@ -12,26 +12,21 @@
 import { DefaultExecutor } from "./default.js";
 import { ZCODE_SYSTEM_BLOCKS } from "../shared/zcode/systemPrompt.js";
 
-const ZCODE_PROMPT_MARKER = "You are an interactive ZCode agent";
-
-// Scan blocks instead of joining them: agent system prompts run to 100KB and
-// this runs on every request.
-function hasZcodePrompt(system) {
-  const textOf = (block) =>
-    typeof block === "string" ? block : typeof block?.text === "string" ? block.text : "";
-  if (typeof system === "string") return system.includes(ZCODE_PROMPT_MARKER);
-  if (!Array.isArray(system)) return false;
-  return system.some((block) => textOf(block).includes(ZCODE_PROMPT_MARKER));
-}
-
-// The gate tolerates the official pair plus AT MOST one extra block. A client
-// system that merely QUOTES the marker (e.g. in a custom prompt) is not the
-// official layout; forwarded untouched it would exceed the block budget and
-// answer 3012. Only a system already within the budget is passed through.
+// The gate compares the official blocks byte-for-byte; a marker SUBSTRING is not
+// enough. Live-measured 2026-10-24: a 2-block system whose second block merely
+// contains the marker text (but is not the official block) answers 3012, while
+// the same client text re-wrapped behind the official pair passes. So forward
+// untouched ONLY when both official blocks are present verbatim and the block
+// budget (official pair + at most one extra) still holds; anything else gets
+// re-wrapped, which is the path proven to pass. A client that rewrites part of
+// the official prompt (e.g. the visualization path) therefore pays the pair
+// twice — cheaper than a hard 3012 (live case, 2026-10-24).
 function isOfficialLayout(system) {
-  if (typeof system === "string") return system.includes(ZCODE_PROMPT_MARKER);
-  if (!Array.isArray(system)) return false;
-  return system.length <= 3 && hasZcodePrompt(system);
+  const texts = (Array.isArray(system) ? system : typeof system === "string" ? [system] : []).map(
+    (block) => (typeof block === "string" ? block : typeof block?.text === "string" ? block.text : "")
+  );
+  if (texts.length > 3) return false;
+  return ZCODE_SYSTEM_BLOCKS.every((official) => texts.some((text) => text === official.text));
 }
 
 // Client system → one text block. The gate counts system blocks: the official
@@ -41,17 +36,25 @@ function isOfficialLayout(system) {
 // time this runs, so the merged block inherits that breakpoint — marker count
 // is preserved exactly (N client markers collapse into the 1 we emit), keeping
 // the system prefix cacheable without ever exceeding the 4-marker budget.
+// Verbatim copies of the official blocks are dropped: this path prepends them,
+// and re-sending ~7KB of prompt twice would just bill the same tokens again.
 function clientSystemAsOneBlock(system) {
-  if (typeof system === "string") return { text: system, cacheControl: null };
+  if (typeof system === "string") {
+    return ZCODE_SYSTEM_BLOCKS.some((o) => o.text === system)
+      ? null
+      : { text: system, cacheControl: null };
+  }
   if (!Array.isArray(system)) return null;
   let cacheControl = null;
   const parts = [];
   for (const block of system) {
     if (typeof block === "string") {
-      if (block) parts.push(block);
+      if (block && !ZCODE_SYSTEM_BLOCKS.some((o) => o.text === block)) parts.push(block);
       continue;
     }
-    if (typeof block?.text === "string" && block.text) parts.push(block.text);
+    if (typeof block?.text === "string" && block.text && !ZCODE_SYSTEM_BLOCKS.some((o) => o.text === block.text)) {
+      parts.push(block.text);
+    }
     if (block?.cache_control) cacheControl = block.cache_control;
   }
   if (!parts.length) return null;

@@ -63,6 +63,12 @@ export const STREAM_FIRST_CHUNK_TIMEOUT_MS = envMs("STREAM_FIRST_CHUNK_TIMEOUT_M
 // Env: EMPTY_PEEK_DEADLINE_MS.
 export const EMPTY_PEEK_DEADLINE_MS = envMs("EMPTY_PEEK_DEADLINE_MS", 45 * 1000);
 
+// Ceiling for the user-authored custom system prompt. The text is appended to the
+// system prompt of EVERY request the proxy sends, so an unbounded value bills,
+// slows and can even get rejected by the upstream — across every API-key tenant.
+// Env: CUSTOM_PROMPT_MAX_CHARS.
+export const CUSTOM_PROMPT_MAX_CHARS = envMs("CUSTOM_PROMPT_MAX_CHARS", 20000);
+
 // Fetch connect timeout: abort if upstream doesn't return response headers within this duration
 export const FETCH_CONNECT_TIMEOUT_MS = envMs("FETCH_CONNECT_TIMEOUT_MS", 60 * 1000);
 
