@@ -193,6 +193,9 @@ export async function peekStreamForContent(body, { deadlineMs = EMPTY_PEEK_DEADL
       timer = null;
       const resumedRead = new Promise((resolve) => {
         const stall = setTimeout(() => resolve({ done: true, value: undefined }), STREAM_STALL_TIMEOUT_MS);
+        // A reconstructed stream that the caller never drains would otherwise keep
+        // this 6-minute timer (and the process) alive after the request is gone.
+        stall.unref?.();
         pendingRead.then(
           (r) => { clearTimeout(stall); resolve(r); },
           (err) => { clearTimeout(stall); resolve(Promise.reject(err)); }
