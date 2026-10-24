@@ -114,6 +114,34 @@ describe("criterion 4 — RSA decrypt works", () => {
       parseZedCallbackPayload("http://127.0.0.1:1/?user_id=only-user"),
     ).toThrow(/user_id and access_token/);
   });
+
+  // A wrong key can still "decrypt" through the PKCS#1 v1.5 fallback (its
+  // unpadding carries no integrity check), so the plaintext shape is the only
+  // thing that distinguishes a real token from key-schedule garbage. A short
+  // non-conforming payload must be rejected, not stored as a credential.
+  it("rejects a PKCS#1 v1.5 payload whose plaintext is not a bearer token", () => {
+    const auth = createZedNativeAuthData({}, { nativeAppPort: 1 });
+    const key = crypto.createPublicKey({
+      key: Buffer.from(auth.publicKey, "base64url"),
+      format: "der",
+      type: "pkcs1",
+    });
+    const encryptPkcs1 = (plaintext) =>
+      crypto
+        .publicEncrypt({ key, padding: crypto.constants.RSA_PKCS1_PADDING }, Buffer.from(plaintext, "utf8"))
+        .toString("base64url");
+
+    expect(() => decryptZedAccessToken(encryptPkcs1("short"), auth.privateKeyVerifier)).toThrow(
+      /decrypt/i,
+    );
+    expect(() => decryptZedAccessToken(encryptPkcs1("token with\ncontrol"), auth.privateKeyVerifier)).toThrow(
+      /decrypt/i,
+    );
+    // The fallback itself must keep working for a plausible token.
+    expect(decryptZedAccessToken(encryptPkcs1("zed-token-abcdef"), auth.privateKeyVerifier)).toBe(
+      "zed-token-abcdef",
+    );
+  });
 });
 
 describe("criterion 2 — stray callback MUST NOT kill session", () => {
@@ -207,7 +235,7 @@ describe("criterion 5 — systemId stable authorize → exchange → stored", ()
     // Public key always rides in the authorize URL (mirrors the real flow).
     const pubFromUrl = new URL(auth.authUrl).searchParams.get("native_app_public_key");
     expect(pubFromUrl).toBeTruthy();
-    const enc2 = encryptForCallback(pubFromUrl, "tok2");
+    const enc2 = encryptForCallback(pubFromUrl, "tok2-abcdef");
     const tokens = await exchangeTokens(
       "zed",
       `/?user_id=u1&access_token=${encodeURIComponent(enc2)}`,

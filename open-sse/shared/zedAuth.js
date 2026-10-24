@@ -145,13 +145,27 @@ export function decryptZedAccessToken(encryptedAccessToken, privateKeyVerifier) 
     const message = oaepError instanceof Error ? oaepError.message : String(oaepError);
     throw new Error(`Failed to decrypt Zed access token: ${message}`);
   };
+  // A wrong key can still "decrypt" via the PKCS#1 v1.5 fallback below (its
+  // unpadding is not integrity-checked): the output is then random bytes, and
+  // a short random run is valid UTF-8 often enough to slip through a
+  // replacement-character check alone — one in ~10^4 wrong-key attempts used to
+  // be accepted as a live credential (seen as a CI flake, not a test bug).
+  // A real Zed access token is a printable ASCII bearer token, so require that
+  // shape from both padding paths.
+  const validate = (text, oaepError) => {
+    if (text.includes("\uFFFD") || !/^[\x20-\x7E]{8,}$/.test(text)) fail(oaepError);
+    return text;
+  };
   try {
-    return crypto
-      .privateDecrypt(
-        { key: privateKey, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: "sha256" },
-        encrypted,
-      )
-      .toString("utf8");
+    return validate(
+      crypto
+        .privateDecrypt(
+          { key: privateKey, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: "sha256" },
+          encrypted,
+        )
+        .toString("utf8"),
+      new Error("decrypted token is not a printable bearer token"),
+    );
   } catch (oaepError) {
     try {
       const text = crypto
@@ -161,11 +175,10 @@ export function decryptZedAccessToken(encryptedAccessToken, privateKeyVerifier) 
         )
         .toString("utf8");
       // PKCS#1 v1.5 unpadding is not integrity-checked: a wrong-key decrypt
-      // can "succeed" with garbage bytes instead of throwing. Replacement
-      // characters prove the output is not the real UTF-8 token — fail loudly
-      // rather than storing garbage as a credential.
-      if (text.includes("�")) fail(oaepError);
-      return text;
+      // can "succeed" with garbage bytes instead of throwing. The shape check
+      // above proves the output is a real token — fail loudly rather than
+      // storing garbage as a credential.
+      return validate(text, oaepError);
     } catch (err) {
       if (err.message.startsWith("Failed to decrypt Zed access token")) throw err;
       fail(oaepError);
