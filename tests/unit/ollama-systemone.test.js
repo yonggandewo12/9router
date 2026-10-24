@@ -75,4 +75,22 @@ describe("handleSystemoneCore request", () => {
     const r = await call("opencode-zen", "jev-1.13", { apiKey: "k" });
     expect(r.headers["x-opencode-session"]).toMatch(/^ses_/);
   });
+
+  it("forwards the caller's abort signal to the upstream fetch", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController();
+    await handleSystemoneCore({
+      body: { state: "s", questions: { q: { type: "noul", instructions: "i" } } },
+      modelInfo: { provider: "ollama", model: "clef" },
+      credentials: { apiKey: "key123" },
+      signal: controller.signal,
+    });
+    // fetchWithConnectTimeout merges our signal into its own guard, so the
+    // upstream sees a derived signal that follows the caller's abort.
+    const init = fetchMock.mock.calls[0][1];
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+    controller.abort();
+    expect(init.signal.aborted).toBe(true);
+  });
 });

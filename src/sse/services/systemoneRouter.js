@@ -75,9 +75,17 @@ export async function resolveSmartChoice({
       },
     };
 
+    // The 8s ceiling has to cancel the upstream call, not just stop waiting for
+    // it: fetch has no total timeout of its own, so a silent router would keep
+    // the socket (and the account's slot) open long after we failed open.
+    const controller = new AbortController();
     let timeoutId;
     const timeoutPromise = new Promise((_, reject) => {
-      timeoutId = setTimeout(() => reject(new Error(`System One router timed out after ${timeoutMs}ms`)), timeoutMs);
+      timeoutId = setTimeout(() => {
+        const error = new Error(`System One router timed out after ${timeoutMs}ms`);
+        controller.abort(error);
+        reject(error);
+      }, timeoutMs);
     });
 
     const corePromise = handleSystemoneCore({
@@ -86,6 +94,7 @@ export async function resolveSmartChoice({
       credentials: refreshedCredentials,
       log,
       onRequestSuccess: () => {},
+      signal: controller.signal,
     });
 
     let result;

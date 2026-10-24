@@ -37,6 +37,7 @@ export async function handleSystemoneCore({
   credentials,
   log,
   onRequestSuccess,
+  signal,
 }) {
   const { provider, model } = modelInfo;
   // PROVIDER_MODELS is keyed by the registry alias, so the alias table has to be
@@ -94,6 +95,7 @@ export async function handleSystemoneCore({
       method: "POST",
       headers,
       body: JSON.stringify(requestBody),
+      ...(signal ? { signal } : {}),
     });
   } catch (error) {
     const errMsg = formatProviderError(error, provider, model, HTTP_STATUS.BAD_GATEWAY);

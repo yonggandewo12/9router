@@ -120,6 +120,7 @@ export async function handleSystemone(request) {
       modelInfo: { provider, model },
       credentials: refreshedCredentials,
       log,
+      signal: request.signal,
       onRequestSuccess: async () => {
         await clearAccountError(credentials.connectionId, credentials, model);
       }
@@ -141,6 +142,13 @@ export async function handleSystemone(request) {
         }).catch(() => {});
       }
       return result.response;
+    }
+
+    // A client disconnect aborts the in-flight fetch and surfaces as a provider
+    // error — it says nothing about the account, so it must not cool it down or
+    // land in usageHistory as an upstream failure.
+    if (request.signal.aborted) {
+      return errorResponse(HTTP_STATUS.CLIENT_CLOSED_REQUEST, "Client closed request");
     }
 
     // One row per attempted account, like the chat lane: a decision turn that
