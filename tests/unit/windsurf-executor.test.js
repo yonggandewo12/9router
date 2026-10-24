@@ -9,6 +9,10 @@ import {
 import { PROVIDERS } from "open-sse/config/providers.js";
 import windsurfRegistry from "open-sse/providers/registry/windsurf.js";
 
+// Default chat endpoint (registry entry, executor fallback and the default apiServerUrl).
+// server.self-serve.windsurf.com is only the auth1_ (Devin) token host.
+const WS_CHAT_URL = "https://server.codeium.com/exa.language_server_pb.LanguageServerService/GetChatMessage";
+
 // ─── Protobuf helpers for building expected wire bytes in tests ──────────────
 
 function encodeVarint(value) {
@@ -162,11 +166,11 @@ describe("decodeCompletionChunk", () => {
 });
 
 describe("WindsurfExecutor class", () => {
-  it("constructor wires config from PROVIDERS.windsurf", () => {
+  it("constructor falls back to the built-in chat endpoint while windsurf is hidden", () => {
     const ex = new WindsurfExecutor();
     expect(ex.provider).toBe("windsurf");
     expect(ex.config).toBeDefined();
-    expect(ex.config.baseUrl).toContain("server.codeium.com");
+    expect(ex.config.baseUrl).toBe(WS_CHAT_URL);
     expect(typeof ex.execute).toBe("function");
   });
 
@@ -188,15 +192,13 @@ describe("WindsurfExecutor class", () => {
 
   it("buildUrl returns the GetChatMessage endpoint", () => {
     const ex = new WindsurfExecutor();
-    expect(ex.buildUrl()).toBe("https://server.codeium.com/exa.language_server_pb.LanguageServerService/GetChatMessage");
+    expect(ex.buildUrl()).toBe(WS_CHAT_URL);
   });
 
-  it("registry baseUrl is the chat endpoint (in sync with executor)", () => {
-    // windsurf is temporarily hidden from the PROVIDERS barrel (registry/index.js),
-    // so read the registry entry directly instead of PROVIDERS.windsurf.
-    expect(windsurfRegistry.transport.baseUrl).toBe(
-      "https://server.codeium.com/exa.language_server_pb.LanguageServerService/GetChatMessage"
-    );
-    expect(windsurfRegistry.transport.baseUrl).toBe(new WindsurfExecutor().buildUrl());
+  // 8e04fe17 hid windsurf from the registry index (no tool calling), so PROVIDERS has no
+  // entry; the registry file and the executor fallback must still agree.
+  it("registry entry and executor fallback use the same chat endpoint (registry in sync)", () => {
+    expect(PROVIDERS.windsurf).toBeUndefined();
+    expect(windsurfRegistry.transport.baseUrl).toBe(WS_CHAT_URL);
   });
 });

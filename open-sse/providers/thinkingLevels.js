@@ -50,12 +50,15 @@ const PATTERN_THINKING = [
   { provider: "codex", pattern: "*gpt-5.6-terra*", levels: [...CODEX_GPT_5_6_LEVELS, "ultra"] },
   { provider: "codex", pattern: "*gpt-5.6-luna*", levels: CODEX_GPT_5_6_LEVELS },
   { pattern: "*codex*", levels: ["low", "medium", "high", "xhigh"] }, // codex cannot disable thinking
-  // The free lane refuses every effort on this one: `opencode run` answered
-  // "Variant unavailable for opencode/mimo-v2.6-flash-free: high
-  // [provider.no-route]" (live, 2026-10-16, production log). The unqualified
-  // `*mimo*v2.6*` entry below was probed on other lanes, and PATTERN_THINKING is
-  // first-match-wins, so this provider-qualified row has to come first.
-  { provider: "opencode", pattern: "*mimo*v2.6*", levels: ["none"] },
+  // The HTTP free lane (the default transport) takes the whole OpenAI enum on this
+  // id — probed live: none|minimal|low|medium|high|xhigh|max all 200. The one
+  // transport that refuses them is `opencode run`, which answered "Variant
+  // unavailable for opencode/mimo-v2.6-flash-free: high [provider.no-route]"
+  // (live, 2026-10-16, production log). Levels are resolved before transport
+  // selection, so instead of hiding the whole ladder we advertise it and list the
+  // id in CLI_VARIANTLESS_MODELS — the CLI then sends the model with no variant
+  // (which works) rather than forwarding a variant it rejects.
+  { provider: "opencode", pattern: "*mimo*v2.6*", levels: ["none", "minimal", "low", "medium", "high", "xhigh", "max"] },
   { pattern: "*mimo*v2.6*", levels: ["none", "low", "medium", "high", "xhigh"] },
   // mimo-v2.5-pro on opencode-go rejects reasoning_effort "max" (probed live); v2.5 accepts it.
   { pattern: "*mimo*v2.5-pro*", levels: ["none", "low", "medium", "high", "xhigh"] },
@@ -67,6 +70,12 @@ const PATTERN_THINKING = [
   // would never fire for dotted ids like deepseek-v4.1-flash.
   { provider: "codebuddy-cn", pattern: "deepseek-v4-pro",     levels: ["low", "high", "xhigh"] },
   { provider: "codebuddy-cn", pattern: "deepseek-v4.1-flash", levels: ["low", "high", "max"] },
+  // OpenCode Zen free tier (oc / ocz) — the free id of the same v4.1-flash model
+  // publishes low|high|max as well, and unlike DeepSeek's own API the upstream
+  // forwards the level verbatim (no low→high collapse). The generic
+  // *deepseek-v4.* glob below would advertise medium/xhigh, which the model does
+  // not serve, so this entry MUST stay above it.
+  { pattern: "*deepseek-v4.1-flash-free*", levels: ["low", "high", "max"] },
   { pattern: "*deepseek-v4.*", levels: ["none", "low", "medium", "high", "xhigh", "max"] },
   // codebuddy-cn per-model effort sets — the server's product-config payload
   // publishes `reasoning.supportedEfforts` per model. NOTE: the chat endpoint

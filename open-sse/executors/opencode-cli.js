@@ -868,6 +868,9 @@ const CLI_VARIANTLESS_MODELS = new Set([
   "longcat-2.5-preview-free",
   "nemotron-3-ultra-free",
   "nemotron-3.5-lightning-free",
+  // HTTP free lane takes the full effort enum; the CLI answers provider.no-route
+  // for any variant of this id (live production log, 2026-10-16).
+  "mimo-v2.6-flash-free",
 ]);
 
 // The CLI only accepts variants the model actually offers; forwarding an arbitrary

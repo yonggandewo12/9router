@@ -14,9 +14,9 @@ describe("normalizeClaudePassthrough — haiku adaptive thinking (docs 11 §1)",
     expect(out.thinking).toEqual({ type: "adaptive" });
   });
 
-  it("folds mid-conversation system messages into the neighbouring user turn", () => {
-    // f4f06f29: hoisting into body.system broke the prefix cache (volatile
-    // counters at the front); system messages are now folded in place instead.
+  // 7e5f5a88 folds these into the neighbouring user turn instead of hoisting them into
+  // body.system: volatile reminders ahead of the conversation broke the prefix cache.
+  it("folds mid-conversation system messages into the preceding user turn", () => {
     const out = normalizeClaudePassthrough({
       messages: [
         { role: "user", content: "hi" },
@@ -24,6 +24,9 @@ describe("normalizeClaudePassthrough — haiku adaptive thinking (docs 11 §1)",
       ],
     });
     expect(out.system).toBeUndefined();
+    expect(out.messages).toEqual([
+      { role: "user", content: [{ type: "text", text: "hi" }, { type: "text", text: "be brief" }] },
+    ]);
     expect(out.messages.every((m) => m.role !== "system")).toBe(true);
     expect(out.messages).toEqual([
       { role: "user", content: [{ type: "text", text: "hi" }, { type: "text", text: "be brief" }] },

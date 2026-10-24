@@ -48,12 +48,12 @@ describe("compressWithHeadroom openai-responses format (#1998)", () => {
     expect(typeof body.input[0].content).not.toBe("string");
   });
 
-  it("skips Responses tool/reasoning history instead of collapsing it into a message (#2132)", async () => {
+  it("projects only the Responses tool output instead of collapsing tool/reasoning history (#2132)", async () => {
     global.fetch = vi.fn(async () => ({
       ok: true,
       json: async () => ({
-        messages: [{ role: "user", content: "compressed tool history" }],
-        tokens_saved: 10,
+        messages: [{ role: "tool", tool_call_id: "headroom-tool-0", content: "o" }],
+        tokens_saved: 1,
       }),
     }));
 
@@ -99,9 +99,19 @@ describe("compressWithHeadroom openai-responses format (#1998)", () => {
       diagnostics,
     });
 
-    expect(data).toBeNull();
-    expect(global.fetch).not.toHaveBeenCalled();
-    expect(body.input).toEqual(input);
-    expect(diagnostics.reason).toBe("skipped: openai-responses tool/reasoning input is not safe to compress");
+    // Only the plain-text leaf travels: the proxy never sees the reasoning item or
+    // the function call, so it cannot collapse them into a synthetic message.
+    const sent = JSON.parse(global.fetch.mock.calls[0][1].body).messages;
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ role: "tool", content: "ok" });
+    expect(data).not.toBeNull();
+    expect(body.input[2].output).toBe("o");
+    // Everything the projection did not target is byte-identical.
+    expect(body.input[0]).toEqual(input[0]);
+    expect(body.input[1]).toEqual(input[1]);
+    expect(body.input[3]).toEqual(input[3]);
+    expect(body.tools).toEqual([
+      { type: "custom", name: "apply_patch", format: { type: "grammar", syntax: "lark", definition: "start: /.+/" } },
+    ]);
   });
 });

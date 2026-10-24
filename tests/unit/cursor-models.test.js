@@ -75,6 +75,7 @@ function model(id, name) {
 describe("Cursor live model catalog", () => {
   beforeEach(() => {
     clearCursorModelCache();
+    h2Mock.requests.length = 0;
   });
 
   afterEach(() => {
@@ -125,5 +126,6 @@ describe("Cursor live model catalog", () => {
       accessToken: "cursor-token",
       providerSpecificData: { machineId: "machine-id" },
     })).resolves.toBeNull();
+    expect(h2Mock.requests).toHaveLength(1);
   });
 });

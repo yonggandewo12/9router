@@ -284,6 +284,9 @@ async function getDispatcher(proxyUrl, insecure = false) {
 
 async function fetchWithTlsFallback(url, options, proxyUrl) {
   try {
+    // Protocol adapters may need Node's HTTP/1 transport on the direct path.
+    // Keep proxy/no-proxy resolution and strict-proxy enforcement here.
+    if (!proxyUrl && options.directFetch) return await options.directFetch(url, options);
     // A resolved proxy outranks a caller-supplied dispatcher. The proxy is an
     // egress policy (#4333: "never leave over the direct IP"); a caller
     // dispatcher (the pinned-IP image fetch) is only a transport detail, and
@@ -294,7 +297,7 @@ async function fetchWithTlsFallback(url, options, proxyUrl) {
       : options.dispatcher;
     return await originalFetch(url, { ...options, dispatcher });
   } catch (err) {
-    const isStrictSsl = process.env.STRICT_SSL === "true" || process.env.STRICT_SSL === "1";
+    const isStrictSsl = options.strictTls === true || process.env.STRICT_SSL === "true" || process.env.STRICT_SSL === "1";
     if (!isStrictSsl && isTlsCertError(err)) {
       if (options.body && typeof options.body.getReader === "function" && options.body.locked) {
         throw err;
@@ -373,6 +376,23 @@ async function createBypassRequest(parsedUrl, realIP, options) {
     }
     req.end();
   });
+}
+
+/**
+ * True when this request must leave through a proxy (connection proxy, env
+ * proxy, Vercel relay, or an unresolved strict pool). Transports that cannot
+ * route through a proxy (grokTlsFetch / wreq-js) have to check this and fall
+ * back to proxyAwareFetch, otherwise the request leaves over the direct IP.
+ */
+export function hasProxyEgress(targetUrl, proxyOptions = null) {
+  if (normalizeString(proxyOptions?.vercelRelayUrl)) return true;
+  if (resolveConnectionProxyUrl(targetUrl, proxyOptions)) return true;
+  if (normalizeProxyUrl(getEnvProxyUrl(targetUrl))) return true;
+  const proxyIntended = proxyOptions?.proxyPoolId
+    || proxyOptions?.enabled === true
+    || proxyOptions?.connectionProxyEnabled === true
+    || !!normalizeString(proxyOptions?.url ?? proxyOptions?.connectionProxyUrl);
+  return proxyOptions?.strictProxy === true && !!proxyIntended;
 }
 
 export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {

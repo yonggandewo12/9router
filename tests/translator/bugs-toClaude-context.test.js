@@ -17,10 +17,11 @@ describe("OpenAI → Claude context mapping", () => {
     expect(JSON.stringify(out.system), "Claude Code prompt injected").not.toContain("Claude Code");
   });
 
-  // openai-to-claude.js — assistant.reasoning_content not mapped to a thinking block.
-  // (c4f80d30 flipped it.fails→it without landing the mapping; native claude would
-  // strip the unsigned block anyway, so this stays a documented data-loss bug.)
-  // KNOWN BUG
+  // KNOWN BUG: assistant.reasoning_content is dropped on the openai→claude leg. c4f80d30
+  // flipped this to a plain `it`, but its change only handles DeepSeek thinking blocks;
+  // the mapping was never implemented (the test fails at c4f80d30 itself). An unsigned
+  // thinking block is only valid for compatible providers (Anthropic requires a
+  // signature), so a fix has to be provider-aware.
   it.fails("assistant reasoning_content becomes a thinking block", () => {
     const out = T({
       messages: [

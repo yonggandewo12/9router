@@ -73,6 +73,8 @@ const PROVIDER_ID_TO_ALIAS = {
   sambanova: "samba",
   tencent: "hunyuan",
   "trae-enterprise": "te",
+  "uc-web": "uc",
+  "veoaifree-web": "veo-free",
   zed: "zd",
 };
 

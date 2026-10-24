@@ -323,16 +323,14 @@ describe("buildCliArgs", () => {
     // Live production failure on 2026-10-16: a client asked oc/mimo-v2.6-flash-free
     // with effort=high and the CLI refused the whole turn:
     // "Variant unavailable for opencode/mimo-v2.6-flash-free: high [provider.no-route]".
-    // The lane's declared levels must therefore select nothing, on both the 1.x flag
-    // and the 2.x `model#variant` spelling.
+    // The id is therefore CLI-variantless: no --variant on the 1.x flag and no
+    // `model#variant` on the 2.x spelling. The HTTP transport keeps the full enum.
     for (const cliMajor of [1, 2]) {
       const args = buildCliArgs({ model: "mimo-v2.6-flash-free", body: { reasoning_effort: "high" }, sid: null, prompt: "p", cliMajor });
       expect(args).not.toContain("--variant");
       expect(args[4]).toBe("opencode/mimo-v2.6-flash-free");
     }
-    // Nothing selectable is left: "none" is the only entry and the caps strip it for
-    // a model that cannot disable thinking, so the picker offers no effort at all.
-    expect(getThinkingLevels("opencode", "mimo-v2.6-flash-free").filter((l) => l !== "none")).toEqual([]);
+    expect(getThinkingLevels("opencode", "mimo-v2.6-flash-free")).toContain("high");
     // The other lanes were probed separately — the fix is lane-scoped, not global.
     expect(getThinkingLevels("opencode-go", "mimo-v2.6-flash-free")).toContain("high");
   });

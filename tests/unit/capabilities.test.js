@@ -372,8 +372,10 @@ describe("OpenCode Free ids newer than the capability tables", () => {
         audioInput: false,
         videoInput: false,
         reasoning: true,
-        thinkingFormat: "deepseek",
-        thinkingCanDisable: false,
+        // The free lane's MiMo route takes the OpenAI effort enum (probed live),
+        // not Xiaomi's always-on `thinking` object the global pattern describes.
+        thinkingFormat: "openai",
+        thinkingCanDisable: true,
         contextWindow: 1048576,
         maxOutput: 131072,
       });
