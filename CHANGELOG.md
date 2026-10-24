@@ -1,3 +1,25 @@
+# v0.6.13 (2026-10-24)
+
+Upstream **v0.5.105–v0.5.109** merged (Smart Router, six web-cookie providers, Codex STT, qoder queueing, security bumps), followed by four adversarial review passes over everything that shipped this window. The fixes below are what those passes found; each carries a test that was mutation-checked (it fails when the fix is removed) and, where a live lane existed, was verified against the real endpoint.
+
+## Fixes
+
+- **The smart router's 8s ceiling now cancels the upstream call.** It used to only stop waiting: the System One fetch had no signal, so a router that accepted the connection and went silent kept the socket and the account's slot open long after the combo had already failed open. The direct `/v1/systemone` route also forwards the client signal now and reports a disconnect as 499 instead of cooling down a healthy account.
+- **A dead browser session no longer validates as healthy.** The five new web-cookie providers fell into the generic key probe, which sends the cookie jar as `Authorization: Bearer <jar>` to an HTML page — its 200 marked the jar valid. Worse, chatgpt-web/gemini-web never even reached that: as image-only providers they hit the media branch's "no probe config → accept" path, validating **any** value. Both routes now defer to the session-identity probe, and an inconclusive probe says "could not verify" instead of impersonating a verified session.
+- **The zcode prompt gate passes on byte-identical blocks, not a marker substring.** Live-measured: a system whose second block merely *contains* the marker answered 3012 when forwarded, but passed once re-wrapped behind the official pair. Verbatim copies of the official blocks are also dropped from the merged block, so a near-official client prompt is not billed twice. Nine gate scenarios verified against the live lane (tools, cache_control hit, streaming TTFT ≈ 1.0s).
+- **A combo request can no longer be silently swallowed.** A peek-reconstruction error used to return an empty `200 [DONE]` "success"; it now falls through to the next candidate. Empty-peek head buffering is capped at 1MB, and the resumed read after a peek deadline carries a stall budget instead of hanging the client's stream forever.
+- **The sticky model now names the model that actually serves the turn** (autoSwitch may float a capability adapter past the router's pick), expired sticky entries are swept on their own throttle instead of lingering until the 5000-entry ceiling, and the all-failed combo response reports the LAST failure status instead of the first.
+- **Dashboard changelog XSS closed.** GitHub-fetched markdown went through `marked` into `dangerouslySetInnerHTML` with raw HTML passed through verbatim — one hostile upstream line would execute with the dashboard's origin. Raw HTML is escaped and script-bearing URLs dropped (no new dependency; verified by tests that catch even a one-character mistake in the escaping).
+- **The custom system prompt is bounded** (20k chars, `CUSTOM_PROMPT_MAX_CHARS`): it rides on every request, so an unbounded value billed and slowed every API-key tenant. Rejected at the write boundary, dropped at injection for values that bypass it (backup restore, direct DB edit).
+- **No more `latest` at runtime.** An unmapped lazy dependency used to be npm-installed at `latest` into the proxy process; unmapped names now fail with instructions to pin a version.
+- **Confidence thresholds are clamped into [0,1]** with percent-style values (85 → 0.85) converted — an out-of-range value silently disabled every smart-router selection. The all-zero-credentials 401 cooldown quirk and zcode apikey-mode connection testing are also fixed.
+
+## Notes
+
+- **Fork identity unchanged**: workflows remain `cleanup`/`npm-publish`/`test`, package `9router-proxy` on the fork version line, no runtime dependency added. undici bumped to 7.30.1 (upstream security fix); the `docker-compose` loopback binding applies to the internal headroom service only — the app port is untouched.
+- **Test suite**: 431 files / 4507 passing / 0 failing, +25 new tests across the fixes above; provider/alias/OAuth baselines byte-identical; `next build --webpack` green.
+- **Known open items** (deliberately not changed here): request logs still contain live credentials when `ENABLE_REQUEST_LOGS=true` (`maskSensitiveHeaders` is disabled engine-wide — existing policy); database backups export session cookies in plaintext; `veoaifree-web` remains half-wired upstream.
+
 # v0.6.12 (2026-10-24)
 
 One provider, one quota lane: **ZCode Start Plan** (`zcode`). Everything else in this release is the review pass that came with it — two test gaps that would have let a broken gate ship green, and one line of prompt-injection logic that was doing more work than it needed to.
