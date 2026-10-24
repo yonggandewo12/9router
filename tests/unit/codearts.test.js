@@ -589,6 +589,12 @@ describe("CodeArts agent catalog", () => {
         expect(srv.seen).toHaveLength(2);
         expect(String(srv.seen[0].authorization)).toContain(`Access=${staleAk}`);
         expect(String(srv.seen[1].authorization)).toContain(`Access=${nextAk}`);
+
+        // The replayed catalog is cached under the RENEWED key, so the next
+        // listing (reading the persisted pair) does not fetch again.
+        const renewed = { id: "conn-2", expiresAt: new Date(Date.now() + 3600_000).toISOString(), providerSpecificData: { accessKeyId: nextAk, secretAccessKey: "SK-new", securityToken: "ST-new" } };
+        expect((await resolveCodeartsModels(renewed, { baseUrl: srv.baseUrl })).models).toHaveLength(2);
+        expect(srv.seen).toHaveLength(2);
       } finally {
         await srv.close();
       }

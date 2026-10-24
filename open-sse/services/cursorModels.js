@@ -9,6 +9,7 @@
 import crypto from "crypto";
 import http2 from "http2";
 import { PROVIDER_OAUTH } from "../providers/index.js";
+import { catalogFetchInBackoff, clearCatalogFetchBackoff, noteCatalogFetchFailure } from "./catalogBackoff.js";
 import { buildCursorHeaders } from "../utils/cursorChecksum.js";
 import { decodeMessage } from "../utils/cursorProtobuf.js";
 
@@ -249,9 +250,14 @@ export async function resolveCursorModels(credentials, options = {}) {
     if (cached?.expiresAt > now) return { models: cached.models };
   }
 
+  // A dead session token has no refresh path: without this, every /v1/models
+  // poll re-fetches, re-fails and re-logs the same rejection.
+  if (!options.forceRefresh && catalogFetchInBackoff(key)) return null;
+
   try {
     const models = await fetchCursorCatalog(credentials, options.signal);
     if (!models?.length) return null;
+    clearCatalogFetchBackoff(key);
     catalogCache.set(key, { expiresAt: now + CACHE_TTL_MS, models });
     // Entries expire on read, never on a timer: without a cap every rotated
     // credential leaves a catalog behind for the life of the process.
@@ -260,6 +266,7 @@ export async function resolveCursorModels(credentials, options = {}) {
     }
     return { models };
   } catch (error) {
+    noteCatalogFetchFailure(key);
     options.log?.warn?.("CURSOR_MODELS", `Live model fetch failed: ${error?.message || error}`);
     return null;
   }

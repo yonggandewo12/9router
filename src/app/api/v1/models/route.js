@@ -17,6 +17,7 @@ import { resolveCopilotModels } from "open-sse/services/copilotModels.js";
 import { resolveClinepassModels, resolveClineModels } from "open-sse/services/clinepassModels.js";
 import { resolveGrokCliModels } from "open-sse/services/grokCliModels.js";
 import { resolveCursorModels } from "open-sse/services/cursorModels.js";
+import { catalogFetchInBackoff, clearCatalogFetchBackoff, noteCatalogFetchFailure } from "open-sse/services/catalogBackoff.js";
 import { resolveZedModels } from "open-sse/shared/zedAuth.js";
 import { resolveTraeEnterpriseModels } from "open-sse/shared/trae/enterprise.js";
 import { resolveCodeartsModels } from "open-sse/shared/codearts/api.js";
@@ -514,9 +515,11 @@ export async function buildModelsList(kindFilter, options = {}) {
       // -thinking/-agentic variants per account). On failure, fall back to
       // whatever rawModelIds already holds.
       const liveResolver = LIVE_MODEL_RESOLVERS[providerId];
-      if (liveResolver && !hasExplicitEnabledModels) {
+      const backoffKey = `${providerId}:${conn.id}`;
+      if (liveResolver && !hasExplicitEnabledModels && !catalogFetchInBackoff(backoffKey)) {
         try {
           const live = await liveResolver(conn);
+          clearCatalogFetchBackoff(backoffKey);
           if (live?.models?.length) {
             rawModelIds = live.models.map((m) => m.id);
             liveModelKindById = new Map(
@@ -531,6 +534,10 @@ export async function buildModelsList(kindFilter, options = {}) {
             );
           }
         } catch (err) {
+          // /v1/models is polled by clients: without a backoff a connection
+          // whose catalog throws (dead credential, upstream down) pays one
+          // rejected round trip and one log line per poll, indefinitely.
+          noteCatalogFetchFailure(backoffKey);
           console.log(`Live model fetch failed for ${providerId}: ${err?.message || err}`);
         }
       }

@@ -107,7 +107,18 @@ export function mapCodeartsModel(raw) {
  * revoked grant) instead of hammering the same dead grant.
  */
 const REFRESH_BACKOFF_MS = 10 * 60 * 1000;
+// Keyed by the temporary access key id, which rotates hourly, so a failed
+// renewal inserts an entry that can never be deleted by success again — sweep
+// the expired ones on write, exactly like catalogCache does.
 const refreshBackoff = new Map();
+
+function noteRefreshBackoff(ak) {
+  const now = Date.now();
+  for (const [key, until] of refreshBackoff) {
+    if (until <= now) refreshBackoff.delete(key);
+  }
+  refreshBackoff.set(ak, now + REFRESH_BACKOFF_MS);
+}
 
 function mergeCodeartsCredentials(credentials, patch) {
   return {
@@ -137,7 +148,7 @@ async function refreshCodeartsForCatalog(credentials, { proxyOptions, log, reaso
   }
 
   if (!patch || patch.error || !patch.providerSpecificData?.accessKeyId) {
-    refreshBackoff.set(ak, Date.now() + REFRESH_BACKOFF_MS);
+    noteRefreshBackoff(ak);
     log?.warn?.(
       "CODEARTS_MODELS",
       `cannot renew the temporary AK/SK (${reason}): ${patch?.message || patch?.error || "no credentials returned"} — reconnect the account`
@@ -199,9 +210,11 @@ export async function resolveCodeartsModels(
   } catch (error) {
     // The credential can be stale without carrying a future expiry (rotated by
     // another process, revoked server-side): one renew + one replay, no more.
+    // Renew from `creds`, not the stored record: if the proactive pass above
+    // already rotated the refresh token, the stored one is now invalid.
     const authRejected = error?.status === 401 || error?.status === 403;
     const renewed = authRejected
-      ? await refreshCodeartsForCatalog(credentials, { proxyOptions, log, reason: `HTTP ${error.status}` })
+      ? await refreshCodeartsForCatalog(creds, { proxyOptions, log, reason: `HTTP ${error.status}` })
       : null;
     if (!renewed) throw error;
     creds = renewed.credentials;
@@ -212,7 +225,9 @@ export async function resolveCodeartsModels(
   const rawModels = Array.isArray(data?.gpts?.models) ? data.gpts.models : [];
   const models = rawModels.map(mapCodeartsModel).filter(Boolean);
   const result = models.length ? { models, raw: rawModels } : null;
-  cacheCatalog(cacheKey, result);
+  // Cache under the credential that actually served this fetch, so the next
+  // listing (which reads the persisted, renewed pair) finds it.
+  cacheCatalog(`${baseUrl}|${codeartsKeys(creds).accessKeyId}`, result);
   return result;
 }
 
