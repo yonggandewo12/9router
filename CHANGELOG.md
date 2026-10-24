@@ -1,3 +1,19 @@
+# v0.6.14 (2026-10-24)
+
+Two model-listing fixes. `/v1/models` is polled by clients, so a credential that cannot be renewed used to turn every poll into a rejected round trip plus a log line — indefinitely. Both are measured against a real expired connection.
+
+## Fixes
+
+- **CodeArts renews its temporary AK/SK before listing models.** The control plane is signed with the STS pair minted at login, which rotates hourly, but the catalog resolver had no expiry check, no 401 replay and never persisted a renewed pair (unlike the Copilot and Grok CLI resolvers). A connection that is listed but never chatted through therefore signed every `/v1/models` call with a dead key and logged `Live model fetch failed`. It now renews proactively when stale, renews once and replays on 401/403, persists the new pair through the caller, and — when renewal genuinely cannot succeed — says so once with an actionable message (`reconnect the account`) and backs off instead of failing every poll.
+- **Dead live catalogs are backed off instead of re-polled.** A shared `catalogBackoff` backs off 10 minutes per connection, cleared on success: at the route level for resolvers that throw (kiro, qoder, …) and inside the Cursor resolver, whose session token has no refresh path at all. Measured on an expired CodeArts connection: `/v1/models` answers in **0.07s** with **zero** failure log lines and a single reconnect hint, instead of one outbound 401 + one log line per poll.
+- **CI installs ffmpeg and skips conversion tests when it is absent.** The Codex STT transport tests exercise the real ffmpeg path; the 0.6.13 Tests pipeline failed on a runner without the binary. The workflow now installs it, and the four conversion-dependent tests skip (rather than fail) in a bare environment.
+
+## Notes
+
+- **Fork identity unchanged**: workflows remain `cleanup`/`npm-publish`/`test`, package `9router-proxy` on the fork version line, no runtime dependency added.
+- **Test suite**: 431 files / 4513 passing / 0 failing, with new coverage for the CodeArts renewal paths (mutation-checked: all three fail against the pre-fix code) and for the backoff helper.
+- **Known open items** (unchanged, deliberate): request logs still contain live credentials when `ENABLE_REQUEST_LOGS=true` (`maskSensitiveHeaders` disabled engine-wide); database backups export session cookies in plaintext; `ollama/clef` decisions are quota-billed but carry no per-token price, so cost shows 0 while quota is tracked via `/api/balance`; `veoaifree-web` remains half-wired upstream.
+
 # v0.6.13 (2026-10-24)
 
 Upstream **v0.5.105–v0.5.109** merged (Smart Router, six web-cookie providers, Codex STT, qoder queueing, security bumps), followed by four adversarial review passes over everything that shipped this window. The fixes below are what those passes found; each carries a test that was mutation-checked (it fails when the fix is removed) and, where a live lane existed, was verified against the real endpoint.
