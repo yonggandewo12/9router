@@ -1,3 +1,21 @@
+# v0.6.16 (2026-10-24)
+
+Browser login works again in the published package, plus a deep pass over the DeepSeek web chain.
+
+## Fixes
+
+- **Browser login on the published CLI (0.6.13–0.6.15) failed before the window opened.** `lazyRuntime` resolved the installed runtime dep through `createRequire(<dynamic path>)`, which Next's webpack build folds to `void 0` — the emitted chunk ran `(void 0).resolve(pkg)`, and because `playwright-core`/`wreq-js` are devDependencies this threw *before* the on-demand install could ever run. Runtime paths are now resolved from `package.json` with plain `fs` (exports map, submodule paths, conditions), and both runtime imports carry `webpackIgnore` so the bundler keeps them as native ESM. Verified by rebuilding the real CLI package and running it outside the repo: fresh `DATA_DIR` → on-demand install (~12s) → Chrome → live login → connection saved.
+- **DeepSeek's pre-login placeholder is no longer treated as a session** — at capture, in the executor's token extractor and in the identity probe. `chat.deepseek.com` writes `{"value":null,...}` for every visitor; the capture used to declare success on its length, close the browser and then fail the identity check.
+- **deepseek-web: cancelling the response now cancels the upstream read.** A consumer that cancelled the body without aborting the client signal (a combo discarding a candidate) left DeepSeek streaming an entire generation into a void, holding the socket and the upstream chat session.
+- **deepseek-web: a session cut mid-generation is no longer a silent success on the streaming path.** An empty cut stream used to be delivered as a completed answer (non-streaming already errored); it now errors the stream. A partial answer still completes normally.
+- **deepseek-web: status markers no longer eat user content.** The cleanup stripped every occurrence of `FINISHED` from replies, and `SEARCHING …` was mangled into `ING …`; markers are now stripped only where DeepSeek actually leaks them.
+
+## Notes
+
+- **Fork identity unchanged**: workflows remain `cleanup`/`npm-publish`/`test`, package `9router-proxy` on the fork version line, no runtime dependency added.
+- **Test suite**: 431 files / 4537 passing / 0 failing. The deepseek-web executor had no tests at all before this release; it now has nine covering the stream contract, cut sessions, cancellation propagation and token unwrapping (mutation-checked).
+- **Known open items** (unchanged, deliberate): request logs still contain live credentials when `ENABLE_REQUEST_LOGS=true` (`maskSensitiveHeaders` disabled engine-wide); database backups export session cookies in plaintext; `ollama/clef` and web-API providers report zero per-token cost (quota is tracked elsewhere); images sent directly to deepseek-web are dropped (no vision capability declared).
+
 # v0.6.15 (2026-10-24)
 
 One correctness fix, found while the 0.6.14 Tests pipeline was red.
