@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { proxyAwareFetch } from "../../open-sse/utils/proxyFetch.js";
 import { transcribeCodex, codexHttpFetch } from "../../open-sse/handlers/codexStt.js";
 import { convertAudio, readBounded } from "../../open-sse/handlers/codexSttAudio.js";
+import { itFfmpeg } from "./helpers/ffmpegAvailability.js";
 
 function wav(seconds = 0.02) {
   const pcm = Buffer.alloc(Math.floor(48000 * seconds) * 4);
@@ -21,17 +22,17 @@ function form(extra = {}) {
 const credentials = { authType: "oauth", accessToken: "test-token", providerSpecificData: { workspaceId: "test-account", baseUrl: "https://untrusted.invalid" } };
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 
-it("converts real stereo 48k WAV to mono24k PCM16 and removes temporary files", async () => {
+itFfmpeg("converts real stereo 48k WAV to mono24k PCM16 and removes temporary files", async () => {
   const before = (await readdir(tmpdir())).filter((s) => s.startsWith("9router-codex-stt-"));
   const result = Buffer.from(await (await convertAudio(new File([wav()], "in.wav"), new AbortController().signal)).arrayBuffer());
   expect(result.toString("ascii", 0, 4)).toBe("RIFF"); expect(result.readUInt16LE(22)).toBe(1); expect(result.readUInt32LE(24)).toBe(24000); expect(result.readUInt16LE(34)).toBe(16);
   expect((await readdir(tmpdir())).filter((s) => s.startsWith("9router-codex-stt-"))).toEqual(before);
 });
-it("rejects malformed and overlong audio and cleans up", async () => {
+itFfmpeg("rejects malformed and overlong audio and cleans up", async () => {
   await expect(convertAudio(new File(["invalid"], "in.wav"), new AbortController().signal)).rejects.toMatchObject({ status: 400 });
   await expect(convertAudio(new File([wav(121)], "in.wav"), new AbortController().signal)).rejects.toMatchObject({ status: 400 });
 });
-it("sends only the converted file and projects upstream metadata out of the response through a local relay", async () => {
+itFfmpeg("sends only the converted file and projects upstream metadata out of the response through a local relay", async () => {
   let observed;
   const server = createServer(async (req, res) => {
     const chunks = []; for await (const c of req) chunks.push(c);
