@@ -1,3 +1,16 @@
+# v0.6.15 (2026-10-24)
+
+One correctness fix, found while the 0.6.14 Tests pipeline was red.
+
+## Fixes
+
+- **A wrong Zed key can no longer be accepted as a credential.** Zed's access token is RSA-encrypted to the login attempt's public key and decrypted with a fallback that also tries PKCS#1 v1.5 padding. That padding carries no integrity check, so a wrong key still "decrypts" into random bytes — and the old guard only rejected output containing U+FFFD, which a short random run need not contain. Roughly one in 10⁴ wrong-key callbacks therefore stored garbage as a live token and reported the login as successful. Both padding paths now require the plaintext shape of a real bearer token (printable ASCII, at least 8 characters), which every real Zed token matches and key-schedule garbage practically never does. The flaky `zed-native-auth` CI failure was this bug, not a timing issue; the regression test is deterministic (a PKCS#1-encrypted short payload must be rejected, and the fallback must still decrypt a plausible token).
+
+## Notes
+
+- Everything else in this release is identical to 0.6.14 (CodeArts catalog renewal, dead-catalog backoff, ffmpeg in CI). The 0.6.14 npm artifact predates this fix.
+- **Test suite**: 431 files / 4514 passing / 0 failing; the `Tests` pipeline is green on this commit.
+
 # v0.6.14 (2026-10-24)
 
 Two model-listing fixes. `/v1/models` is polled by clients, so a credential that cannot be renewed used to turn every poll into a rejected round trip plus a log line — indefinitely. Both are measured against a real expired connection.
