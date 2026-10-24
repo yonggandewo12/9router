@@ -15,6 +15,7 @@ import {
   buildToolConversationPrompt,
 } from "../translator/deepseekWebTools.js";
 import { requestDeepSeekPowChallenge } from "./deepseek-web/pow.js";
+import { unwrapLocalStorageToken } from "../services/webLoginConfig.js";
 import {
   isThinkingModel,
   isSearchModel,
@@ -67,14 +68,11 @@ function evictOldest(cache) {
 export function extractUserToken(credentials) {
   const raw = credentials?.apiKey || credentials?.accessToken;
   if (typeof raw !== "string" || raw.length === 0) return null;
-  // Handle JSON-wrapped tokens (DeepSeek stores token as {"value":"..."})
-  try {
-    const parsed = JSON.parse(raw);
-    if (typeof parsed?.value === "string") return parsed.value;
-  } catch {
-    // not JSON, use raw
-  }
-  return raw;
+  // Same rule as the login capture: a JSON object is DeepSeek's storage
+  // envelope, never a token. chat.deepseek.com writes {"value":null,...} for
+  // every visitor, so accepting the envelope verbatim would send the
+  // placeholder as a Bearer token and fail with 401 forever.
+  return unwrapLocalStorageToken(raw);
 }
 
 function errorResponse(status, message, dsCode) {
@@ -146,7 +144,7 @@ async function solvePow(challenge, signal) {
 
 // ── SSE Transform (DeepSeek → OpenAI) ───────────────────────────────────
 
-function transformSSE(deepseekStream, model) {
+function transformSSE(deepseekStream, model, log = null) {
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
   const streamModel = model || "deepseek-web";
@@ -156,12 +154,22 @@ function transformSSE(deepseekStream, model) {
   let currentPath = "";
   const thinkingModel = isThinkingModel(streamModel);
   const searchResults = [];
+  // Held in the closure so cancel() can tear the upstream read down. The client
+  // request signal covers client disconnects, but a consumer that cancels the
+  // RESPONSE body without aborting that signal (combo discarding a candidate,
+  // Response.body.cancel()) would otherwise leave DeepSeek streaming to
+  // completion into a void.
+  let upstreamReader = null;
+  let drainScheduler = null;
 
   return new ReadableStream(
     {
       async start(controller) {
         const reader = deepseekStream.getReader();
+        upstreamReader = reader;
         let buffer = "";
+        let sawFinished = false;
+        let emittedContent = false;
 
         const chunk = (delta, finish) => {
           controller.enqueue(encoder.encode(sseChunk({
@@ -197,12 +205,13 @@ function transformSSE(deepseekStream, model) {
         // search_results afterward. Drain briefly, then always emit
         // stop + [DONE] so clients do not hang if the upstream body stays open.
         const { scheduleFinishAfterDrain, clearFinishedDrain, isDrainPending } =
-          createFinishedDrainScheduler(finishStream);
+          (drainScheduler = createFinishedDrainScheduler(finishStream));
 
         const sendByPath = (raw) => {
           const text = formatStreamContent(raw, streamModel);
           if (!text) return;
           ensureRole();
+          emittedContent = true;
           let path = currentPath;
           if (!path && thinkingModel) path = "thinking";
           else if (!path && isSearchModel(streamModel)) path = "content";
@@ -314,6 +323,7 @@ function transformSSE(deepseekStream, model) {
               }
 
               if (p === "response/status" && v === "FINISHED") {
+                sawFinished = true;
                 scheduleFinishAfterDrain();
                 continue;
               }
@@ -333,10 +343,34 @@ function transformSSE(deepseekStream, model) {
           return;
         }
 
+        // The upstream body closed without ever sending response/status FINISHED:
+        // the DeepSeek session was cut mid-generation (expired cookie, anti-bot
+        // challenge, network drop). The non-stream path throws on exactly this;
+        // here an empty stream would otherwise be delivered as a successful
+        // completion, so error it instead. A PARTIAL answer is still closed
+        // normally — tearing down a half-delivered reply helps nobody.
+        if (!sawFinished && !emittedContent) {
+          clearFinishedDrain();
+          controller.error(
+            new Error(
+              "DeepSeek web session ended before completion (no FINISHED signal received) — " +
+                "likely a dropped cookie session or network interruption upstream. Retry the request."
+            )
+          );
+          return;
+        }
+        if (!sawFinished) {
+          log?.warn?.("DEEPSEEK-WEB", "upstream closed without FINISHED after partial content; completing with what arrived");
+        }
+
         finishStream();
       },
-      cancel() {
-        // Best-effort: the controller is already cancelled; nothing to finish.
+      cancel(reason) {
+        // Tear the upstream read down: without this a cancelled response body
+        // (combo discarding a candidate, client-side cancel) leaves DeepSeek
+        // streaming to completion into a void.
+        drainScheduler?.clearFinishedDrain();
+        upstreamReader?.cancel(reason).catch(() => {});
       },
     },
     { highWaterMark: 16384 }
@@ -1053,7 +1087,7 @@ export class DeepSeekWebExecutor extends BaseExecutor {
       }
 
       if (stream !== false) {
-        const openaiStream = transformSSE(resp.body, clientModel);
+        const openaiStream = transformSSE(resp.body, clientModel, log);
         const wrappedStream = wrapStreamWithCleanup(openaiStream, cleanupFn);
         return {
           response: new Response(wrappedStream, {
@@ -1119,4 +1153,4 @@ export class DeepSeekWebExecutor extends BaseExecutor {
 
 export const deepseekWebExecutor = new DeepSeekWebExecutor();
 
-export { acquireAccessToken, tokenCache, sessionCache };
+export { acquireAccessToken, tokenCache, sessionCache, transformSSE, collectSSEContent };

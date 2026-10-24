@@ -9,6 +9,7 @@ import https from "node:https";
 import { extractCookieValue, normalizeSessionCookieHeader } from "../utils/webCookieAuth.js";
 import { normalizeGeminiValidationCookie } from "../utils/geminiCookies.js";
 import { grokTlsFetch, GROK_TLS_USER_AGENT } from "./grokTlsClient.js";
+import { unwrapLocalStorageToken } from "./webLoginConfig.js";
 
 const UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36";
@@ -75,11 +76,10 @@ function geminiHttpsGet(url, headers) {
 
 const PROBES = {
   async "deepseek-web"(credential) {
-    let token = String(credential || "").trim();
-    try {
-      const parsed = JSON.parse(token);
-      if (typeof parsed?.value === "string") token = parsed.value;
-    } catch { /* raw token */ }
+    // Unwrap the storage envelope the same way login capture and the executor
+    // do: the pre-login placeholder must be reported as "missing", not sent to
+    // the API as a Bearer token.
+    const token = unwrapLocalStorageToken(credential) || "";
     if (!token) return REJECTED("Missing userToken");
 
     const res = await request("https://chat.deepseek.com/api/v0/users/current", {

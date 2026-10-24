@@ -10,8 +10,16 @@ export function isSearchModel(model) {
   return m.includes("search") || m.includes("fold");
 }
 
+// DeepSeek occasionally leaks its own status markers into the content stream,
+// but only as a fragment of their own (or at its very start). Stripping every
+// occurrence would also eat the word from genuine answers ("the build FINISHED"),
+// so match the marker only where the leak actually appears.
 export function cleanDeepSeekToken(text) {
-  return text.replace(/FINISHED/g, "").replace(/^(SEARCH|WEB_SEARCH|SEARCHING)\s*/i, "");
+  return text
+    .replace(/^FINISHED\s*/, "")
+    // Longest alternative first: "SEARCH" matching the prefix of "SEARCHING"
+    // would leave "ING …" in the user's content.
+    .replace(/^(WEB_SEARCH|SEARCHING|SEARCH)\s*/i, "");
 }
 
 export function formatStreamContent(raw, model) {
