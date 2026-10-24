@@ -1124,7 +1124,12 @@ export async function testSingleConnection(id) {
   const start = Date.now();
   let result;
 
-  if (connection.authType === "apikey" || connection.authType === "cookie") {
+  // zcode's apikey mode stores the same plan JWT the OAuth mode does, and the
+  // generic key-probe switch has no zcode case — without this, pasting a JWT
+  // marks a working connection as "Provider test not supported".
+  if (connection.provider === "zcode") {
+    result = await testOAuthConnection(connection, effectiveProxy);
+  } else if (connection.authType === "apikey" || connection.authType === "cookie") {
     result = await testApiKeyConnection(connection, effectiveProxy);
   } else {
     result = await testOAuthConnection(connection, effectiveProxy);

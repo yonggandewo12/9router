@@ -374,15 +374,24 @@ export async function handleComboChat({
     const isPerTurn = policy === "per-turn" || sessionSticky === false;
     const isStrict = policy === "strict";
 
+    // A percent-style value (85) or an out-of-range number (>1) silently blocks
+    // every selection; 0 is a legitimate "always switch". Percent values are
+    // converted, everything else is clamped into [0,1].
+    const clampThreshold = (value) => {
+      let num = Number(value);
+      if (!Number.isFinite(num)) return null;
+      if (num > 1) num = num / 100;
+      return Math.min(Math.max(num, 0), 1);
+    };
     let switchThreshold = 0.8;
     if (policy === "custom") {
-      const custom = Number(confidenceThreshold);
-      if (Number.isFinite(custom) && custom > 0) switchThreshold = custom;
+      const custom = clampThreshold(confidenceThreshold);
+      if (custom !== null && confidenceThreshold > 0) switchThreshold = custom;
     } else if (policy === "smart-switch-70") switchThreshold = 0.7;
     else if (policy === "smart-switch-90") switchThreshold = 0.9;
     else if (policy.startsWith("smart-switch") || policy === "smart") {
-      const custom = Number(confidenceThreshold);
-      if (Number.isFinite(custom) && custom > 0) switchThreshold = custom;
+      const custom = clampThreshold(confidenceThreshold);
+      if (custom !== null && confidenceThreshold > 0) switchThreshold = custom;
     }
 
     if (!isPerTurn && sessionId) {
@@ -462,6 +471,14 @@ export async function handleComboChat({
       rotatedModels = reordered;
     }
   }
+
+  // The sticky entry must name the model that actually serves this turn (the one
+  // holding the prompt cache), not the router's pick: autoSwitch may have floated
+  // a capability adapter to the front after the sticky value was recorded.
+  if (comboStrategy === "smart" && sessionId && activeStickyModel && rotatedModels[0] !== activeStickyModel) {
+    setStickyComboModel(comboName, sessionId, rotatedModels[0]);
+    activeStickyModel = rotatedModels[0];
+  }
   
   let lastError = null;
   let earliestRetryAfter = null;
@@ -486,13 +503,13 @@ export async function handleComboChat({
         } catch (peekErr) {
           // peekStreamForContent is written not to throw; if reconstruction/Response
           // construction ever does, result.body is already locked by getReader() and can no
-          // longer be streamed. Returning `result` would hand the client a locked, unreadable
-          // body. Degrade to a clean, valid (empty) SSE stream instead.
-          log.warn("COMBO", `empty-peek error on ${modelStr}, returning empty SSE: ${peekErr?.message || peekErr}`);
-          return new Response("data: [DONE]\n\n", {
-            status: 200,
-            headers: { "Content-Type": "text/event-stream" },
-          });
+          // longer be streamed. Returning it would hand the client a locked, unreadable
+          // body, and returning an empty 200 "success" would silently swallow the request.
+          // Cancel the unusable stream and fall through to the next candidate instead.
+          log.warn("COMBO", `empty-peek error on ${modelStr}, trying next: ${peekErr?.message || peekErr}`);
+          lastError = `peek error (${peekErr?.message || peekErr})`;
+          lastStatus = 502;
+          continue;
         }
 
         if (!peeked) {
@@ -548,7 +565,7 @@ export async function handleComboChat({
         // Drain/close the discarded stream in the background so its usage logging still runs.
         peeked.response.body?.cancel?.().catch(() => {});
         lastError = `empty generation (${reasonLabel})`;
-        if (!lastStatus) lastStatus = 502;
+        lastStatus = 502;
         continue;
       }
 
@@ -597,7 +614,7 @@ export async function handleComboChat({
       if (requestScoped) {
         log.warn("COMBO", `Model ${modelStr} rejected the request (${result.status}), trying next`, { status: result.status });
         lastError = errorText || String(result.status);
-        if (!lastStatus) lastStatus = result.status;
+        lastStatus = result.status;
         if (!requestScopedResult) requestScopedResult = result;
         continue;
       }
@@ -611,9 +628,10 @@ export async function handleComboChat({
         await new Promise(r => setTimeout(r, cooldownMs));
       }
 
-      // Fallback to next model
+      // Fallback to next model. Track the LAST failure: the all-failed response
+      // carries this status/body, and an early 502 must not mask a later 429.
       lastError = errorText || String(result.status);
-      if (!lastStatus) lastStatus = result.status;
+      lastStatus = result.status;
       log.warn("COMBO", `Model ${modelStr} failed, trying next`, { status: result.status });
     } catch (error) {
       // Catch unexpected exceptions to ensure fallback continues

@@ -541,5 +541,54 @@ describe("System One Smart Combo Router", () => {
 
       expect(calls[1]).toBe("ds/deepseek-v4"); // Switched because 0.76 >= 0.75
     });
+
+    it("clamps an out-of-range confidence threshold instead of blocking every selection", async () => {
+      const calls = [];
+      const handleSingleModel = vi.fn(async (_body, model) => {
+        calls.push(model);
+        return okResponse(`Answer from ${model}`);
+      });
+      const resolveSmartChoice = vi.fn(async () => ({
+        choice: "ds/deepseek-v4",
+        confidence: 0.9,
+      }));
+
+      // 85 looks like a percent; unclamped it would reject every decision.
+      await handleComboChat({
+        body: { messages: [{ role: "user", content: "Task" }] },
+        models: ["cx/gpt-5-mini", "ds/deepseek-v4"],
+        handleSingleModel,
+        log,
+        comboName: "dev-combo",
+        comboStrategy: "smart",
+        smartPolicy: "custom",
+        confidenceThreshold: 85,
+        sessionId: "session-clamp",
+        resolveSmartChoice,
+      });
+
+      expect(calls[0]).toBe("ds/deepseek-v4");
+    });
+  });
+
+  describe("failure bookkeeping", () => {
+    it("reports the LAST failure status, not the first, when all models fail", async () => {
+      let n = 0;
+      const handleSingleModel = vi.fn(async () => {
+        n += 1;
+        return errResponse(n === 1 ? 502 : 429, n === 1 ? "bad gateway" : "rate limited");
+      });
+
+      const res = await handleComboChat({
+        body: { messages: [{ role: "user", content: "hi" }] },
+        models: ["cx/gpt-5-mini", "ds/deepseek-v4"],
+        handleSingleModel,
+        log,
+        comboName: "dev-combo",
+        comboStrategy: "fallback",
+      });
+
+      expect(res.status).toBe(429);
+    });
   });
 });

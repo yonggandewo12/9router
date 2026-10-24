@@ -164,6 +164,12 @@ export async function peekStreamForContent(body, { deadlineMs = EMPTY_PEEK_DEADL
   const settle = (ret) => { if (timer) { clearTimeout(timer); timer = null; } return ret; };
 
   let pendingRead = null;
+  // A reasoning-heavy model can stream megabytes of thinking before the first
+  // content frame; without a cap the head buffer grows with it for the whole
+  // peek window. Over-cap is treated as content (fail-open commit), same as the
+  // deadline: the stream is presumed valid and handed to the client.
+  let headBytes = 0;
+  const HEAD_CAP_BYTES = 1024 * 1024;
   while (true) {
     if (!pendingRead) pendingRead = reader.read();
     let res;
@@ -187,10 +193,11 @@ export async function peekStreamForContent(body, { deadlineMs = EMPTY_PEEK_DEADL
       return settle({ outcome: state.sawContent ? "content" : "empty", timedOut: false, head: headChunks, reader, pendingRead: null, finishReason: state.finishReason });
     }
     headChunks.push(value);
+    headBytes += value.byteLength;
     textBuf += decoder.decode(value, { stream: true });
     scanSSEBuffer(textBuf, state);
     textBuf = state.pending; // only the not-yet-complete line carries over
-    if (state.sawContent) {
+    if (state.sawContent || headBytes > HEAD_CAP_BYTES) {
       return settle({ outcome: "content", timedOut: false, head: headChunks, reader, pendingRead: null, finishReason: state.finishReason });
     }
   }

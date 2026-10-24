@@ -24,6 +24,16 @@ function hasZcodePrompt(system) {
   return system.some((block) => textOf(block).includes(ZCODE_PROMPT_MARKER));
 }
 
+// The gate tolerates the official pair plus AT MOST one extra block. A client
+// system that merely QUOTES the marker (e.g. in a custom prompt) is not the
+// official layout; forwarded untouched it would exceed the block budget and
+// answer 3012. Only a system already within the budget is passed through.
+function isOfficialLayout(system) {
+  if (typeof system === "string") return system.includes(ZCODE_PROMPT_MARKER);
+  if (!Array.isArray(system)) return false;
+  return system.length <= 3 && hasZcodePrompt(system);
+}
+
 // Client system → one text block. The gate counts system blocks: the official
 // pair plus AT MOST one extra passes; a 4th block answers 3012 regardless of
 // content or cache_control placement (measured 2026-10-24, bisected live).
@@ -50,22 +60,37 @@ function clientSystemAsOneBlock(system) {
 
 export function withZcodeSystemPrompt(body) {
   if (!body || typeof body !== "object" || Array.isArray(body)) return body;
-  if (hasZcodePrompt(body.system)) return body;
+  if (isOfficialLayout(body.system)) return body;
   const merged = clientSystemAsOneBlock(body.system);
-  const system = merged
-    ? [
+  if (merged) {
+    return {
+      ...body,
+      system: [
         ...ZCODE_SYSTEM_BLOCKS,
         {
           type: "text",
           text: merged.text,
           ...(merged.cacheControl ? { cache_control: { ...merged.cacheControl } } : {}),
         },
-      ]
-    : [...ZCODE_SYSTEM_BLOCKS];
-  return {
-    ...body,
-    system,
-  };
+      ],
+    };
+  }
+  // No usable client text, but a cache_control was still anchored on one of the
+  // empty blocks — keep the (last seen) breakpoint on the last official block
+  // instead of dropping it entirely.
+  let orphanedCacheControl = null;
+  if (Array.isArray(body.system)) {
+    for (const b of body.system) {
+      if (b?.cache_control) orphanedCacheControl = b.cache_control;
+    }
+  }
+  if (!orphanedCacheControl) {
+    return { ...body, system: [...ZCODE_SYSTEM_BLOCKS] };
+  }
+  const blocks = ZCODE_SYSTEM_BLOCKS.map((b, i) =>
+    i === ZCODE_SYSTEM_BLOCKS.length - 1 ? { ...b, cache_control: { ...orphanedCacheControl } } : b
+  );
+  return { ...body, system: blocks };
 }
 
 export class ZcodeExecutor extends DefaultExecutor {

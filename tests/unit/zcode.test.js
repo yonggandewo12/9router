@@ -100,6 +100,33 @@ describe("zcode system-prompt gate", () => {
     expect(withZcodeSystemPrompt(body)).toBe(body);
   });
 
+  // A client prompt that merely QUOTES the marker is not the official layout —
+  // forwarded untouched it exceeds the 3-block budget and answers 3012.
+  it("re-wraps a system that quotes the marker but exceeds the block budget", () => {
+    const out = withZcodeSystemPrompt({
+      system: [
+        { type: "text", text: "A prompt that mentions: You are an interactive ZCode agent" },
+        { type: "text", text: "second" },
+        { type: "text", text: "third" },
+        { type: "text", text: "fourth" },
+      ],
+      messages: [],
+    });
+    expect(out.system).toHaveLength(ZCODE_SYSTEM_BLOCKS.length + 1);
+    expect(out.system.slice(0, -1)).toEqual(ZCODE_SYSTEM_BLOCKS);
+  });
+
+  // cache_control anchored on a textless block must survive on an official
+  // block, not vanish (the system prefix would stop caching).
+  it("keeps an orphaned cache_control when the client system has no text", () => {
+    const out = withZcodeSystemPrompt({
+      system: [{ type: "text", text: "" }, { cache_control: { type: "ephemeral", ttl: "1h" } }],
+      messages: [],
+    });
+    expect(out.system).toHaveLength(ZCODE_SYSTEM_BLOCKS.length);
+    expect(out.system.at(-1).cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+  });
+
   it("returns non-object bodies as-is", () => {
     expect(withZcodeSystemPrompt(null)).toBe(null);
     expect(withZcodeSystemPrompt("raw")).toBe("raw");
