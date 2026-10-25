@@ -1,3 +1,29 @@
+# v0.6.18 (2026-10-25)
+
+ChatGPT Web becomes a chat provider, and the web-cookie lanes learn to route through a proxy.
+
+## Features
+
+- **chatgpt-web now serves chat, not only images.** Turns run over the web client's own HTTP API — sentinel headers are solved in Node, the `delta_encoding: v1` document stream is forwarded as it arrives, and tools use the shared `<tool>` prompt contract. The response is not returned until the upstream accepted the turn, so an expired cookie (401) or a depleted account (429) still reaches the account-fallback loop instead of being hidden behind a broken stream. A headed browser page remains only as the Turnstile fallback.
+- **Web-cookie logins can be configured with a proxy before the window opens.** The sign-in page often cannot load at all on a direct connection, so `POST /api/providers/web-login` accepts `proxyUrl`/`noProxy`, applies them at browser launch, and carries them onto the saved connection. Subsequent chat, browser fallback and image requests use the same route.
+- **Proxy support reaches every web-cookie path**: the chat HTTP lane, the clean-room browser fallback (per-context, keyed together with the credential), and the image lane; identity probes and the provider Test button use it too.
+
+## Fixes
+
+- **Non-streaming turns no longer vanish from cost stats.** Usage used to be read from `body.usage` only; providers that answer without one — every web-cookie lane — reported zeros, and an all-zero success row is dropped, so the turn appeared in neither the Usage panel nor the cost totals while the same turn with `stream: true` was recorded. The non-streaming path now estimates the same way the streaming path does (reasoning and tool-call text included), reports the result in the client's own field names, and leaves real upstream counts untouched.
+- **chatgpt-web: a silently stalled `chatgpt.com` no longer holds the turn.** The session fetch and both sentinel calls now carry a connect timeout (default 60 s, `FETCH_CONNECT_TIMEOUT_MS`); previously a proxy tunnel that accepted the connection and went quiet held the request, the account slot and the client until the OS gave up.
+- **chatgpt-web: upstream statuses survive the error path.** An expired cookie or a refused turn was re-guessed from the message text and surfaced as 502; the errors' own 401/429 now reaches the fallback loop.
+- **chatgpt-web: conversations are cleaned up.** Each HTTP turn (chat and image alike) creates a real entry in the account's history; both lanes now delete what they created, the image lane only after the bytes are downloaded. Best-effort and fire-and-forget — a failed cleanup never fails the request.
+- **chatgpt-web: SSE frames are split tolerantly.** The delta reader required `\n\n` while its own parser accepted CRLF, so a wire-format change would have degraded streaming to one lump at the end without an error.
+- **Browser lanes refuse to leak under strict proxying.** A relay-only proxy pool cannot be applied to a browser context; with `strictProxy` that is now an actionable error instead of a silent direct connection. The clean-room context cache key also includes the bypass list.
+- **Login windows: a running window is no longer silently reused.** The proxy is applied at launch, so re-starting a login with a different proxy now fails with the reason instead of returning the old window.
+- **Login windows: a connection is never saved without a credential.** A login that reported success with an empty credential used to persist a normal-looking active row; the fallback loop kept selecting it and every turn failed 401.
+
+## Notes
+
+- **chatgpt-web chat needs a chatgpt.com cookie** (or the Login via Browser flow). The HTTP lane asks ChatGPT for its default model (`model: "auto"`), so the per-model selection in the registry does not change the answer yet; the browser fallback is the only path that switches models.
+- **Test suite**: 443 files / 4580 passing / 0 failing, including new coverage for the stream contract, proxy threading, conversation cleanup, the save guard and non-streaming usage.
+
 # v0.6.17 (2026-10-25)
 
 Makes the published package's DeepSeek web lane work again.
