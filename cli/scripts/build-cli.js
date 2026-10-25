@@ -321,6 +321,21 @@ function buildCliPackage() {
     console.log("⏭️  No updater files found\n");
   }
 
+  // Step 7c: Copy worker assets that are loaded by PATH at runtime.
+  // The DeepSeek PoW worker runs in a worker_thread and imports its hash
+  // implementation as a SIBLING module; shipping the worker without it fails
+  // every deepseek-web request with "Cannot find module
+  // .../deepseek-pow-hash.js" (0.6.16 shipped exactly that). Trace-based
+  // copying is not reliable for files that are only referenced by path.
+  console.log("7️⃣ c Copying runtime worker assets...");
+  try {
+    copyRuntimeWorkerAssets(appDir, cliAppDir);
+  } catch (error) {
+    console.error(`❌ ${error.message}`);
+    process.exit(1);
+  }
+  console.log("✅ Copied runtime worker assets\n");
+
   // Step 8: Build MITM server (config driven - see app/cli/scripts/buildMitm.js)
   console.log("8️⃣  Building MITM server...");
   try {
@@ -343,9 +358,27 @@ function buildCliPackage() {
   }
 }
 
+// Worker scripts (and their sibling imports) are located by PATH at runtime, so
+// they must be copied verbatim — tracing only sees module imports.
+const RUNTIME_WORKER_ASSETS = ["deepseek-pow-worker.mjs", "deepseek-pow-hash.js"];
+
+function copyRuntimeWorkerAssets(appDir, cliAppDir) {
+  const workerSrcDir = path.join(appDir, "open-sse", "lib");
+  const workerDestDir = path.join(cliAppDir, "open-sse", "lib");
+  for (const name of RUNTIME_WORKER_ASSETS) {
+    const src = path.join(workerSrcDir, name);
+    if (!fs.existsSync(src)) {
+      throw new Error(`Missing runtime worker asset in the source tree: ${src}`);
+    }
+    fs.mkdirSync(workerDestDir, { recursive: true });
+    fs.copyFileSync(src, path.join(workerDestDir, name));
+  }
+}
+
 module.exports = {
   assertRequiredApiArtifacts,
   copyStandaloneBuild,
+  copyRuntimeWorkerAssets,
   mergeServerArtifacts,
 };
 

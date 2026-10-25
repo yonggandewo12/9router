@@ -17,6 +17,7 @@ const require = createRequire(import.meta.url);
 const {
   assertRequiredApiArtifacts,
   copyStandaloneBuild,
+  copyRuntimeWorkerAssets,
   mergeServerArtifacts,
 } = require("../../cli/scripts/build-cli.js");
 
@@ -136,6 +137,35 @@ describe("CLI build server artifacts", () => {
         cliAppDir,
         ".next-cli-build/server/app/api/v1/messages/route.js",
       )),
+    );
+  });
+});
+
+// 0.6.16 shipped the DeepSeek PoW worker but not the hash module it imports as
+// a sibling, so every deepseek-web request died with "Cannot find module
+// .../deepseek-pow-hash.js" in the published package.
+describe("CLI runtime worker assets", () => {
+  it("copies the worker and every sibling module it imports by path", () => {
+    const root = createTempDir();
+    const appDir = path.join(root, "app");
+    const cliAppDir = path.join(root, "cli-app");
+    writeFixture(appDir, "open-sse/lib/deepseek-pow-worker.mjs", "worker");
+    writeFixture(appDir, "open-sse/lib/deepseek-pow-hash.js", "hash");
+
+    copyRuntimeWorkerAssets(appDir, cliAppDir);
+
+    assert.equal(fs.readFileSync(path.join(cliAppDir, "open-sse/lib/deepseek-pow-worker.mjs"), "utf8"), "worker");
+    assert.equal(fs.readFileSync(path.join(cliAppDir, "open-sse/lib/deepseek-pow-hash.js"), "utf8"), "hash");
+  });
+
+  it("fails the build when a sibling module is missing from the source tree", () => {
+    const root = createTempDir();
+    const appDir = path.join(root, "app");
+    writeFixture(appDir, "open-sse/lib/deepseek-pow-worker.mjs", "worker");
+
+    assert.throws(
+      () => copyRuntimeWorkerAssets(appDir, path.join(root, "cli-app")),
+      /deepseek-pow-hash\.js/,
     );
   });
 });
