@@ -13,6 +13,8 @@ const SSE_DEADLINE_MS = 90000;
 const POLL_INITIAL_WAIT_MS = 5000;
 const POLL_INTERVAL_MS = 5000;
 const POLL_TIMEOUT_MS = 240000;
+import { proxyAwareFetch } from "../../utils/proxyFetch.js";
+
 const DOWNLOAD_TIMEOUT_MS = 90000;
 const CONTENT_POLICY_RE =
   /(content policy|violat(?:es|ed|ion)|can't create|cannot create|i can't generate|i cannot generate|not able to create|unable to create|safety)/i;
@@ -30,12 +32,12 @@ class ChatGptWebImageError extends Error {
   }
 }
 
-function fetchWithTimeout(url, options, timeoutMs, outerSignal) {
+function fetchWithTimeout(url, options, timeoutMs, outerSignal, proxyOptions = null) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   const onAbort = () => controller.abort();
   outerSignal?.addEventListener("abort", onAbort, { once: true });
-  return fetch(url, { ...options, signal: controller.signal }).finally(() => {
+  return proxyAwareFetch(url, { ...options, signal: controller.signal }, proxyOptions).finally(() => {
     clearTimeout(timer);
     outerSignal?.removeEventListener("abort", onAbort);
   });
@@ -118,7 +120,7 @@ async function runImageConversation(ctx, prompt, sizeHint, signal) {
       supported_encodings: ["v1"],
       client_contextual_info: { app_name: "chatgpt.com" },
     }),
-  }, 60000, signal);
+  }, 60000, signal, ctx.proxyOptions);
   if (!prepare.ok) {
     throw new ChatGptWebImageError(`ChatGPT prepare failed (HTTP ${prepare.status})`, prepare.status || 502);
   }
@@ -173,7 +175,7 @@ async function runImageConversation(ctx, prompt, sizeHint, signal) {
       paragen_cot_summary_display_override: "allow",
       force_parallel_switch: "auto",
     }),
-  }, SSE_DEADLINE_MS + 15000, signal);
+  }, SSE_DEADLINE_MS + 15000, signal, ctx.proxyOptions);
   if (!conversation.ok) {
     throw new ChatGptWebImageError(`ChatGPT conversation failed (HTTP ${conversation.status})`, conversation.status || 502);
   }
@@ -197,7 +199,7 @@ async function pollConversationImages(ctx, conversationId, initial, { signal, lo
   while (Date.now() - started <= POLL_TIMEOUT_MS) {
     if (signal?.aborted) throw new Error("Request aborted");
 
-    const res = await fetchWithTimeout(`${ctx.baseUrl}/backend-api/conversation/${conversationId}`, { headers }, 30000, signal)
+    const res = await fetchWithTimeout(`${ctx.baseUrl}/backend-api/conversation/${conversationId}`, { headers }, 30000, signal, ctx.proxyOptions)
       .catch(() => null);
     if (!res?.ok) {
       log?.debug?.("CGPT-WEB-IMG", `conversation poll status ${res?.status ?? "network"}, retrying`);
@@ -233,8 +235,8 @@ async function pollConversationImages(ctx, conversationId, initial, { signal, lo
   throw new ChatGptWebImageError("ChatGPT image generation timed out", 504);
 }
 
-async function downloadUrl(url, signal) {
-  const res = await fetchWithTimeout(url, {}, DOWNLOAD_TIMEOUT_MS, signal);
+async function downloadUrl(ctx, url, signal) {
+  const res = await fetchWithTimeout(url, {}, DOWNLOAD_TIMEOUT_MS, signal, ctx.proxyOptions);
   if (!res.ok) return null;
   const buffer = Buffer.from(await res.arrayBuffer());
   if (!buffer.length) return null;
@@ -249,13 +251,13 @@ async function downloadGeneratedImage(ctx, conversationId, { fileIds, sedimentId
   const jsonHeaders = { ...authHeaders(ctx), Accept: "application/json" };
 
   for (const fileId of fileIds) {
-    const res = await fetchWithTimeout(`${ctx.baseUrl}/backend-api/files/${fileId}/download`, { headers: jsonHeaders }, 60000, signal)
+    const res = await fetchWithTimeout(`${ctx.baseUrl}/backend-api/files/${fileId}/download`, { headers: jsonHeaders }, 60000, signal, ctx.proxyOptions)
       .catch(() => null);
     if (!res?.ok) continue;
     const body = await res.json().catch(() => null);
     const url = body?.download_url || body?.url || "";
     if (!url) continue;
-    const media = await downloadUrl(url, signal);
+    const media = await downloadUrl(ctx, url, signal);
     if (media) return media;
   }
 
@@ -264,13 +266,14 @@ async function downloadGeneratedImage(ctx, conversationId, { fileIds, sedimentId
       `${ctx.baseUrl}/backend-api/conversation/${conversationId}/attachment/${sedimentId}/download`,
       { headers: jsonHeaders },
       60000,
-      signal
+      signal,
+      ctx.proxyOptions
     ).catch(() => null);
     if (!res?.ok) continue;
     const body = await res.json().catch(() => null);
     const url = body?.download_url || body?.url || "";
     if (!url) continue;
-    const media = await downloadUrl(url, signal);
+    const media = await downloadUrl(ctx, url, signal);
     if (media) return media;
   }
 
@@ -299,12 +302,13 @@ export async function generateChatGptWebImageHttp({
   sizeHint,
   signal,
   log,
+  proxyOptions = null,
 }) {
   if (!accessToken) throw new ChatGptWebImageError("ChatGPT session has no access token", 401);
   if (signal?.aborted) throw new Error("Request aborted");
 
-  const sentinel = await fetchSentinelHeaders({ baseUrl, accessToken, userAgent, signal });
-  const ctx = { baseUrl, accessToken, cookie, userAgent, sentinel };
+  const sentinel = await fetchSentinelHeaders({ baseUrl, accessToken, userAgent, signal, proxyOptions });
+  const ctx = { baseUrl, accessToken, cookie, userAgent, sentinel, proxyOptions: proxyOptions || null };
 
   const initial = await runImageConversation(ctx, prompt, sizeHint, signal);
   if (!initial.conversationId && initial.fileIds.length === 0 && initial.sedimentIds.length === 0) {

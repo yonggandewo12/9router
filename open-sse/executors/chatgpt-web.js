@@ -306,7 +306,7 @@ export class ChatGptWebExecutor extends BaseExecutor {
    *
    * @returns {Promise<Array<{ b64: string, mime: string }>>}
    */
-  async generateMedia({ prompt, n = 1, size, credentials, signal, log }) {
+  async generateMedia({ prompt, n = 1, size, credentials, signal, log, proxyOptions = null }) {
     if (!prompt) throw new Error("prompt is required for image generation");
     const storageState = readStorageState(credentials);
     const providerData = credentials.providerSpecificData;
@@ -317,14 +317,14 @@ export class ChatGptWebExecutor extends BaseExecutor {
 
     const results = [];
     for (let i = 0; i < Math.max(1, n); i++) {
-      results.push(await this.#generateOneImage({ prompt, size, storageState, userAgent, signal, log, credentials }));
+      results.push(await this.#generateOneImage({ prompt, size, storageState, userAgent, signal, log, credentials, proxyOptions }));
     }
     return results;
   }
 
-  async #generateOneImage({ prompt, size, storageState, userAgent, signal, log, credentials }) {
+  async #generateOneImage({ prompt, size, storageState, userAgent, signal, log, credentials, proxyOptions = null }) {
     try {
-      const accessToken = await fetchAccessToken({ storageState, userAgent, signal });
+      const accessToken = await fetchAccessToken({ storageState, userAgent, signal, proxyOptions });
       return await generateChatGptWebImageHttp({
         baseUrl: CHATGPT_WEB_URL,
         accessToken,
@@ -334,6 +334,7 @@ export class ChatGptWebExecutor extends BaseExecutor {
         sizeHint: size,
         signal,
         log,
+        proxyOptions,
       });
     } catch (error) {
       // Turnstile enforcement is the only case the browser path still wins;
@@ -356,6 +357,7 @@ export class ChatGptWebExecutor extends BaseExecutor {
       locale: typeof providerData?.locale === "string" ? providerData.locale : undefined,
       timezone: typeof providerData?.timezone === "string" ? providerData.timezone : undefined,
       chromeExecutablePath: resolveChatGptWebChromeExecutable(providerData?.chromeExecutablePath),
+      proxyOptions,
     });
     try {
       await session.start();

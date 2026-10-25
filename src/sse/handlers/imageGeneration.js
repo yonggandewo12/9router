@@ -9,6 +9,7 @@ import { getSettings } from "@/lib/localDb";
 import { getModelInfo, getComboModels } from "../services/model.js";
 import { getKeyAccessContext, enforceKeyAccess } from "../services/keyAccess.js";
 import { handleImageGenerationCore } from "open-sse/handlers/imageGenerationCore.js";
+import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy.js";
 import { getImageAdapter } from "open-sse/handlers/imageProviders/index.js";
 import { errorResponse, unavailableResponse } from "open-sse/utils/error.js";
 import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
@@ -149,12 +150,18 @@ async function handleSingleModelImage(body, modelStr, { wantsStream, binaryOutpu
       continue;
     }
 
+    // Browser/HTTP image lanes for web-cookie providers must use the same
+    // route as the login window; a direct call fails where the page needed a proxy.
+    const proxyOptions = await resolveConnectionProxyConfig(
+      refreshedCredentials._connection?.providerSpecificData || refreshedCredentials.providerSpecificData || {}
+    );
     const result = await handleImageGenerationCore({
       body,
       modelInfo: { provider, model },
       credentials: refreshedCredentials,
       streamToClient: wantsStream,
       binaryOutput,
+      proxyOptions,
       onCredentialsRefreshed: async (newCreds) => {
         await updateProviderCredentials(credentials.connectionId, {
           accessToken: newCreds.accessToken,

@@ -31,6 +31,20 @@ import { launchChromiumWithFallback } from "../executors/browserExecutableCheck.
 export const DEFAULT_USER_AGENT =
   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36";
 
+/**
+ * Connection proxy options (the shape chatCore hands executors) → Playwright's
+ * per-context `proxy` object. Returns null when no proxy is configured.
+ */
+export function playwrightProxyFromOptions(proxyOptions) {
+  const server = String(proxyOptions?.connectionProxyUrl || proxyOptions?.url || "").trim();
+  // An explicit `false` wins over a leftover URL (the dashboard keeps the field
+  // when a proxy is toggled off).
+  const flag = proxyOptions?.connectionProxyEnabled ?? proxyOptions?.enabled;
+  if (flag === false || !server) return null;
+  const bypass = String(proxyOptions?.connectionNoProxy || "").trim();
+  return { server, ...(bypass ? { bypass } : {}) };
+}
+
 export function isPoolEnabled() {
   const flag = process.env.NINEROUTER_BROWSER_POOL;
   if (flag === undefined) return true;
@@ -360,11 +374,16 @@ export async function acquireBrowserContext(key, options) {
   const createPromise = (async () => {
     const browser = await launchBrowser(options);
     const isStealth = headless && (state.engine === "obscura" || state.cloakLaunch !== null);
+    // A web-cookie flow whose sign-in/API host is unreachable directly needs
+    // this context routed through the connection proxy — per context, so other
+    // providers sharing the same browser stay direct.
+    const proxy = options.proxy || playwrightProxyFromOptions(options.proxyOptions);
     const context = await browser.newContext({
       userAgent: options.userAgent || DEFAULT_USER_AGENT,
       locale: options.locale || "en-US",
       timezoneId: options.timezone || "America/New_York",
       viewport: { width: 1280, height: 800 },
+      ...(proxy ? { proxy } : {}),
       ...(options.storageState ? { storageState: options.storageState } : {}),
     });
 

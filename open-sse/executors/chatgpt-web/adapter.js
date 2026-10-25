@@ -9,7 +9,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
-import { acquireBrowserContext, openPage } from "../../services/browserPool.js";
+import { acquireBrowserContext, openPage, playwrightProxyFromOptions } from "../../services/browserPool.js";
 import {
   extractChatGptWebAttachmentSources,
   isChatGptWebAttachmentContentPart,
@@ -402,10 +402,15 @@ export function resolveChatGptWebChromeExecutable(explicit) {
 }
 
 export async function createDefaultSession(input) {
+  // The proxy is part of the identity: the pool keys contexts by this digest,
+  // so a proxied and a direct session must never share one.
+  const proxy = playwrightProxyFromOptions(input.proxyOptions);
   const digest = createHash("sha256")
     .update(input.connectionId)
     .update("\0")
     .update(JSON.stringify(input.storageState))
+    .update("\0")
+    .update(proxy ? proxy.server : "")
     .digest("hex");
   const pooled = await acquireBrowserContext(`chatgpt-web-cleanroom:${digest}`, {
     cookieDomain: "chatgpt.com",
@@ -418,6 +423,7 @@ export async function createDefaultSession(input) {
     // window buys nothing and needs an X server on Linux hosts.
     headless: true,
     executablePath: input.chromeExecutablePath,
+    ...(proxy ? { proxy } : {}),
   });
   const page =
     pooled.warmupPage && !pooled.warmupPage.isClosed() ? pooled.warmupPage : await openPage(pooled);
@@ -494,6 +500,7 @@ export async function executeChatGptWebCleanRoom(input) {
     chromeExecutablePath: resolveChatGptWebChromeExecutable(
       optionalString(providerData?.chromeExecutablePath)
     ),
+    proxyOptions: input.proxyOptions || null,
   });
   const result = await runChatGptWebBrowserTurn(session, {
     prompt: prepared.prompt,
