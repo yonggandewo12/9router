@@ -13,6 +13,8 @@
 // than a silent mis-hash.
 
 import { proxyAwareFetch } from "../../utils/proxyFetch.js";
+import { connectTimeoutGuard } from "../../utils/fetchTimeout.js";
+import { FETCH_CONNECT_TIMEOUT_MS } from "../../config/runtimeConfig.js";
 
 const PREPARE_PREFIX = "gAAAAAC";
 const PROOF_PREFIX = "gAAAAAB";
@@ -117,13 +119,23 @@ export class TurnstileRequiredError extends Error {
   }
 }
 
-async function postJson(url, { headers, body, signal, proxyOptions = null }) {
-  const res = await proxyAwareFetch(url, {
-    method: "POST",
-    headers: { ...headers, "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify(body ?? {}),
-    signal,
-  }, proxyOptions);
+async function postJson(url, { headers, body, signal, proxyOptions = null, timeoutMs = FETCH_CONNECT_TIMEOUT_MS }) {
+  // Two of these run before a single token is asked for; a silent chatgpt.com
+  // must fail the turn instead of holding the account slot open.
+  const guard = connectTimeoutGuard(signal, timeoutMs);
+  let res;
+  try {
+    res = await proxyAwareFetch(url, {
+      method: "POST",
+      headers: { ...headers, "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify(body ?? {}),
+      signal: guard.signal,
+    }, proxyOptions);
+  } catch (error) {
+    throw guard.settleError(error);
+  } finally {
+    guard.clear();
+  }
   const text = await res.text().catch(() => "");
   if (!res.ok) {
     throw Object.assign(new Error(`ChatGPT ${new URL(url).pathname} failed (HTTP ${res.status}) ${text.slice(0, 200)}`), {

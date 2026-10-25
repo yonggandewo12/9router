@@ -1,9 +1,11 @@
 // ChatGptWebExecutor — chatgpt.com session provider (clean-room).
 //
-// Routes requests through ChatGPT's first-party web client from a logged-in
-// browser page: the page's own module solves Sentinel/Turnstile/PoW and the
-// turn runs over the direct /f/conversation SSE path. Tools are not supported
-// (the adapter rejects them upstream, matching the current upstream protocol).
+// Chat and images run over ChatGPT's own web HTTP API: sentinel.js mints the
+// challenge headers in Node, chatHttp.js drives /f/conversation and streams the
+// `delta_encoding: v1` document as it arrives, imageGenHttp.js rides the same
+// pipeline for picture_v2. Tools use the shared `<tool>` prompt contract
+// (translator/webTools.js); a headed browser page is only the fallback for the
+// days Turnstile actually enforces its VM challenge.
 
 import { BaseExecutor } from "./base.js";
 import { randomUUID } from "node:crypto";
@@ -15,6 +17,8 @@ import { buildToolModeResponse } from "./chatgptWebTools.js";
 import { isMissingBrowserExecutable } from "./browserExecutableCheck.js";
 import { sseChunk } from "../utils/sse.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
+import { connectTimeoutGuard } from "../utils/fetchTimeout.js";
+import { FETCH_CONNECT_TIMEOUT_MS } from "../config/runtimeConfig.js";
 import { SSE_DONE, SSE_HEADERS_NO_BUFFER } from "../utils/sseConstants.js";
 
 export { isMissingBrowserExecutable } from "./browserExecutableCheck.js";
@@ -24,12 +28,23 @@ const DEFAULT_USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36";
 
 /** Resolve the session access token over HTTP, seeding the stored cookie jar. */
-async function fetchAccessToken({ storageState, userAgent, signal, proxyOptions = null }) {
+async function fetchAccessToken({ storageState, userAgent, signal, proxyOptions = null, timeoutMs = FETCH_CONNECT_TIMEOUT_MS }) {
   const cookie = cookieHeader(storageState);
-  const res = await proxyAwareFetch(`${CHATGPT_WEB_URL}/api/auth/session`, {
-    headers: { "User-Agent": userAgent, Accept: "application/json", ...(cookie ? { Cookie: cookie } : {}) },
-    signal,
-  }, proxyOptions);
+  // A reachable-but-silent chatgpt.com (a dead proxy tunnel does this) would
+  // otherwise hold the turn, the account slot and the client request open until
+  // the OS gives up.
+  const guard = connectTimeoutGuard(signal, timeoutMs);
+  let res;
+  try {
+    res = await proxyAwareFetch(`${CHATGPT_WEB_URL}/api/auth/session`, {
+      headers: { "User-Agent": userAgent, Accept: "application/json", ...(cookie ? { Cookie: cookie } : {}) },
+      signal: guard.signal,
+    }, proxyOptions);
+  } catch (error) {
+    throw guard.settleError(error);
+  } finally {
+    guard.clear();
+  }
   if (!res.ok) {
     throw Object.assign(new Error(`ChatGPT session unavailable (HTTP ${res.status})`), {
       status: res.status === 403 ? 401 : res.status || 502,
@@ -108,8 +123,15 @@ export class ChatGptWebExecutor extends BaseExecutor {
           transformedBody: input.body,
         };
       }
+      // Our own errors already carry the upstream status (401 expired cookie,
+      // 429 quota). Re-guessing it from the message text turned those into 502,
+      // which cost the shared account-fallback loop the signal it acts on — and
+      // undid the streaming lane's promise that a rejected turn keeps its status.
+      const upstreamStatus = Number.isInteger(error?.status) && error.status >= 400 && error.status <= 599
+        ? error.status
+        : statusForAdapterError(message);
       return {
-        response: errorResponse(statusForAdapterError(message), message),
+        response: errorResponse(upstreamStatus, message),
         url: CHATGPT_WEB_URL,
         headers: {},
         transformedBody: input.body,

@@ -159,7 +159,10 @@ async function readSseDeltas(response, { limit, deadlineMs, signal, onText }) {
   let emitted = "";
 
   const flushFrames = () => {
-    const frames = buffer.split("\n\n");
+    // CRLF-tolerant: parseChatGptWebEncodedItem normalizes line endings, so a
+    // LF-only splitter would silently stream nothing (every frame stays in the
+    // buffer) and quietly degrade the lane back to one lump at the end.
+    const frames = buffer.split(/\r?\n\r?\n/);
     buffer = frames.pop() || "";
     for (const frame of frames) {
       if (!frame.trim()) continue;

@@ -401,17 +401,30 @@ export function resolveChatGptWebChromeExecutable(explicit) {
   return candidates.find((candidate) => Boolean(candidate?.trim() && existsSync(candidate.trim())));
 }
 
-export async function createDefaultSession(input) {
-  // The proxy is part of the identity: the pool keys contexts by this digest,
-  // so a proxied and a direct session must never share one.
-  const proxy = playwrightProxyFromOptions(input.proxyOptions);
-  const digest = createHash("sha256")
-    .update(input.connectionId)
+/**
+ * Pool key for one clean-room session. The proxy is part of the identity: the
+ * browser pool caches contexts by this digest, so a proxied session and a
+ * direct one — or two with different bypass lists — must never share a context.
+ */
+export function cleanRoomContextKey({ connectionId, storageState, proxy }) {
+  return createHash("sha256")
+    .update(connectionId)
     .update("\0")
-    .update(JSON.stringify(input.storageState))
+    .update(JSON.stringify(storageState))
     .update("\0")
     .update(proxy ? proxy.server : "")
+    .update("\0")
+    .update(proxy?.bypass || "")
     .digest("hex");
+}
+
+export async function createDefaultSession(input) {
+  const proxy = playwrightProxyFromOptions(input.proxyOptions);
+  const digest = cleanRoomContextKey({
+    connectionId: input.connectionId,
+    storageState: input.storageState,
+    proxy,
+  });
   const pooled = await acquireBrowserContext(`chatgpt-web-cleanroom:${digest}`, {
     cookieDomain: "chatgpt.com",
     storageState: input.storageState,

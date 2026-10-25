@@ -22,14 +22,14 @@ const { runChatGptWebHttpTurn, assistantTextFromDocument } = await import(
 const CONVERSATION_ID = "123e4567-e89b-12d3-a456-426614174000";
 const enc = new TextEncoder();
 
-function sseFrame(event, payload) {
-  return `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`;
+function sseFrame(event, payload, sep = "\n") {
+  return `event: ${event}${sep}data: ${JSON.stringify(payload)}${sep}${sep}`;
 }
 
 /** Minimal v1 delta stream: one assistant message whose text grows. */
-function deltaStreamBody(initialText) {
+function deltaStreamBody(initialText, sep = "\n") {
   const frames = [
-    sseFrame("delta_encoding", "v1"),
+    sseFrame("delta_encoding", "v1", sep),
     sseFrame("delta", {
       p: "",
       o: "add",
@@ -46,7 +46,7 @@ function deltaStreamBody(initialText) {
           },
         },
       },
-    }),
+    }, sep),
   ];
   return new ReadableStream({
     start(controller) {
@@ -56,14 +56,14 @@ function deltaStreamBody(initialText) {
   });
 }
 
-function stubFetch({ documentText, complete = true, sseText = "" }) {
+function stubFetch({ documentText, complete = true, sseText = "", sseSep = "\n" }) {
   net.handler = async (url) => {
     const target = String(url);
     if (target.includes("/f/conversation/prepare")) {
       return Response.json({ conduit_token: "tok" });
     }
     if (target.includes("/f/conversation")) {
-      return new Response(deltaStreamBody(sseText), {
+      return new Response(deltaStreamBody(sseText, sseSep), {
         status: 200,
         headers: { "content-type": "text/event-stream" },
       });
@@ -134,6 +134,32 @@ describe("runChatGptWebHttpTurn streaming", () => {
     stubFetch({ sseText: "partial", documentText: "complete answer" });
     const turn = await runChatGptWebHttpTurn(baseArgs);
     expect(turn.text).toBe("complete answer");
+  });
+
+  it("streams when the wire separates frames with CRLF", async () => {
+    // parseChatGptWebEncodedItem already tolerates CRLF; a frame splitter that
+    // only knows LF would buffer every frame and hand the client one lump.
+    stubFetch({ sseText: "hel", documentText: "hello!", sseSep: "\r\n" });
+    const deltas = [];
+    const turn = await runChatGptWebHttpTurn({ ...baseArgs, onDelta: (d) => deltas.push(d) });
+
+    expect(turn.text).toBe("hello!");
+    expect(deltas.join("")).toBe("hello!");
+    expect(deltas.length).toBeGreaterThan(1);
+  });
+
+  it("keeps the streamed prefix and reports a rewritten final document", async () => {
+    // The answer already on screen is never rewritten mid-turn; the divergence
+    // is logged so the mismatch is visible instead of silently dropped.
+    stubFetch({ sseText: "hel", documentText: "goodbye!" });
+    const warnings = [];
+    const log = { warn: (tag, message) => warnings.push(`${tag} ${message}`) };
+    const deltas = [];
+    const turn = await runChatGptWebHttpTurn({ ...baseArgs, onDelta: (d) => deltas.push(d), log });
+
+    expect(turn.text).toBe("goodbye!");
+    expect(deltas.join("")).toBe("hel");
+    expect(warnings.join(" ")).toMatch(/diverged/);
   });
 
   it("notifies readiness only after the upstream accepted the turn", async () => {

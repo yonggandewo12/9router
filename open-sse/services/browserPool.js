@@ -40,7 +40,20 @@ export function playwrightProxyFromOptions(proxyOptions) {
   // An explicit `false` wins over a leftover URL (the dashboard keeps the field
   // when a proxy is toggled off).
   const flag = proxyOptions?.connectionProxyEnabled ?? proxyOptions?.enabled;
-  if (flag === false || !server) return null;
+  if (flag === false) return null;
+  if (!server) {
+    // A relay pool (Vercel/Cloudflare/Deno/Netlify) proxies by rewriting the
+    // request URL, which a browser context cannot do. Under strictProxy the
+    // direct fallback is forbidden, so say so instead of silently leaking the
+    // session over the host IP (#4333).
+    if (proxyOptions?.strictProxy === true && String(proxyOptions?.vercelRelayUrl || "").trim()) {
+      throw new Error(
+        "This connection proxies through a relay pool, which the browser page cannot use — " +
+          "set a plain http/socks5 proxy URL on the connection for it."
+      );
+    }
+    return null;
+  }
   const bypass = String(proxyOptions?.connectionNoProxy || "").trim();
   return { server, ...(bypass ? { bypass } : {}) };
 }
