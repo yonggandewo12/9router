@@ -1,3 +1,18 @@
+# v0.6.17 (2026-10-25)
+
+Makes the published package's DeepSeek web lane work again.
+
+## Fixes
+
+- **The 0.6.16 package was missing the DeepSeek PoW hash module.** `deepseek-pow-worker.mjs` runs in a worker thread and imports `deepseek-pow-hash.js` as a sibling from its own directory, but only the worker made it into the package, so every deepseek-web request failed with `Cannot find module '.../app/open-sse/lib/deepseek-pow-hash.js'`. Both assets are now copied explicitly during the CLI build, and the build **fails** when either is missing from the source tree, so the publish pipeline cannot produce a package like 0.6.16 again.
+- Verified by rebuilding the real CLI package (both files present, worker spawns and solves from the packaged layout), booting that package on a spare port, and sending a live `deepseek-web/deepseek-v4-pro` request: **200, "ok", 1.8 s**.
+
+## Notes
+
+- If you installed 0.6.16, upgrade — its DeepSeek web provider cannot work. Everyone else is unaffected by this release.
+- A packaging audit of every runtime file loaded by path (MITM server bundle, updater, tray binaries, lazy runtime deps, external packages) found no other missing asset; those absences are by design.
+- **Test suite**: 435 files / 4539 passing / 0 failing, including new coverage for the worker-asset copy step.
+
 # v0.6.16 (2026-10-24)
 
 Browser login works again in the published package, plus a deep pass over the DeepSeek web chain.
