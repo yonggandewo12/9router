@@ -27,6 +27,9 @@ vi.mock("../../open-sse/utils/stream.js", () => ({
 vi.mock("@/lib/usageDb.js", () => ({
   trackPendingRequest: vi.fn(),
   saveRequestDetail: vi.fn(async () => { }),
+  // Every turn now lands in usageHistory (a missing usage block is estimated
+  // instead of dropped), so this mock has to carry the whole write surface.
+  saveRequestUsage: vi.fn(async () => { }),
 }));
 
 const { handleChatCore } = await import("../../open-sse/handlers/chatCore.js");

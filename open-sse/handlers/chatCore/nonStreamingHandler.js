@@ -2,7 +2,7 @@ import { FORMATS } from "../../translator/formats.js";
 import { needsTranslation } from "../../translator/index.js";
 import { openAICompletionToClaudeMessage } from "../../translator/concerns/claudeMessage.js";
 import { ollamaBodyToOpenAI } from "../../translator/response/ollama-to-openai.js";
-import { addBufferToUsage, filterUsageForFormat } from "../../utils/usageTracking.js";
+import { addBufferToUsage, estimateUsage, filterUsageForFormat, hasValidUsage } from "../../utils/usageTracking.js";
 import { createErrorResult } from "../../utils/error.js";
 import { upstreamResponseHeaders } from "../../utils/upstreamHeaders.js";
 import { HTTP_STATUS } from "../../config/runtimeConfig.js";
@@ -240,6 +240,22 @@ export function translateNonStreamingResponse(responseBody, targetFormat, source
 }
 
 /**
+ * Character length of what the model actually produced, for output-token
+ * estimation when the upstream reports no usage. Reasoning and tool calls are
+ * billed too — leaving them out would price a thinking turn as an empty one.
+ */
+function assistantTextLength(responseBody) {
+  const message = responseBody?.choices?.[0]?.message;
+  const parts = [];
+  if (typeof message?.content === "string") parts.push(message.content);
+  if (typeof message?.reasoning_content === "string") parts.push(message.reasoning_content);
+  if (Array.isArray(message?.tool_calls) && message.tool_calls.length > 0) {
+    parts.push(JSON.stringify(message.tool_calls));
+  }
+  return parts.join("").length;
+}
+
+/**
  * Handle non-streaming response from provider.
  */
 export async function handleNonStreamingResponse({ providerResponse, provider, model, sourceFormat, targetFormat, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, customToolNames, trackDone, pxpipe, perf, reqTag, log }) {
@@ -297,7 +313,14 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
   // Decloak tool_use names once on raw Claude body, before any translation (INPUT side)
   responseBody = decloakToolNames(responseBody, toolNameMap);
 
-  const usage = extractUsageFromResponse(responseBody);
+  // A provider that answers without a usage block (every web-cookie lane) must
+  // not vanish from cost stats: saveUsageStats drops an all-zero success row, so
+  // estimate here exactly like the streaming path does — same `body`, same rules.
+  // Only the accounting changes; the client keeps the envelope upstream sent.
+  const reportedUsage = extractUsageFromResponse(responseBody);
+  const usage = hasValidUsage(reportedUsage)
+    ? reportedUsage
+    : estimateUsage(body, assistantTextLength(responseBody), FORMATS.OPENAI);
   saveUsageStats({ provider, model, tokens: usage, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, silent: true });
   if (log?.line) log.line(reqTag, "📊", formatDoneLine({ usage, latency: { total: Date.now() - requestStartTime, ...(perf || {}) } }));
 
