@@ -13,6 +13,7 @@
 
 import { randomUUID } from "node:crypto";
 import { fetchSentinelHeaders } from "./sentinel.js";
+import { deleteChatGptWebConversation } from "./conversation.js";
 import { ChatGptWebDeltaV1Decoder } from "./deltaV1.js";
 import { prepareToolMessages } from "../../translator/webTools.js";
 import { proxyAwareFetch } from "../../utils/proxyFetch.js";
@@ -363,53 +364,68 @@ export async function runChatGptWebHttpTurn({ baseUrl, accessToken, cookie, user
 
   // The stream ends long before the turn does — wait for is_complete or the
   // tool batch gets parsed half-finished.
-  const started = Date.now();
-  while (Date.now() - started <= POLL_TIMEOUT_MS) {
-    if (signal?.aborted) throw new Error("Request aborted");
-    const res = await fetchWithTimeout(
-      `${baseUrl}/backend-api/conversation/${conversationId}`,
-      { headers: { Authorization: `Bearer ${accessToken}`, "User-Agent": userAgent, Accept: "application/json", ...(cookie ? { Cookie: cookie } : {}) } },
-      30000,
-      signal,
-      proxyOptions
-    ).catch(() => null);
-    if (res?.ok) {
-      const document = await res.json().catch(() => null);
-      const finished = document ? finishedAssistantText(document) : null;
-      if (finished) {
-        // A refused turn that carries text is delivered as content (that is what
-        // the web UI shows). A refusal with NO text must not become an empty
-        // successful answer — the old guard compared errorText, which can only
-        // exist when text exists too, so it never fired.
-        if (!finished.text.trim() && finished.isError) {
-          throw Object.assign(
-            new Error(`ChatGPT refused the turn${finished.errorText ? `: ${finished.errorText.slice(0, 200)}` : ""}`),
-            { status: 400 }
-          );
-        }
-        // The conversation document is authoritative. Emit only the tail the
-        // delta stream missed; a divergence means the stream did not reflect the
-        // final edit and is reported rather than rewritten mid-answer.
-        if (wantsDeltas) {
-          if (finished.text.startsWith(streamedText)) {
-            const rest = finished.text.slice(streamedText.length);
-            if (rest) {
-              streamedText += rest;
-              try { onDelta(rest); } catch { /* client gone */ }
-            }
-          } else if (finished.text !== streamedText) {
-            log?.warn?.("CGPT-WEB", "streamed text diverged from the final conversation document");
+  try {
+    const started = Date.now();
+    while (Date.now() - started <= POLL_TIMEOUT_MS) {
+      if (signal?.aborted) throw new Error("Request aborted");
+      const res = await fetchWithTimeout(
+        `${baseUrl}/backend-api/conversation/${conversationId}`,
+        { headers: { Authorization: `Bearer ${accessToken}`, "User-Agent": userAgent, Accept: "application/json", ...(cookie ? { Cookie: cookie } : {}) } },
+        30000,
+        signal,
+        proxyOptions
+      ).catch(() => null);
+      if (res?.ok) {
+        const document = await res.json().catch(() => null);
+        const finished = document ? finishedAssistantText(document) : null;
+        if (finished) {
+          // A refused turn that carries text is delivered as content (that is what
+          // the web UI shows). A refusal with NO text must not become an empty
+          // successful answer — the old guard compared errorText, which can only
+          // exist when text exists too, so it never fired.
+          if (!finished.text.trim() && finished.isError) {
+            throw Object.assign(
+              new Error(`ChatGPT refused the turn${finished.errorText ? `: ${finished.errorText.slice(0, 200)}` : ""}`),
+              { status: 400 }
+            );
           }
+          // The conversation document is authoritative. Emit only the tail the
+          // delta stream missed; a divergence means the stream did not reflect the
+          // final edit and is reported rather than rewritten mid-answer.
+          if (wantsDeltas) {
+            if (finished.text.startsWith(streamedText)) {
+              const rest = finished.text.slice(streamedText.length);
+              if (rest) {
+                streamedText += rest;
+                try { onDelta(rest); } catch { /* client gone */ }
+              }
+            } else if (finished.text !== streamedText) {
+              log?.warn?.("CGPT-WEB", "streamed text diverged from the final conversation document");
+            }
+          }
+          // Return the raw text: buildToolModeResponse() strips and parses the
+          // `<tool>` blocks downstream, so parsing twice here would lose them.
+          if (log && !prepared.hasTools) log.debug?.("CGPT-WEB", `chat turn complete (${finished.text.length} chars)`);
+          return { text: finished.text, hasTools: prepared.hasTools, requestedTools: prepared.requestedTools };
         }
-        // Return the raw text: buildToolModeResponse() strips and parses the
-        // `<tool>` blocks downstream, so parsing twice here would lose them.
-        if (log && !prepared.hasTools) log.debug?.("CGPT-WEB", `chat turn complete (${finished.text.length} chars)`);
-        return { text: finished.text, hasTools: prepared.hasTools, requestedTools: prepared.requestedTools };
+      } else if (log) {
+        log.debug?.("CGPT-WEB", `conversation poll status ${res?.status ?? "network"}, retrying`);
       }
-    } else if (log) {
-      log.debug?.("CGPT-WEB", `conversation poll status ${res?.status ?? "network"}, retrying`);
+      await sleep(POLL_INTERVAL_MS);
     }
-    await sleep(POLL_INTERVAL_MS);
+    throw Object.assign(new Error("ChatGPT chat turn timed out"), { status: 504 });
+  } finally {
+    // Every exit — finished, refused, timed out, client gone — leaves a thread
+    // behind in the account's visible history otherwise. Fire-and-forget so the
+    // answer's tail stays fast.
+    void deleteChatGptWebConversation({
+      baseUrl,
+      accessToken,
+      cookie,
+      userAgent,
+      conversationId,
+      proxyOptions,
+      log,
+    });
   }
-  throw Object.assign(new Error("ChatGPT chat turn timed out"), { status: 504 });
 }

@@ -56,9 +56,14 @@ function deltaStreamBody(initialText, sep = "\n") {
   });
 }
 
-function stubFetch({ documentText, complete = true, sseText = "", sseSep = "\n" }) {
-  net.handler = async (url) => {
+function stubFetch({ documentText, complete = true, sseText = "", sseSep = "\n", deletes = [], deleteStatus = 200 }) {
+  net.handler = async (url, options) => {
     const target = String(url);
+    // Cleanup runs after the answer is in hand — keep it out of the poll branch.
+    if (target.endsWith("/delete")) {
+      deletes.push({ target, method: options?.method, auth: options?.headers?.Authorization, cookie: options?.headers?.Cookie });
+      return new Response("{}", { status: deleteStatus });
+    }
     if (target.includes("/f/conversation/prepare")) {
       return Response.json({ conduit_token: "tok" });
     }
@@ -128,6 +133,27 @@ describe("runChatGptWebHttpTurn streaming", () => {
     // "hel" arrived on the delta stream; "lo!" came from the authoritative poll.
     expect(deltas.join("")).toBe("hello!");
     expect(deltas.length).toBeGreaterThan(1);
+  });
+
+  it("deletes the conversation it created so the account history stays clean", async () => {
+    const deletes = [];
+    stubFetch({ sseText: "hi", documentText: "hi", deletes });
+    const turn = await runChatGptWebHttpTurn(baseArgs);
+
+    expect(turn.text).toBe("hi");
+    expect(deletes).toHaveLength(1);
+    expect(deletes[0].target).toContain(`/backend-api/conversation/${CONVERSATION_ID}/delete`);
+    expect(deletes[0].method).toBe("POST");
+    expect(deletes[0].auth).toBe("Bearer access");
+    expect(deletes[0].cookie).toBe("session=1");
+  });
+
+  it("does not fail the turn when the cleanup call does", async () => {
+    const deletes = [];
+    stubFetch({ sseText: "hi", documentText: "hello", deletes, deleteStatus: 404 });
+    const turn = await runChatGptWebHttpTurn(baseArgs);
+    expect(turn.text).toBe("hello");
+    expect(deletes).toHaveLength(1);
   });
 
   it("buffers the whole turn when no consumer asked for deltas", async () => {

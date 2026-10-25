@@ -6,6 +6,7 @@
 
 import { randomUUID } from "node:crypto";
 import { SENTINEL_HEADERS, fetchSentinelHeaders } from "./sentinel.js";
+import { deleteChatGptWebConversation } from "./conversation.js";
 
 const MAX_SSE_BYTES = 16 * 1024 * 1024;
 const MAX_CONVERSATION_BYTES = 32 * 1024 * 1024;
@@ -318,7 +319,21 @@ export async function generateChatGptWebImageHttp({
     ? initial
     : await pollConversationImages(ctx, initial.conversationId, initial, { signal, log });
 
-  return downloadGeneratedImage(ctx, initial.conversationId, ids, signal);
+  try {
+    return await downloadGeneratedImage(ctx, initial.conversationId, ids, signal);
+  } finally {
+    // Only after the bytes are in memory: the conversation owns the attachments
+    // these downloads resolve through. Fire-and-forget, like the chat lane.
+    void deleteChatGptWebConversation({
+      baseUrl,
+      accessToken,
+      cookie,
+      userAgent,
+      conversationId: initial.conversationId,
+      proxyOptions,
+      log,
+    });
+  }
 }
 
 export { SENTINEL_HEADERS };
