@@ -13,6 +13,8 @@ import { generateChatGptWebImageHttp, cookieHeader } from "./chatgpt-web/imageGe
 import { runChatGptWebHttpTurn } from "./chatgpt-web/chatHttp.js";
 import { buildToolModeResponse } from "./chatgptWebTools.js";
 import { isMissingBrowserExecutable } from "./browserExecutableCheck.js";
+import { sseChunk } from "../utils/sse.js";
+import { SSE_DONE, SSE_HEADERS_NO_BUFFER } from "../utils/sseConstants.js";
 
 export { isMissingBrowserExecutable } from "./browserExecutableCheck.js";
 
@@ -132,6 +134,17 @@ export class ChatGptWebExecutor extends BaseExecutor {
         ? providerData.customUserAgent.trim()
         : DEFAULT_USER_AGENT;
 
+    // Streaming chat without tools goes out incrementally. The access token is
+    // fetched first, and the response is not returned until the upstream has
+    // accepted the turn: session/prepare failures must keep their HTTP status so
+    // the shared account-fallback loop can react (expired cookie, quota), which a
+    // premature 200 would hide behind a broken stream.
+    const hasRequestedTools = Array.isArray(body?.tools) && body.tools.length > 0;
+    if (input.stream === true && !hasRequestedTools) {
+      const accessToken = await fetchAccessToken({ storageState, userAgent, signal: input.signal });
+      return this.#streamHttpTurn({ input, accessToken, storageState, userAgent, model });
+    }
+
     let turn;
     try {
       const accessToken = await fetchAccessToken({ storageState, userAgent, signal: input.signal });
@@ -166,6 +179,115 @@ export class ChatGptWebExecutor extends BaseExecutor {
         created: Math.floor(Date.now() / 1000),
         model,
       }),
+      url: CHATGPT_WEB_URL,
+      headers: {},
+      transformedBody: body,
+    };
+  }
+
+  /**
+   * Streaming plain-HTTP chat turn. Resolves once the upstream accepted the
+   * turn, so the caller can return a 200 that is already known to be valid; the
+   * body then carries assistant text as it arrives. Turnstile still needs the
+   * browser, and is handled before anything is emitted.
+   */
+  async #streamHttpTurn({ input, accessToken, storageState, userAgent, model }) {
+    const { body, signal, log } = input;
+    const encoder = new TextEncoder();
+    const abort = new AbortController();
+    const turnSignal = signal ? AbortSignal.any([signal, abort.signal]) : abort.signal;
+    const id = `chatcmpl-${randomUUID()}`;
+    const created = Math.floor(Date.now() / 1000);
+    const streamModel = typeof model === "string" && model.trim() ? model.trim() : "chatgpt-web";
+    let roleSent = false;
+    let controller = null;
+    let closed = false;
+
+    const sse = new ReadableStream(
+      {
+        start: (c) => { controller = c; },
+        cancel() { abort.abort(); },
+      },
+      { highWaterMark: 16384 }
+    );
+
+    const emit = (delta, finish = null) => {
+      if (closed) return;
+      try {
+        controller.enqueue(encoder.encode(sseChunk({
+          id,
+          object: "chat.completion.chunk",
+          created,
+          model: streamModel,
+          system_fingerprint: null,
+          choices: [{ index: 0, delta, finish_reason: finish, logprobs: null }],
+        })));
+      } catch {
+        closed = true;
+      }
+    };
+
+    let resolveReady;
+    let rejectReady;
+    const ready = new Promise((resolve, reject) => {
+      resolveReady = resolve;
+      rejectReady = reject;
+    });
+
+    const turnPromise = runChatGptWebHttpTurn({
+      baseUrl: CHATGPT_WEB_URL,
+      accessToken,
+      cookie: cookieHeader(storageState),
+      userAgent,
+      body,
+      signal: turnSignal,
+      log,
+      onReady: () => resolveReady(),
+      onDelta: (text) => {
+        if (!roleSent) {
+          roleSent = true;
+          emit({ role: "assistant", content: "" });
+        }
+        emit({ content: text });
+      },
+    });
+    turnPromise.catch((error) => rejectReady(error));
+
+    try {
+      await ready;
+    } catch (error) {
+      const turnstile = error?.code === "TURNSTILE_REQUIRED" || /Turnstile/i.test(error?.message || "");
+      if (turnstile) {
+        const response = await executeChatGptWebCleanRoom(input);
+        return { response, url: CHATGPT_WEB_URL, headers: {}, transformedBody: body };
+      }
+      throw error;
+    }
+
+    turnPromise
+      .then(() => {
+        if (!roleSent) {
+          roleSent = true;
+          emit({ role: "assistant", content: "" });
+        }
+        emit({}, "stop");
+        if (!closed) {
+          try {
+            controller.enqueue(encoder.encode(SSE_DONE));
+            controller.close();
+          } catch {
+            closed = true;
+          }
+        }
+      })
+      .catch((error) => {
+        if (closed) return;
+        try { controller.error(error); } catch { /* cancelled */ }
+        closed = true;
+      });
+
+    return {
+      response: new Response(sse, { status: 200, headers: { ...SSE_HEADERS_NO_BUFFER } }),
       url: CHATGPT_WEB_URL,
       headers: {},
       transformedBody: body,

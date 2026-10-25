@@ -15,9 +15,11 @@ export default {
   },
   category: "webCookie",
   authType: "cookie",
-  // LLM + tools work over plain HTTP, but the provider is parked on image
-  // until the chat path has more mileage. Flip "llm" back in when it does.
-  serviceKinds: ["image"],
+  // Chat runs over the web client's own HTTP API: the Sentinel headers are
+  // solved in Node, the response delta stream is forwarded as it arrives, and
+  // the browser page stays as the Turnstile fallback. Image generation rides the
+  // same connection.
+  serviceKinds: ["llm", "image"],
   authHint: "Paste your chatgpt.com cookie header containing __Secure-next-auth.session-token (or a full Playwright storage-state JSON)",
   transport: {
     baseUrl: "https://chatgpt.com",

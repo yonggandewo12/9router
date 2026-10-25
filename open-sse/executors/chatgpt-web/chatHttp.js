@@ -13,6 +13,7 @@
 
 import { randomUUID } from "node:crypto";
 import { fetchSentinelHeaders } from "./sentinel.js";
+import { ChatGptWebDeltaV1Decoder } from "./deltaV1.js";
 import { prepareToolMessages } from "../../translator/webTools.js";
 const SSE_DEADLINE_MS = 120000;
 const POLL_INTERVAL_MS = 1500;
@@ -20,6 +21,26 @@ const POLL_TIMEOUT_MS = 180000;
 const MAX_SSE_BYTES = 16 * 1024 * 1024;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Assistant text currently present in a decoded conversation document. Unlike
+ * finishedAssistantText() this does not wait for is_complete, so it can drive
+ * incremental streaming; the newest assistant node wins.
+ */
+export function assistantTextFromDocument(document) {
+  const mapping = document?.mapping || {};
+  let best = null;
+  for (const node of Object.values(mapping)) {
+    const message = node?.message;
+    if (!message) continue;
+    if (String(message.author?.role || "").toLowerCase() !== "assistant") continue;
+    if (message.content?.content_type !== "text") continue;
+    const text = (message.content.parts || []).filter((part) => typeof part === "string").join("");
+    const at = Number(message.create_time) || 0;
+    if (!best || at >= best.at) best = { text, at };
+  }
+  return best?.text ?? "";
+}
 
 /** ChatGPT ignores the shared contract unless told, in the last turn, to emit it. */
 const TOOL_ORDER =
@@ -121,6 +142,60 @@ async function readSse(response, limit, deadlineMs) {
 }
 
 /**
+ * Read the SSE stream incrementally, decoding the `delta_encoding: v1` document
+ * as it arrives and reporting newly appended assistant text. Returns the raw
+ * bytes (for the conversation id) plus the text already reported, so the caller
+ * can emit only what the stream missed after the authoritative poll.
+ */
+async function readSseDeltas(response, { limit, deadlineMs, signal, onText }) {
+  const reader = response.body?.getReader();
+  if (!reader) return { raw: "", text: "" };
+  const decoder = new TextDecoder();
+  const deltaDecoder = new ChatGptWebDeltaV1Decoder();
+  const deadline = Date.now() + deadlineMs;
+  let raw = "";
+  let buffer = "";
+  let emitted = "";
+
+  const flushFrames = () => {
+    const frames = buffer.split("\n\n");
+    buffer = frames.pop() || "";
+    for (const frame of frames) {
+      if (!frame.trim()) continue;
+      try {
+        deltaDecoder.ingest(`${frame}\n\n`);
+      } catch {
+        // A frame shape the decoder does not understand must not kill the turn;
+        // the poll below still yields the authoritative text.
+      }
+    }
+    const text = assistantTextFromDocument(deltaDecoder.snapshot());
+    if (!text || text === emitted) return;
+    if (text.startsWith(emitted)) onText(text.slice(emitted.length));
+    emitted = text;
+  };
+
+  try {
+    while (Date.now() < deadline) {
+      if (signal?.aborted) throw new Error("Request aborted");
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      const chunk = decoder.decode(value, { stream: true });
+      raw += chunk;
+      buffer += chunk;
+      if (raw.length > limit) break;
+      flushFrames();
+    }
+  } catch {
+    // Deadline abort lands here; what already arrived is what we wanted.
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+  return { raw, text: emitted };
+}
+
+/**
  * Collect the finished assistant text from a conversation document.
  * Returns null while the turn has not finished yet.
  */
@@ -129,6 +204,7 @@ function finishedAssistantText(document) {
   let text = "";
   let complete = false;
   let errorText = "";
+  let isError = false;
   for (const node of Object.values(mapping)) {
     const message = node?.message;
     if (!message) continue;
@@ -139,6 +215,7 @@ function finishedAssistantText(document) {
         text += (message.content.parts || []).filter((part) => typeof part === "string").join("");
       }
       if (message.metadata?.is_error) {
+        isError = true;
         const parts = message.content?.parts || [];
         const joined = parts.filter((part) => typeof part === "string").join("");
         if (joined) errorText = joined;
@@ -146,7 +223,7 @@ function finishedAssistantText(document) {
     }
   }
   if (!complete) return null;
-  return { text, errorText };
+  return { text, errorText, isError };
 }
 
 /**
@@ -158,9 +235,13 @@ function finishedAssistantText(document) {
  * @param {string} options.cookie - Cookie header from the stored credential
  * @param {string} options.userAgent
  * @param {object} options.body - OpenAI chat body ({ messages, tools, ... })
+ * @param {(delta: string) => void} [options.onDelta] - report assistant text as
+ *   it arrives (streaming clients); omit to buffer the whole turn.
+ * @param {() => void} [options.onReady] - called once the upstream accepted the
+ *   turn, i.e. when it is safe to hand the client a 200 stream.
  * @returns {Promise<{text: string, hasTools: boolean, requestedTools: Array}>}
  */
-export async function runChatGptWebHttpTurn({ baseUrl, accessToken, cookie, userAgent, body, signal, log }) {
+export async function runChatGptWebHttpTurn({ baseUrl, accessToken, cookie, userAgent, body, signal, log, onDelta = null, onReady = null }) {
   if (!accessToken) throw Object.assign(new Error("ChatGPT session has no access token"), { status: 401 });
   if (signal?.aborted) throw new Error("Request aborted");
 
@@ -240,8 +321,37 @@ export async function runChatGptWebHttpTurn({ baseUrl, accessToken, cookie, user
   if (!conversation.ok) {
     throw Object.assign(new Error(`ChatGPT conversation failed (HTTP ${conversation.status})`), { status: conversation.status || 502 });
   }
+  // Accepted upstream: a caller streaming to the client may now emit its 200.
+  if (typeof onReady === "function") {
+    try {
+      onReady();
+    } catch {
+      /* observer only */
+    }
+  }
 
-  const sseText = await readSse(conversation, MAX_SSE_BYTES, SSE_DEADLINE_MS);
+  const wantsDeltas = typeof onDelta === "function";
+  let streamedText = "";
+  let sseText;
+  if (wantsDeltas) {
+    const streamed = await readSseDeltas(conversation, {
+      limit: MAX_SSE_BYTES,
+      deadlineMs: SSE_DEADLINE_MS,
+      signal,
+      onText: (delta) => {
+        streamedText += delta;
+        try {
+          onDelta(delta);
+        } catch {
+          // The client's stream may already be closed; the turn still completes
+          // so the conversation document stays consistent upstream.
+        }
+      },
+    });
+    sseText = streamed.raw;
+  } else {
+    sseText = await readSse(conversation, MAX_SSE_BYTES, SSE_DEADLINE_MS);
+  }
   const conversationId = (sseText.match(/"conversation_id"\s*:\s*"([0-9a-f-]{36})"/) || [])[1] || "";
   if (!conversationId) {
     throw Object.assign(new Error("ChatGPT conversation produced no conversation id"), { status: 502 });
@@ -262,8 +372,29 @@ export async function runChatGptWebHttpTurn({ baseUrl, accessToken, cookie, user
       const document = await res.json().catch(() => null);
       const finished = document ? finishedAssistantText(document) : null;
       if (finished) {
-        if (!finished.text.trim() && finished.errorText) {
-          throw Object.assign(new Error(`ChatGPT refused the turn: ${finished.errorText.slice(0, 200)}`), { status: 400 });
+        // A refused turn that carries text is delivered as content (that is what
+        // the web UI shows). A refusal with NO text must not become an empty
+        // successful answer — the old guard compared errorText, which can only
+        // exist when text exists too, so it never fired.
+        if (!finished.text.trim() && finished.isError) {
+          throw Object.assign(
+            new Error(`ChatGPT refused the turn${finished.errorText ? `: ${finished.errorText.slice(0, 200)}` : ""}`),
+            { status: 400 }
+          );
+        }
+        // The conversation document is authoritative. Emit only the tail the
+        // delta stream missed; a divergence means the stream did not reflect the
+        // final edit and is reported rather than rewritten mid-answer.
+        if (wantsDeltas) {
+          if (finished.text.startsWith(streamedText)) {
+            const rest = finished.text.slice(streamedText.length);
+            if (rest) {
+              streamedText += rest;
+              try { onDelta(rest); } catch { /* client gone */ }
+            }
+          } else if (finished.text !== streamedText) {
+            log?.warn?.("CGPT-WEB", "streamed text diverged from the final conversation document");
+          }
         }
         // Return the raw text: buildToolModeResponse() strips and parses the
         // `<tool>` blocks downstream, so parsing twice here would lose them.
