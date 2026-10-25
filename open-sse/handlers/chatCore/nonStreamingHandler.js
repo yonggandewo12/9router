@@ -316,7 +316,7 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
   // A provider that answers without a usage block (every web-cookie lane) must
   // not vanish from cost stats: saveUsageStats drops an all-zero success row, so
   // estimate here exactly like the streaming path does — same `body`, same rules.
-  // Only the accounting changes; the client keeps the envelope upstream sent.
+  // The same estimate is reported to the client further down.
   const reportedUsage = extractUsageFromResponse(responseBody);
   const usage = hasValidUsage(reportedUsage)
     ? reportedUsage
@@ -357,7 +357,14 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
   }
 
   if (translatedResponse?.usage) {
-    translatedResponse.usage = filterUsageForFormat(addBufferToUsage(translatedResponse.usage), sourceFormat);
+    // Real upstream counts win; an all-zero block (the web executors' shape) is
+    // replaced by the estimate, or the client reads a billed turn as free.
+    const reported = hasValidUsage(reportedUsage) ? translatedResponse.usage : usage;
+    translatedResponse.usage = filterUsageForFormat(addBufferToUsage(reported), sourceFormat);
+  } else if (translatedResponse && !isClaudeMessageResponse && !isResponsesResponse && !hasValidUsage(reportedUsage)) {
+    // No usage block at all: report the estimate, which is what the streaming
+    // path already injects into its finish chunk.
+    translatedResponse.usage = filterUsageForFormat(addBufferToUsage(usage), sourceFormat);
   }
 
   // Strip reasoning_content only when content is non-empty.

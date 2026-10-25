@@ -69,10 +69,11 @@ describe("non-streaming usage when the upstream reports none", () => {
     expect(tokens.completion_tokens).toBeGreaterThan(0);
     expect(tokens.total_tokens).toBe(tokens.prompt_tokens + tokens.completion_tokens);
 
-    // The envelope stays what upstream sent: the fix is about accounting, not
-    // about handing clients numbers the provider never produced.
+    // The client sees the same estimate plus the +2000 context headroom, exactly
+    // like a streaming turn of the same model — not 2000/0 for a billed turn.
     const body = await result.response.json();
-    expect(body.usage).toBeUndefined();
+    expect(body.usage.prompt_tokens).toBe(tokens.prompt_tokens + 2000);
+    expect(body.usage.completion_tokens).toBe(tokens.completion_tokens);
   });
 
   it("treats an all-zero usage block as missing (the shape web executors return)", async () => {
