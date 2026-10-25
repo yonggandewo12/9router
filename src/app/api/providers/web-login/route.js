@@ -52,6 +52,24 @@ export async function GET(request) {
         });
       }
 
+      // A row without a credential is worse than no row: the account fallback
+      // loop would keep selecting it and every turn would 401. Never persist one.
+      if (typeof session.credential !== "string" || !session.credential.trim()) {
+        session.status = "error";
+        session.error = "The login window reported success without a credential — please log in again";
+        return NextResponse.json({
+          provider,
+          status: session.status,
+          profile: session.profile || null,
+          error: session.error,
+        });
+      }
+      // One line per login, no secret: the identity verdict and whether a
+      // credential actually reached the save are what diagnose a stuck login.
+      console.log(
+        `[webLogin] saving ${provider}: identity=${identity.status} credential=${session.credential.length} chars proxy=${session.proxyUrl ? "yes" : "no"}`
+      );
+
       const providerName = AI_PROVIDERS[provider]?.name || provider;
       const email = identity.email || "";
       const name = email || providerName;
