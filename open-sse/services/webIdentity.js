@@ -6,6 +6,8 @@
 // web session). A probe answers three things — ok / rejected / unknown — so a
 // flaky network never flips a healthy connection to "error".
 import https from "node:https";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import { extractCookieValue, normalizeSessionCookieHeader } from "../utils/webCookieAuth.js";
 import { normalizeGeminiValidationCookie } from "../utils/geminiCookies.js";
 import { grokTlsFetch, GROK_TLS_USER_AGENT } from "./grokTlsClient.js";
@@ -41,14 +43,20 @@ function decodeJwtPayload(token) {
 }
 
 
+// The probe has to reach the same host the login window did. When that window
+// needed a proxy (the sign-in page is unreachable directly), a direct probe
+// would reject a perfectly good session right after login, so the proxy rides
+// along through the async call chain.
+const probeContext = new AsyncLocalStorage();
+
 async function request(url, { method = "GET", headers = {}, body } = {}) {
   try {
-    const res = await fetch(url, {
+    const res = await proxyAwareFetch(url, {
       method,
       headers: { "User-Agent": UA, ...headers },
       body,
       signal: AbortSignal.timeout(TIMEOUT_MS),
-    });
+    }, probeContext.getStore()?.proxyOptions || null);
     const text = await res.text().catch(() => "");
     return { status: res.status, ok: res.ok, text };
   } catch (error) {
@@ -219,11 +227,11 @@ export function hasWebIdentityProbe(providerId) {
  * Probe a web-cookie credential.
  * @returns {Promise<{ok: boolean, status: "valid"|"invalid"|"unknown", email?: string, error?: string}>}
  */
-export async function fetchWebIdentity(providerId, credential) {
+export async function fetchWebIdentity(providerId, credential, { proxyOptions = null } = {}) {
   const probe = PROBES[providerId];
   if (!probe) return UNKNOWN("No identity probe for this provider");
   try {
-    const result = await probe(credential);
+    const result = await probeContext.run({ proxyOptions }, () => probe(credential));
     return { email: "", ...result };
   } catch (error) {
     return UNKNOWN(error?.message || String(error));

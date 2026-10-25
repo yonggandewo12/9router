@@ -12,6 +12,8 @@
 // guessed, so a format change surfaces as a prepare/requirements error rather
 // than a silent mis-hash.
 
+import { proxyAwareFetch } from "../../utils/proxyFetch.js";
+
 const PREPARE_PREFIX = "gAAAAAC";
 const PROOF_PREFIX = "gAAAAAB";
 const PROOF_SUFFIX = "~S";
@@ -115,13 +117,13 @@ export class TurnstileRequiredError extends Error {
   }
 }
 
-async function postJson(url, { headers, body, signal }) {
-  const res = await fetch(url, {
+async function postJson(url, { headers, body, signal, proxyOptions = null }) {
+  const res = await proxyAwareFetch(url, {
     method: "POST",
     headers: { ...headers, "Content-Type": "application/json", Accept: "application/json" },
     body: JSON.stringify(body ?? {}),
     signal,
-  });
+  }, proxyOptions);
   const text = await res.text().catch(() => "");
   if (!res.ok) {
     throw Object.assign(new Error(`ChatGPT ${new URL(url).pathname} failed (HTTP ${res.status}) ${text.slice(0, 200)}`), {
@@ -141,11 +143,12 @@ async function postJson(url, { headers, body, signal }) {
  *
  * @returns {Promise<Record<string,string>>}
  */
-export async function fetchSentinelHeaders({ baseUrl, accessToken, userAgent, signal }) {
+export async function fetchSentinelHeaders({ baseUrl, accessToken, userAgent, signal, proxyOptions = null }) {
   const base = { Authorization: `Bearer ${accessToken}`, "User-Agent": userAgent };
   const prepared = await postJson(`${baseUrl}/backend-api/sentinel/chat-requirements/prepare`, {
     headers: { ...base, [SENTINEL_HEADERS.prepare]: buildPrepareToken(userAgent) },
     signal,
+    proxyOptions,
   });
   if (!prepared?.prepare_token) {
     throw Object.assign(new Error("ChatGPT sentinel prepare returned no prepare_token"), { status: 502 });
@@ -154,6 +157,7 @@ export async function fetchSentinelHeaders({ baseUrl, accessToken, userAgent, si
   const requirements = await postJson(`${baseUrl}/backend-api/sentinel/chat-requirements`, {
     headers: { ...base, [SENTINEL_HEADERS.prepare]: prepared.prepare_token },
     signal,
+    proxyOptions,
   });
   // Turnstile runs a VM challenge. The image flow tolerates its absence today,
   // so this is informational rather than fatal.

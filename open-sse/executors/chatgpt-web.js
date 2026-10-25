@@ -14,6 +14,7 @@ import { runChatGptWebHttpTurn } from "./chatgpt-web/chatHttp.js";
 import { buildToolModeResponse } from "./chatgptWebTools.js";
 import { isMissingBrowserExecutable } from "./browserExecutableCheck.js";
 import { sseChunk } from "../utils/sse.js";
+import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import { SSE_DONE, SSE_HEADERS_NO_BUFFER } from "../utils/sseConstants.js";
 
 export { isMissingBrowserExecutable } from "./browserExecutableCheck.js";
@@ -23,12 +24,12 @@ const DEFAULT_USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36";
 
 /** Resolve the session access token over HTTP, seeding the stored cookie jar. */
-async function fetchAccessToken({ storageState, userAgent, signal }) {
+async function fetchAccessToken({ storageState, userAgent, signal, proxyOptions = null }) {
   const cookie = cookieHeader(storageState);
-  const res = await fetch(`${CHATGPT_WEB_URL}/api/auth/session`, {
+  const res = await proxyAwareFetch(`${CHATGPT_WEB_URL}/api/auth/session`, {
     headers: { "User-Agent": userAgent, Accept: "application/json", ...(cookie ? { Cookie: cookie } : {}) },
     signal,
-  });
+  }, proxyOptions);
   if (!res.ok) {
     throw Object.assign(new Error(`ChatGPT session unavailable (HTTP ${res.status})`), {
       status: res.status === 403 ? 401 : res.status || 502,
@@ -121,7 +122,7 @@ export class ChatGptWebExecutor extends BaseExecutor {
    * (Turnstile enforcement).
    */
   async #executeHttp(input) {
-    const { credentials, body, model, stream } = input;
+    const { credentials, body, model, stream, proxyOptions = null } = input;
     let storageState;
     try {
       storageState = readStorageState(credentials);
@@ -141,13 +142,13 @@ export class ChatGptWebExecutor extends BaseExecutor {
     // premature 200 would hide behind a broken stream.
     const hasRequestedTools = Array.isArray(body?.tools) && body.tools.length > 0;
     if (input.stream === true && !hasRequestedTools) {
-      const accessToken = await fetchAccessToken({ storageState, userAgent, signal: input.signal });
+      const accessToken = await fetchAccessToken({ storageState, userAgent, signal: input.signal, proxyOptions });
       return this.#streamHttpTurn({ input, accessToken, storageState, userAgent, model });
     }
 
     let turn;
     try {
-      const accessToken = await fetchAccessToken({ storageState, userAgent, signal: input.signal });
+      const accessToken = await fetchAccessToken({ storageState, userAgent, signal: input.signal, proxyOptions });
       turn = await runChatGptWebHttpTurn({
         baseUrl: CHATGPT_WEB_URL,
         accessToken,
@@ -156,6 +157,7 @@ export class ChatGptWebExecutor extends BaseExecutor {
         body,
         signal: input.signal,
         log: input.log,
+        proxyOptions,
       });
     } catch (error) {
       if (error?.code === "TURNSTILE_REQUIRED" || /Turnstile/i.test(error?.message || "")) return null;
@@ -242,6 +244,7 @@ export class ChatGptWebExecutor extends BaseExecutor {
       body,
       signal: turnSignal,
       log,
+      proxyOptions: input.proxyOptions || null,
       onReady: () => resolveReady(),
       onDelta: (text) => {
         if (!roleSent) {

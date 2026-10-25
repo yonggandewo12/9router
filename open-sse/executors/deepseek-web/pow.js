@@ -1,10 +1,12 @@
+import { proxyAwareFetch } from "../../utils/proxyFetch.js";
+
 function isSafeInt(value, { min = -Number.MAX_SAFE_INTEGER, max = Number.MAX_SAFE_INTEGER } = {}) {
   return Number.isSafeInteger(value) && value >= min && value <= max;
 }
 
 /** Request a DeepSeekHashV1 PoW challenge for `targetPath`. */
 export async function requestDeepSeekPowChallenge(options) {
-  const response = await fetch("https://chat.deepseek.com/api/v0/chat/create_pow_challenge", {
+  const response = await proxyAwareFetch("https://chat.deepseek.com/api/v0/chat/create_pow_challenge", {
     method: "POST",
     headers: {
       ...options.headers,
@@ -13,7 +15,7 @@ export async function requestDeepSeekPowChallenge(options) {
     },
     body: JSON.stringify({ target_path: options.targetPath }),
     signal: options.signal ?? undefined,
-  });
+  }, options.proxyOptions || null);
   if (!response.ok) throw new Error(`create_pow_challenge HTTP ${response.status}`);
   const json = await response.json();
   const challenge = json?.data?.biz_data?.challenge ?? json?.biz_data?.challenge;

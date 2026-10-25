@@ -27,7 +27,17 @@ export async function GET(request) {
   if (session.status === "success" && !session.savedConnectionId) {
     try {
       const config = getWebLoginConfig(provider);
-      const identity = await fetchWebIdentity(provider, session.credential);
+      const identity = await fetchWebIdentity(provider, session.credential, {
+        // Same proxy the login window used, or the probe goes direct and
+        // rejects a session it just captured successfully.
+        proxyOptions: session.proxyUrl
+          ? {
+              connectionProxyEnabled: true,
+              connectionProxyUrl: session.proxyUrl,
+              connectionNoProxy: session.noProxy || "",
+            }
+          : null,
+      });
       // A login that just finished in the browser is authoritative: an
       // "invalid" verdict here means the probe endpoint rejected the request
       // shape, not that the user's session is stale.
@@ -49,6 +59,15 @@ export async function GET(request) {
       const providerSpecificData = {
         authMethod: "web-login",
         ...(config?.credentialFrom === "localStorageValue" ? { tokenSource: "localStorage" } : {}),
+        // Carry the login-window proxy onto the connection, or the first chat
+        // request would go direct while the login page needed the proxy.
+        ...(session.proxyUrl
+          ? {
+              connectionProxyEnabled: true,
+              connectionProxyUrl: session.proxyUrl,
+              connectionNoProxy: session.noProxy || "",
+            }
+          : {}),
       };
 
       // Re-login refreshes the credential in place. Match by account email so a
@@ -120,10 +139,20 @@ export async function POST(request) {
     const body = await request.json();
     const provider = String(body?.provider || "").trim();
     const profile = String(body?.profile || "").trim() || "default";
+    // The login page has to be reachable BEFORE a connection exists, so the
+    // proxy is taken from this request and applied when the window launches.
+    const proxyUrl = String(body?.proxyUrl || "").trim();
+    const noProxy = String(body?.noProxy || "").trim();
+    if (proxyUrl && !/^(https?|socks5h?):\/\//i.test(proxyUrl)) {
+      return NextResponse.json(
+        { error: "proxyUrl must start with http://, https:// or socks5://" },
+        { status: 400 }
+      );
+    }
     if (!getWebLoginConfig(provider)) {
       return NextResponse.json({ error: `Web login not supported for "${provider}"` }, { status: 400 });
     }
-    const session = await startWebLogin(provider, profile);
+    const session = await startWebLogin(provider, profile, { proxyUrl, noProxy });
     return NextResponse.json({ provider, profile: session.profile, status: session.status }, { status: 202 });
   } catch (error) {
     return NextResponse.json({ error: error?.message || "Failed to start login" }, { status: 500 });

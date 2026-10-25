@@ -137,7 +137,7 @@ function sanitizeProfileName(name) {
   return cleaned || "default";
 }
 
-export async function startWebLogin(providerId, profileName = "default") {
+export async function startWebLogin(providerId, profileName = "default", { proxyUrl = "", noProxy = "" } = {}) {
   const config = getWebLoginConfig(providerId);
   if (!config) throw new Error(`No web-login config for provider "${providerId}"`);
   const existing = sessions.get(providerId);
@@ -147,7 +147,7 @@ export async function startWebLogin(providerId, profileName = "default") {
     throw new Error(`Profile "${profile}" is already open for ${busyProfiles.get(profile)} — finish that login first or pick another profile`);
   }
 
-  const session = { providerId, profile, status: "running", startedAt: Date.now(), cancelled: false };
+  const session = { providerId, profile, status: "running", startedAt: Date.now(), cancelled: false, proxyUrl, noProxy };
   sessions.set(providerId, session);
   busyProfiles.set(profile, providerId);
   // Fire-and-forget: callers poll getWebLoginStatus().
@@ -168,23 +168,30 @@ function clearStaleSingletonLocks(dir) {
   }
 }
 
-async function launchLoginBrowser(chromium, dir, executablePath) {
+// A login window must reach the provider's sign-in page BEFORE the user is
+// logged in, so the proxy cannot be read from the (not yet existing) connection
+// — it has to be supplied up front and applied at launch.
+export function buildContextProxy(proxyUrl, noProxy) {
+  const server = typeof proxyUrl === "string" ? proxyUrl.trim() : "";
+  if (!server) return null;
+  const bypass = typeof noProxy === "string" ? noProxy.trim() : "";
+  return { server, ...(bypass ? { bypass } : {}) };
+}
+
+async function launchLoginBrowser(chromium, dir, executablePath, proxy = null) {
+  const launchOptions = {
+    headless: false,
+    executablePath,
+    viewport: null,
+    args: ["--disable-blink-features=AutomationControlled"],
+    ...(proxy ? { proxy } : {}),
+  };
   try {
-    return await chromium.launchPersistentContext(dir, {
-      headless: false,
-      executablePath,
-      viewport: null,
-      args: ["--disable-blink-features=AutomationControlled"],
-    });
+    return await chromium.launchPersistentContext(dir, launchOptions);
   } catch (error) {
     if (!/ProcessSingleton|SingletonLock/i.test(String(error?.message || ""))) throw error;
     clearStaleSingletonLocks(dir);
-    return await chromium.launchPersistentContext(dir, {
-      headless: false,
-      executablePath,
-      viewport: null,
-      args: ["--disable-blink-features=AutomationControlled"],
-    });
+    return await chromium.launchPersistentContext(dir, launchOptions);
   }
 }
 
@@ -197,7 +204,12 @@ async function runLogin(session, config) {
   const dir = profileDir(session.profile);
   mkdirSync(dir, { recursive: true });
 
-  const context = await launchLoginBrowser(chromium, dir, executablePath);
+  const context = await launchLoginBrowser(
+    chromium,
+    dir,
+    executablePath,
+    buildContextProxy(session.proxyUrl, session.noProxy)
+  );
 
   try {
     const page = context.pages()[0] || (await context.newPage());

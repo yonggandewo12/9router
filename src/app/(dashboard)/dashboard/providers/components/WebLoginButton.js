@@ -49,6 +49,7 @@ export default function WebLoginButton({ providerId, onConnected, size = "sm" })
   const [message, setMessage] = useState("");
   const [profiles, setProfiles] = useState(["default"]);
   const [profile, setProfile] = useState("default");
+  const [proxyUrl, setProxyUrl] = useState("");
   const timerRef = useRef(null);
   const closeTimerRef = useRef(null);
 
@@ -75,10 +76,19 @@ export default function WebLoginButton({ providerId, onConnected, size = "sm" })
         const list = data.profiles.includes("default") ? data.profiles : ["default", ...data.profiles];
         setProfiles(list);
         setProfile(saved && list.includes(saved) ? saved : "default");
+        const savedProxy = typeof window !== "undefined" ? window.localStorage.getItem(`weblogin:proxy:${providerId}`) : null;
+        if (savedProxy) setProxyUrl(savedProxy);
       })
       .catch(() => {});
     return () => { cancelled = true; };
   }, [open, providerId]);
+
+  // The login page must be reachable BEFORE any connection exists, so the proxy
+  // is configured here and applied when the window launches.
+  const handleProxyChange = useCallback((value) => {
+    setProxyUrl(value);
+    if (typeof window !== "undefined") window.localStorage.setItem(`weblogin:proxy:${providerId}`, value);
+  }, [providerId]);
 
   const pickProfile = useCallback((value) => {
     setProfile(value);
@@ -134,7 +144,7 @@ export default function WebLoginButton({ providerId, onConnected, size = "sm" })
       const res = await fetch("/api/providers/web-login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ provider: providerId, profile }),
+        body: JSON.stringify({ provider: providerId, profile, proxyUrl: proxyUrl.trim() }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -149,7 +159,7 @@ export default function WebLoginButton({ providerId, onConnected, size = "sm" })
       setPhase("error");
       setMessage(error?.message || translate("Failed to start login"));
     }
-  }, [providerId, profile, poll]);
+  }, [providerId, profile, proxyUrl, poll]);
 
   const handleCancel = useCallback(() => {
     fetch(`/api/providers/web-login?provider=${encodeURIComponent(providerId)}`, { method: "DELETE" }).catch(() => {});
@@ -192,6 +202,23 @@ export default function WebLoginButton({ providerId, onConnected, size = "sm" })
               "A Chrome window opens on a shared browser profile. Log in there — the session is captured automatically. One Google login in a profile makes every other provider a single “Continue with Google” click."
             )}
           </p>
+
+          <label className="flex flex-col gap-1">
+            <span className="text-xs font-medium uppercase tracking-wide text-text-muted">
+              {translate("Proxy (optional)")}
+            </span>
+            <input
+              type="text"
+              value={proxyUrl}
+              disabled={busy}
+              onChange={(event) => handleProxyChange(event.target.value)}
+              placeholder="http://127.0.0.1:7890"
+              className="rounded border border-accent/30 bg-sidebar px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-50"
+            />
+            <span className="text-[11px] text-text-muted">
+              {translate("The login window and its requests use this proxy. Set it before logging in — a sign-in page that cannot load directly needs it.")}
+            </span>
+          </label>
 
           <div>
             <div className="mb-2 flex items-center justify-between">

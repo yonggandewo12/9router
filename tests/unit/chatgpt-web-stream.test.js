@@ -8,6 +8,13 @@ vi.mock("../../open-sse/executors/chatgpt-web/sentinel.js", () => ({
   fetchSentinelHeaders: async () => ({ "X-Sentinel": "test" }),
 }));
 
+// proxyFetch patches the global fetch on import, so the lane's HTTP calls go
+// through its own reference — stub proxyAwareFetch itself.
+const net = vi.hoisted(() => ({ handler: null }));
+vi.mock("../../open-sse/utils/proxyFetch.js", () => ({
+  proxyAwareFetch: (url, options) => net.handler(String(url), options),
+}));
+
 const { runChatGptWebHttpTurn, assistantTextFromDocument } = await import(
   "../../open-sse/executors/chatgpt-web/chatHttp.js"
 );
@@ -49,10 +56,8 @@ function deltaStreamBody(initialText) {
   });
 }
 
-const originalFetch = global.fetch;
-
 function stubFetch({ documentText, complete = true, sseText = "" }) {
-  global.fetch = vi.fn(async (url) => {
+  net.handler = async (url) => {
     const target = String(url);
     if (target.includes("/f/conversation/prepare")) {
       return Response.json({ conduit_token: "tok" });
@@ -78,14 +83,16 @@ function stubFetch({ documentText, complete = true, sseText = "" }) {
       });
     }
     throw new Error(`unexpected fetch: ${target}`);
-  });
+  };
 }
 
 beforeEach(() => {
-  global.fetch = originalFetch;
+  net.handler = async () => {
+    throw new Error("no network stub installed");
+  };
 });
 afterEach(() => {
-  global.fetch = originalFetch;
+  net.handler = null;
 });
 
 const baseArgs = {
@@ -144,20 +151,20 @@ describe("runChatGptWebHttpTurn streaming", () => {
   });
 
   it("does not report readiness when the turn is rejected upstream", async () => {
-    global.fetch = vi.fn(async (url) => {
+    net.handler = async (url) => {
       const target = String(url);
       if (target.includes("/f/conversation/prepare")) {
         return new Response("unauthorized", { status: 401 });
       }
       return Response.json({});
-    });
+    };
     const onReady = vi.fn();
     await expect(runChatGptWebHttpTurn({ ...baseArgs, onReady })).rejects.toMatchObject({ status: 401 });
     expect(onReady).not.toHaveBeenCalled();
   });
 
   it("surfaces a refused turn with no text as an error instead of empty content", async () => {
-    global.fetch = vi.fn(async (url) => {
+    net.handler = async (url) => {
       const target = String(url);
       if (target.includes("/f/conversation/prepare")) return Response.json({ conduit_token: "tok" });
       if (target.includes("/f/conversation")) {
@@ -175,7 +182,7 @@ describe("runChatGptWebHttpTurn streaming", () => {
           },
         },
       });
-    });
+    };
     await expect(runChatGptWebHttpTurn(baseArgs)).rejects.toMatchObject({ status: 400 });
   });
 });

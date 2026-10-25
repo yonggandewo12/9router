@@ -15,6 +15,7 @@ import { randomUUID } from "node:crypto";
 import { fetchSentinelHeaders } from "./sentinel.js";
 import { ChatGptWebDeltaV1Decoder } from "./deltaV1.js";
 import { prepareToolMessages } from "../../translator/webTools.js";
+import { proxyAwareFetch } from "../../utils/proxyFetch.js";
 const SSE_DEADLINE_MS = 120000;
 const POLL_INTERVAL_MS = 1500;
 const POLL_TIMEOUT_MS = 180000;
@@ -60,12 +61,12 @@ function withToolOrder(prompt, hasTools, messages) {
   return hasToolResults ? prompt : `${TOOL_LEAD}\n\n${prompt}\n\n${TOOL_ORDER}`;
 }
 
-function fetchWithTimeout(url, options, timeoutMs, outerSignal) {
+function fetchWithTimeout(url, options, timeoutMs, outerSignal, proxyOptions = null) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   const onAbort = () => controller.abort();
   outerSignal?.addEventListener("abort", onAbort, { once: true });
-  return fetch(url, { ...options, signal: controller.signal }).finally(() => {
+  return proxyAwareFetch(url, { ...options, signal: controller.signal }, proxyOptions).finally(() => {
     clearTimeout(timer);
     outerSignal?.removeEventListener("abort", onAbort);
   });
@@ -241,7 +242,7 @@ function finishedAssistantText(document) {
  *   turn, i.e. when it is safe to hand the client a 200 stream.
  * @returns {Promise<{text: string, hasTools: boolean, requestedTools: Array}>}
  */
-export async function runChatGptWebHttpTurn({ baseUrl, accessToken, cookie, userAgent, body, signal, log, onDelta = null, onReady = null }) {
+export async function runChatGptWebHttpTurn({ baseUrl, accessToken, cookie, userAgent, body, signal, log, proxyOptions = null, onDelta = null, onReady = null }) {
   if (!accessToken) throw Object.assign(new Error("ChatGPT session has no access token"), { status: 401 });
   if (signal?.aborted) throw new Error("Request aborted");
 
@@ -252,7 +253,7 @@ export async function runChatGptWebHttpTurn({ baseUrl, accessToken, cookie, user
   const prompt = withToolOrder(flattenMessages(prepared.effectiveMessages), prepared.hasTools, messages);
   if (!prompt.trim()) throw Object.assign(new Error("ChatGPT Web requires non-empty text"), { status: 400 });
 
-  const sentinel = await fetchSentinelHeaders({ baseUrl, accessToken, userAgent, signal });
+  const sentinel = await fetchSentinelHeaders({ baseUrl, accessToken, userAgent, signal, proxyOptions });
   const headers = {
     ...sentinel,
     Authorization: `Bearer ${accessToken}`,
@@ -281,7 +282,7 @@ export async function runChatGptWebHttpTurn({ baseUrl, accessToken, cookie, user
       supported_encodings: ["v1"],
       client_contextual_info: { app_name: "chatgpt.com" },
     }),
-  }, 60000, signal);
+  }, 60000, signal, proxyOptions);
   if (!prepare.ok) {
     const detail = (await prepare.text().catch(() => "")).slice(0, 200);
     throw Object.assign(new Error(`ChatGPT prepare failed (HTTP ${prepare.status}) ${detail}`), { status: prepare.status || 502 });
@@ -317,7 +318,7 @@ export async function runChatGptWebHttpTurn({ baseUrl, accessToken, cookie, user
       client_contextual_info: { app_name: "chatgpt.com" },
       force_parallel_switch: "auto",
     }),
-  }, SSE_DEADLINE_MS + 15000, signal);
+  }, SSE_DEADLINE_MS + 15000, signal, proxyOptions);
   if (!conversation.ok) {
     throw Object.assign(new Error(`ChatGPT conversation failed (HTTP ${conversation.status})`), { status: conversation.status || 502 });
   }
@@ -366,7 +367,8 @@ export async function runChatGptWebHttpTurn({ baseUrl, accessToken, cookie, user
       `${baseUrl}/backend-api/conversation/${conversationId}`,
       { headers: { Authorization: `Bearer ${accessToken}`, "User-Agent": userAgent, Accept: "application/json", ...(cookie ? { Cookie: cookie } : {}) } },
       30000,
-      signal
+      signal,
+      proxyOptions
     ).catch(() => null);
     if (res?.ok) {
       const document = await res.json().catch(() => null);
