@@ -24,13 +24,13 @@ function jsonResponse(body) {
   });
 }
 
-function call(responseBody, body = { stream: false, messages: [{ role: "user", content: "say ok" }] }) {
+function call(responseBody, body = { stream: false, messages: [{ role: "user", content: "say ok" }] }, formats = {}) {
   return handleNonStreamingResponse({
     providerResponse: jsonResponse(responseBody),
     provider: "deepseek-web",
     model: "deepseek-v4-pro",
-    sourceFormat: "openai",
-    targetFormat: "openai",
+    sourceFormat: formats.sourceFormat || "openai",
+    targetFormat: formats.targetFormat || "openai",
     body,
     stream: false,
     translatedBody: null,
@@ -113,5 +113,50 @@ describe("non-streaming usage when the upstream reports none", () => {
       usage: { prompt_tokens: 4242, completion_tokens: 77, total_tokens: 4319 },
     })).response.json();
     expect(body.usage.prompt_tokens).toBe(6242);
+  });
+
+  it("reports the estimate in the client's own field names", async () => {
+    // In this handler `sourceFormat` is the format the CLIENT asked for. A
+    // Claude client that gets an OpenAI-shaped completion still reads
+    // input_tokens; filtering the estimate by the wrong format would strip every
+    // count and leave `{estimated:true}` — worse than no usage at all.
+    const result = await call(
+      { choices: [{ message: { role: "assistant", content: "ok" } }], usage: { prompt_tokens: 0, completion_tokens: 0 } },
+      { stream: false, messages: [{ role: "user", content: "say ok" }] },
+      { sourceFormat: "claude", targetFormat: "openai" }
+    );
+    const body = await result.response.json();
+    expect(body.usage.input_tokens).toBeGreaterThan(2000);
+    expect(body.usage.output_tokens).toBeGreaterThan(0);
+    expect(body.usage.prompt_tokens).toBeUndefined();
+
+    // The ledger is canonical OpenAI either way.
+    const tokens = recordedUsage();
+    expect(tokens.prompt_tokens).toBeGreaterThan(0);
+    expect(tokens.completion_tokens).toBeGreaterThan(0);
+  });
+
+  it("leaves a body shape it does not recognize alone", async () => {
+    // A Gemini body reports usageMetadata, not usage: no choices, not a Claude
+    // message — nothing here to attach a prompt_tokens block to.
+    const result = await call(
+      { candidates: [{ content: { parts: [{ text: "ok" }] } }] },
+      { stream: false, messages: [{ role: "user", content: "say ok" }] },
+      { sourceFormat: "gemini", targetFormat: "gemini" }
+    );
+    const body = await result.response.json();
+    expect(body.candidates).toBeDefined();
+    expect(body.usage).toBeUndefined();
+  });
+
+  it("estimates from a Claude-shaped answer too", async () => {
+    await call(
+      { type: "message", role: "assistant", content: [{ type: "text", text: "a".repeat(400) }], stop_reason: "end_turn" },
+      { stream: false, messages: [{ role: "user", content: "say ok" }] },
+      { sourceFormat: "claude", targetFormat: "claude" }
+    );
+    // 400 chars of answer ≈ 100 output tokens; the OpenAI-only reader would
+    // have reported 0 and dropped the row entirely.
+    expect(recordedUsage().completion_tokens).toBeGreaterThan(50);
   });
 });

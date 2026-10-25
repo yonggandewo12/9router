@@ -243,16 +243,36 @@ export function translateNonStreamingResponse(responseBody, targetFormat, source
  * Character length of what the model actually produced, for output-token
  * estimation when the upstream reports no usage. Reasoning and tool calls are
  * billed too — leaving them out would price a thinking turn as an empty one.
+ * All three response shapes are read: the provider's format here is not
+ * necessarily the client's, and either can be the one without usage.
  */
 function assistantTextLength(responseBody) {
-  const message = responseBody?.choices?.[0]?.message;
-  const parts = [];
-  if (typeof message?.content === "string") parts.push(message.content);
-  if (typeof message?.reasoning_content === "string") parts.push(message.reasoning_content);
-  if (Array.isArray(message?.tool_calls) && message.tool_calls.length > 0) {
-    parts.push(JSON.stringify(message.tool_calls));
+  const texts = [];
+
+  // OpenAI chat completions
+  for (const choice of Array.isArray(responseBody?.choices) ? responseBody.choices : []) {
+    const message = choice?.message;
+    if (typeof message?.content === "string") texts.push(message.content);
+    if (typeof message?.reasoning_content === "string") texts.push(message.reasoning_content);
+    if (Array.isArray(message?.tool_calls) && message.tool_calls.length > 0) {
+      texts.push(JSON.stringify(message.tool_calls));
+    }
   }
-  return parts.join("").length;
+
+  // Claude messages
+  for (const block of Array.isArray(responseBody?.content) ? responseBody.content : []) {
+    if (typeof block?.text === "string") texts.push(block.text);
+    if (block?.type === "tool_use") texts.push(JSON.stringify(block.input ?? {}));
+  }
+
+  // Gemini candidates
+  for (const candidate of Array.isArray(responseBody?.candidates) ? responseBody.candidates : []) {
+    for (const part of Array.isArray(candidate?.content?.parts) ? candidate.content.parts : []) {
+      if (typeof part?.text === "string") texts.push(part.text);
+    }
+  }
+
+  return texts.join("").length;
 }
 
 /**
@@ -316,11 +336,14 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
   // A provider that answers without a usage block (every web-cookie lane) must
   // not vanish from cost stats: saveUsageStats drops an all-zero success row, so
   // estimate here exactly like the streaming path does — same `body`, same rules.
-  // The same estimate is reported to the client further down.
+  // In this handler `sourceFormat` is the format the CLIENT asked for, so the
+  // estimate is built with its field names and the same object serves both the
+  // ledger and the envelope further down.
+  const clientUsageFormat = sourceFormat === FORMATS.CLAUDE ? FORMATS.CLAUDE : FORMATS.OPENAI;
   const reportedUsage = extractUsageFromResponse(responseBody);
   const usage = hasValidUsage(reportedUsage)
     ? reportedUsage
-    : estimateUsage(body, assistantTextLength(responseBody), FORMATS.OPENAI);
+    : estimateUsage(body, assistantTextLength(responseBody), clientUsageFormat);
   saveUsageStats({ provider, model, tokens: usage, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, silent: true });
   if (log?.line) log.line(reqTag, "📊", formatDoneLine({ usage, latency: { total: Date.now() - requestStartTime, ...(perf || {}) } }));
 
@@ -356,15 +379,26 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
     }
   }
 
+  // The estimate is written back in the client's own field names, and only into
+  // a body shape we recognize: a Responses body carries no usage of this kind
+  // and a Gemini body reports usageMetadata, so those keep whatever upstream
+  // sent instead of gaining a half-translated block.
+  const injectEstimate =
+    !hasValidUsage(reportedUsage) &&
+    !isResponsesResponse &&
+    (Array.isArray(translatedResponse?.choices) || isClaudeMessageResponse);
+
   if (translatedResponse?.usage) {
     // Real upstream counts win; an all-zero block (the web executors' shape) is
     // replaced by the estimate, or the client reads a billed turn as free.
-    const reported = hasValidUsage(reportedUsage) ? translatedResponse.usage : usage;
-    translatedResponse.usage = filterUsageForFormat(addBufferToUsage(reported), sourceFormat);
-  } else if (translatedResponse && !isClaudeMessageResponse && !isResponsesResponse && !hasValidUsage(reportedUsage)) {
+    translatedResponse.usage = filterUsageForFormat(
+      addBufferToUsage(injectEstimate ? usage : translatedResponse.usage),
+      injectEstimate ? clientUsageFormat : sourceFormat
+    );
+  } else if (injectEstimate) {
     // No usage block at all: report the estimate, which is what the streaming
     // path already injects into its finish chunk.
-    translatedResponse.usage = filterUsageForFormat(addBufferToUsage(usage), sourceFormat);
+    translatedResponse.usage = filterUsageForFormat(addBufferToUsage(usage), clientUsageFormat);
   }
 
   // Strip reasoning_content only when content is non-empty.
