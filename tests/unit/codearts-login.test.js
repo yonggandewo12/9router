@@ -6,6 +6,11 @@ import crypto from "node:crypto";
 
 import { createDpopKeyPair } from "open-sse/shared/codearts/auth.js";
 
+// DPoP key generation is CPU-bound. With the whole suite in flight this file has
+// blown past the default 5s per-test budget and gone red on a busy machine while
+// passing in isolation, so give it room instead of a retry.
+vi.setConfig({ testTimeout: 20000 });
+
 const calls = [];
 
 function mockFetch(handler) {
