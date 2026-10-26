@@ -1,3 +1,16 @@
+# v0.6.20 (2026-10-26)
+
+A Codex custom-tool turn can no longer be retried — and billed twice — because of a string inside its own output.
+
+## Fixes
+
+- **`response.custom_tool_call_input.delta` now ends the 200-SSE error peek.** The previous release taught the peek to stop at reasoning as well as visible text, but left the custom-tool event out of the list, even though the combo's own classifier (`emptyFailover.inspectResponsesEvent`) counts it as payload. A custom-tool turn therefore kept scanning, up to the 256 KB peek budget, and because the transient-error patterns are matched against the raw stream text, an overload-shaped string inside the model's **own output** was read as an upstream fault: the turn was retried, billing the same generation twice. Verified by mutation — without the event the peek runs on to the string and matches it at 60 ms; with it, the peek stops on the tool delta and reports nothing.
+
+## Notes
+
+- **Efficiency of the previous release's change was re-measured independently**, on the same machine, against a worktree of its parent: for a stream that paces 12 reasoning frames before the first visible text, the combo's first client byte went 1352 ms → 124 ms (two-member combo) and 1326 ms → 2–4 ms (single-member combo, where the last seat is no longer peeked at all); with a 2 s thinking phase, 2150 ms → 73 ms. Bytes delivered were identical, and an empty first seat still fails over. The operator tap on the last seat costs ~1.8 µs per chunk (11.6 ms vs 2.4 ms over 5000 chunks).
+- **Test suite**: 446 files / 4644 passing / 0 failing.
+
 # v0.6.19 (2026-10-26)
 
 Gemini Web is gone, and a provider id that no longer exists can no longer carry a stored credential to OpenAI.
