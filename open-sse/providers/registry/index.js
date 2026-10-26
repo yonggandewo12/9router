@@ -144,7 +144,6 @@ import p142 from "./zcode.js";
 // Upstream's numbering diverged from ours (they renumbered tinyfish..nous), so
 // these six take the free slots on our side instead of shifting ours.
 import p144 from "./deepseek-web.js";
-import p145 from "./gemini-web.js";
 import p146 from "./muse-web.js";
 import p147 from "./chatgpt-web.js";
 import p148 from "./veoaifree-web.js";
@@ -291,7 +290,6 @@ export default [
   p141,
   p142,
   p144,
-  p145,
   p146,
   p147,
   p148,

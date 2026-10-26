@@ -5,11 +5,9 @@
 // probe per provider (the generic API-key probe has no idea how to talk to a
 // web session). A probe answers three things — ok / rejected / unknown — so a
 // flaky network never flips a healthy connection to "error".
-import https from "node:https";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import { extractCookieValue, normalizeSessionCookieHeader } from "../utils/webCookieAuth.js";
-import { normalizeGeminiValidationCookie } from "../utils/geminiCookies.js";
 import { grokTlsFetch, GROK_TLS_USER_AGENT } from "./grokTlsClient.js";
 import { unwrapLocalStorageToken } from "./webLoginConfig.js";
 
@@ -64,23 +62,6 @@ async function request(url, { method = "GET", headers = {}, body } = {}) {
   }
 }
 
-/** Gemini sends response headers too large for undici's default cap. */
-function geminiHttpsGet(url, headers) {
-  return new Promise((resolve) => {
-    const req = https.request(
-      { host: "gemini.google.com", path: url, method: "GET", maxHeaderSize: 2 * 1024 * 1024, headers: { "User-Agent": UA, ...headers } },
-      (res) => {
-        let body = "";
-        res.setEncoding("utf8");
-        res.on("data", (chunk) => { if (body.length < 2 * 1024 * 1024) body += chunk; });
-        res.on("end", () => resolve({ status: res.statusCode, ok: res.statusCode === 200, text: body }));
-      }
-    );
-    req.on("error", (error) => resolve({ status: 0, ok: false, error: error.message }));
-    req.setTimeout(TIMEOUT_MS, () => req.destroy(new Error("timeout")));
-    req.end();
-  });
-}
 
 const PROBES = {
   async "deepseek-web"(credential) {
@@ -149,19 +130,6 @@ const PROBES = {
     try { json = JSON.parse(res.text); } catch { return UNKNOWN("Grok returned invalid JSON"); }
     if (json?.status !== "authenticated") return REJECTED("Grok session is not signed in");
     return OK(json?.session?.email || "");
-  },
-
-
-  async "gemini-web"(credential) {
-    const cookie = normalizeGeminiValidationCookie(String(credential || ""));
-    if (!cookie) return REJECTED("Missing __Secure-1PSID cookie");
-    const res = await geminiHttpsGet("/app", { Cookie: cookie, Accept: "text/html,application/xhtml+xml" });
-    if (!res.status) return UNKNOWN(res.error);
-    if (res.status === 401 || res.status === 403) return REJECTED("__Secure-1PSID cookie is invalid or expired");
-    if (!res.ok) return UNKNOWN(`Gemini returned HTTP ${res.status}`);
-    // A signed-out landing page also answers 200; only a real session carries SNlM0e.
-    if (!/"SNlM0e"\s*:\s*"[^"]+"/.test(res.text)) return REJECTED("Gemini session is not signed in");
-    return OK("");
   },
 
   async "muse-web"(credential) {

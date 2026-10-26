@@ -1,5 +1,5 @@
 // Route-level tests for cookie validation of the web providers added upstream
-// (chatgpt-web, gemini-web, …). The media branch used to accept ANY value for
+// (chatgpt-web, muse-web, …). The media branch used to accept ANY value for
 // image-only web providers because they declare no *Config probe, so a dead
 // session validated as healthy. These drive the real POST handler.
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -28,7 +28,7 @@ function call(provider, apiKey) {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mocks.hasWebIdentityProbe.mockImplementation((p) => p === "chatgpt-web" || p === "gemini-web");
+  mocks.hasWebIdentityProbe.mockImplementation((p) => p === "chatgpt-web" || p === "muse-web");
 });
 
 describe("web-cookie validation", () => {
@@ -45,7 +45,7 @@ describe("web-cookie validation", () => {
 
   it("keeps an inconclusive probe valid but says why", async () => {
     mocks.fetchWebIdentity.mockResolvedValue({ status: "unknown", error: "fetch failed" });
-    const json = await (await call("gemini-web", "bogus=1")).json();
+    const json = await (await call("muse-web", "bogus=1")).json();
 
     expect(json.valid).toBe(true);
     expect(json.error).toBe("Could not verify the session: fetch failed");

@@ -16,7 +16,6 @@ const ICON_ALIASES = {
   // Web-cookie variants ride their brand's existing mark
   "deepseek-web": "deepseek",
   "muse-web": "muse",
-  "gemini-web": "gemini",
   "chatgpt-web": "openai",
 };
 

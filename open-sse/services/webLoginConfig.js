@@ -44,15 +44,6 @@ export const WEB_LOGIN_CONFIGS = {
     // NextAuth splits large session tokens into `.0`, `.1`, … chunks.
     tokenSources: [{ type: "cookie", name: "__Secure-next-auth.session-token" }],
   },
-  "gemini-web": {
-    loginUrl: "https://gemini.google.com/",
-    cookieDomain: ".google.com",
-    // PSID alone identifies the session; PSIDTS rotates and is often absent.
-    tokenSources: [
-      { type: "cookie", name: "__Secure-1PSID" },
-      { type: "cookie", name: "__Secure-1PSIDTS", optional: true },
-    ],
-  },
   "muse-web": {
     loginUrl: "https://muse.ai/",
     cookieDomain: ".muse.ai",

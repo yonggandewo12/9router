@@ -55,8 +55,8 @@ async function probeWebProvider(provider, apiKey) {
 async function probeMediaProvider(provider, apiKey) {
   const p = AI_PROVIDERS[provider];
   if (!p) return null;
-  // A web-cookie provider can be media-kind (chatgpt-web / gemini-web are
-  // image-only) while its credential is a session jar. The media probe only
+  // A web-cookie provider can be media-kind (muse-web / grok-web / chatgpt-web
+  // are image-capable) while its credential is a session jar. The media probe only
   // understands *Config keys, so it would hit the no-config "best-effort
   // accept" below and validate ANY value as healthy — including a dead jar.
   // Defer to the session-identity branch in the main handler instead.
@@ -654,7 +654,7 @@ export async function POST(request) {
         }
 
         default: {
-          // Cookie-auth web providers (deepseek-web, gemini-web, muse-web, chatgpt-web,
+          // Cookie-auth web providers (deepseek-web, muse-web, chatgpt-web,
           // uc-web, …) have no key endpoint to probe. Without this they would fall to the
           // generic OpenAI probe below, which sends the cookie jar as
           // `Authorization: Bearer <jar>` to an HTML page — the 200 that page returns marks

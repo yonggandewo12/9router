@@ -1292,11 +1292,6 @@
     "format": "openai",
     "authType": "cookie"
   },
-  "gemini-web": {
-    "baseUrl": "https://gemini.google.com/app",
-    "format": "openai",
-    "authType": "cookie"
-  },
   "muse-web": {
     "baseUrl": "https://muse.ai",
     "format": "openai",

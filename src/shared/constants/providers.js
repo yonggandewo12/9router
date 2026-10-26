@@ -159,17 +159,36 @@ export function isReservedProviderName(name) {
   return RESERVED_PROVIDER_NAMES.has(name);
 }
 
+// Whether a provider may be offered for a service kind. Single source for the
+// lists that filter by kind (media pages, model pickers).
+// - Unknown ids (openai/anthropic-compatible nodes) default to LLM.
+// - An empty serviceKinds means parked: the registry declares no kind, so the
+//   provider stays out of every dashboard list while its connection and code
+//   remain (perplexity-web). /v1/models keeps its own default for those.
+// - Media-only providers (muse-web, grok-web) declare no "llm" while still
+//   carrying chat models: those stay routable by name, unlisted.
+export function providerSupportsKind(providerId, kind) {
+  const provider = AI_PROVIDERS[providerId];
+  const kinds = provider?.serviceKinds || ["llm"];
+  if (!kinds.includes(kind)) return false;
+  if (provider?.hiddenKinds?.includes(kind)) return false;
+  return true;
+}
+
+// Whether a provider's static registry catalog belongs in a model list.
+// kindFilter null means the LLM/combo selector. A provider that does not
+// declare that kind (media-only chat models, or a parked provider with no
+// kinds at all) stays routable by name but lists nothing of its own — while
+// the aliases/custom models the user added under it remain pickable.
+export function listsProviderCatalog(providerId, kindFilter = null) {
+  return providerSupportsKind(providerId, kindFilter || "llm");
+}
+
 // Helper: Get providers by service kind (e.g. "tts", "embedding", "image")
 // Providers without serviceKinds default to ["llm"]
 export function getProvidersByKind(kind) {
   return Object.values(AI_PROVIDERS)
-    .filter((p) => {
-      const kinds = p.serviceKinds ?? ["llm"];
-      if (!kinds.includes(kind)) return false;
-      if (p.hidden) return false;
-      if (p.hiddenKinds?.includes(kind)) return false;
-      return true;
-    })
+    .filter((p) => !p.hidden && providerSupportsKind(p.id, kind))
     .sort((a, b) => (a.priority ?? a.mediaPriority ?? 999) - (b.priority ?? b.mediaPriority ?? 999));
 }
 

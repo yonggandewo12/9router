@@ -22,8 +22,8 @@ describe("startWebLogin proxy mismatch", () => {
   });
 
   it("refuses to pretend a different proxy took effect", async () => {
-    await startWebLogin("gemini-web", "p2", { proxyUrl: "" });
-    await expect(startWebLogin("gemini-web", "p2", { proxyUrl: "http://127.0.0.1:7890" }))
+    await startWebLogin("muse-web", "p2", { proxyUrl: "" });
+    await expect(startWebLogin("muse-web", "p2", { proxyUrl: "http://127.0.0.1:7890" }))
       .rejects.toThrow(/already open without a proxy/);
   });
 

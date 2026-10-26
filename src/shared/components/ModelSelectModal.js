@@ -7,7 +7,7 @@ import ProviderIcon from "./ProviderIcon";
 import CapacityBadges from "./CapacityBadges";
 import { useModelCaps } from "@/shared/hooks/useModelCaps";
 import { getModelsByProviderId, getModelKind } from "@/shared/constants/models";
-import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, AI_PROVIDERS, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, getProviderAlias } from "@/shared/constants/providers";
+import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, getProviderAlias, providerSupportsKind, listsProviderCatalog } from "@/shared/constants/providers";
 import { parseSearchQuery, matchesSearch } from "@/shared/utils/modelSearchFilter";
 import { getDeactivatedProviderIds } from "@/shared/utils/connectionStatus";
 
@@ -113,15 +113,15 @@ export default function ModelSelectModal({
     return fetchedConnections !== null ? fetchedConnections : (activeProviders || []);
   }, [fetchedConnections, activeProviders]);
 
-  // Filter effectiveConnections by active state and serviceKinds when kindFilter set (e.g. "webSearch", "webFetch")
+  // Filter effectiveConnections by active state and, when a kindFilter is set
+  // (e.g. "webSearch", "image"), by service kind. The LLM selector has no
+  // kindFilter and keeps every connected provider: a media-only provider still
+  // owns its user-added entries here, it just contributes no static catalog
+  // (see listsKind below).
   const filteredActiveProviders = useMemo(() => {
     const activeOnly = effectiveConnections.filter((p) => p && p.isActive !== false);
     if (!kindFilter) return activeOnly;
-    return activeOnly.filter((p) => {
-      const info = AI_PROVIDERS[p.provider];
-      const kinds = info?.serviceKinds || ["llm"];
-      return kinds.includes(kindFilter);
-    });
+    return activeOnly.filter((p) => providerSupportsKind(p.provider, kindFilter));
   }, [effectiveConnections, kindFilter]);
 
   // Set of provider IDs that have connections configured, but ALL of them are deactivated (isActive === false)
@@ -244,12 +244,20 @@ export default function ModelSelectModal({
       return models.filter((m) => m.isPlaceholder || getModelKind(m) === kindFilter);
     };
 
+    // A provider that does not declare the kind being listed contributes no
+    // static catalog: muse-web / grok-web keep chat models in the registry
+    // (still routable by name) and a parked provider declares no kinds at all,
+    // so neither belongs in this list. User-added aliases and custom models are
+    // kept — they were created deliberately and hiding them would strand an
+    // existing mapping.
+    const listsKind = (providerId) => listsProviderCatalog(providerId, kindFilter);
+
     // Get all active provider IDs from connections (filtered by kindFilter if set)
     const activeConnectionIds = filteredActiveProviders.map(p => p.provider);
 
     // No-auth providers: filter by kindFilter as well
     const noAuthIds = (kindFilter
-      ? NO_AUTH_PROVIDER_IDS.filter((id) => (AI_PROVIDERS[id]?.serviceKinds || ["llm"]).includes(kindFilter))
+      ? NO_AUTH_PROVIDER_IDS.filter((id) => providerSupportsKind(id, kindFilter))
       : NO_AUTH_PROVIDER_IDS).filter((id) => !deactivatedProviderIds.has(id));
 
     // Compatible nodes (OpenAI/Anthropic Compatible) that already have user-added
@@ -330,17 +338,19 @@ export default function ModelSelectModal({
           ];
           // Fallback: provider-as-model when no hardcoded models match (tts/image/webFetch only)
           if (combined.length === 0 && ALLOW_PROVIDER_FALLBACK_KINDS.has(kindFilter)) {
-            const supports = (providerInfo.serviceKinds || ["llm"]).includes(kindFilter);
+            const supports = providerSupportsKind(providerId, kindFilter);
             if (supports) combined = [{ id: providerId, name: providerInfo.name, value: alias }];
           }
         } else {
           // LLM/null kind: merge hardcoded models with user-added models
           const registeredLlms = customRegisteredModels.filter((m) => !getModelKind(m) || getModelKind(m) === "llm");
           const seen = new Set([...aliasModels, ...registeredLlms].map((m) => m.value));
-          const hardcoded = getModelsByProviderId(providerId)
-            .filter((m) => !getModelKind(m) || getModelKind(m) === "llm")
-            .map((m) => ({ id: m.id, name: m.name, value: `${alias}/${m.id}`, kind: getModelKind(m) }))
-            .filter((m) => !seen.has(m.value));
+          const hardcoded = listsKind(providerId)
+            ? getModelsByProviderId(providerId)
+              .filter((m) => !getModelKind(m) || getModelKind(m) === "llm")
+              .map((m) => ({ id: m.id, name: m.name, value: `${alias}/${m.id}`, kind: getModelKind(m) }))
+              .filter((m) => !seen.has(m.value))
+            : [];
           combined = [...registeredLlms, ...aliasModels.filter((m) => !registeredLlms.some((registered) => registered.value === m.value)), ...hardcoded];
         }
 
@@ -407,9 +417,11 @@ export default function ModelSelectModal({
         };
       } else {
         const liveModels = providerId === "cursor" ? cursorModels : providerId === "cline" ? clineModels : providerId === "clinepass" ? clinepassModels : providerId === "zed" ? zedModels : [];
-        const hardcodedModels = liveModels.length > 0
-          ? liveModels
-          : getModelsByProviderId(providerId);
+        const hardcodedModels = !listsKind(providerId)
+          ? []
+          : liveModels.length > 0
+            ? liveModels
+            : getModelsByProviderId(providerId);
         const hardcodedIds = new Set(hardcodedModels.map((m) => m.id));
 
         // Custom models: if no hardcoded models (e.g. openrouter), show all aliases for this provider
@@ -448,7 +460,7 @@ export default function ModelSelectModal({
         // Provider-as-model fallback: providers that support the kind but have no hardcoded models
         // can still be picked (value = providerAlias). Skips embedding (always needs model).
         if (allModels.length === 0 && kindFilter && ALLOW_PROVIDER_FALLBACK_KINDS.has(kindFilter)) {
-          const supports = (providerInfo.serviceKinds || ["llm"]).includes(kindFilter);
+          const supports = providerSupportsKind(providerId, kindFilter);
           if (supports) {
             allModels = [{ id: providerId, name: providerInfo.name, value: alias }];
           }
