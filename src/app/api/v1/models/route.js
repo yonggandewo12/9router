@@ -6,6 +6,7 @@ import {
   getProviderAlias,
   isAnthropicCompatibleProvider,
   isOpenAICompatibleProvider,
+  providerSupportsKind,
 } from "@/shared/constants/providers";
 import { getProviderConnections, getCombos, getCustomModels, getModelAliases } from "@/lib/localDb";
 import { getDisabledModels } from "@/lib/disabledModelsDb";
@@ -286,14 +287,11 @@ async function fetchCompatibleModelIds(connection) {
   }
 }
 
-// Provider matches kindFilter when its serviceKinds intersect the requested kinds.
-// LLM is the default kind for providers missing serviceKinds.
+// Provider matches kindFilter when the shared rule says it may serve that kind.
+// One source with the picker: a parked provider (serviceKinds: []) lists nothing
+// here either, instead of the previous "empty means LLM" interpretation.
 function providerMatchesKinds(providerId, kindFilter) {
-  const provider = AI_PROVIDERS[providerId];
-  const kinds = Array.isArray(provider?.serviceKinds) && provider.serviceKinds.length > 0
-    ? provider.serviceKinds
-    : [LLM_KIND];
-  return kindFilter.some((k) => kinds.includes(k));
+  return kindFilter.some((k) => providerSupportsKind(providerId, k));
 }
 
 // Combo matches kindFilter when its `kind` field is in the list.

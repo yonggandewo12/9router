@@ -42,7 +42,13 @@ vi.mock("@/sse/services/tokenRefresh.js", () => ({
   checkAndRefreshToken: async (_p, c) => c,
   updateProviderCredentials: vi.fn(),
 }));
-vi.mock("open-sse/handlers/chatCore.js", () => ({ handleChatCore: mocks.handleChatCore }));
+// handleChatCore is stubbed (these cases are about key access, not upstream
+// bytes), but isRoutableProvider stays real so the unroutable-provider guard in
+// chat.js is exercised in its actual position — before any credential lookup.
+vi.mock("open-sse/handlers/chatCore.js", async (importOriginal) => ({
+  ...(await importOriginal()),
+  handleChatCore: mocks.handleChatCore,
+}));
 
 const { handleChat } = await import("../../src/sse/handlers/chat.js");
 const { handleEmbeddings } = await import("../../src/sse/handlers/embeddings.js");
@@ -109,6 +115,21 @@ describe("chat (/v1/chat/completions, /v1/messages, /v1/responses all use handle
       expect((await chat(m, "sk-open")).status).toBe(200);
     }
     expect((await chat("openai/model-a", "sk-open")).status).toBe(500); // provider error, not a 403
+  });
+
+  it("unroutable provider 404s before any credential lookup, and key access still wins", async () => {
+    // A removed provider can still own connection rows. Without this rejection
+    // DefaultExecutor's `PROVIDERS[provider] || PROVIDERS.openai` fallback sends
+    // that row's stored cookie jar to api.openai.com — proven live 2026-10-26.
+    expect((await chat("gemini-web/gemini-3.1-pro", "sk-open")).status).toBe(404);
+    expect(mocks.getProviderCredentials).not.toHaveBeenCalled();
+    expect(mocks.handleChatCore).not.toHaveBeenCalled();
+
+    // Placement: the unroutable check sits after enforceKeyAccess, so a
+    // restricted key never learns whether the provider exists at all.
+    vi.clearAllMocks();
+    expect((await chat("gemini-web/gemini-3.1-pro", "sk-empty")).status).toBe(403);
+    expect(mocks.getProviderCredentials).not.toHaveBeenCalled();
   });
   it("restricted-to-combo key: combo 200, direct member and unlisted model 403 before any credential lookup", async () => {
     expect((await chat("Main", "sk-combo")).status).toBe(200);

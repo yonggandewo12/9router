@@ -1,5 +1,6 @@
 import { getProviderConnections, updateProviderConnection } from "@/lib/localDb.js";
 import { getExecutor } from "open-sse/index.js";
+import { isRoutableProvider } from "open-sse/handlers/chatCore.js";
 
 async function persistRefreshedCredentials(connection, newCredentials) {
   const updateData = {};
@@ -38,6 +39,13 @@ export async function POST(request) {
 
     if (!provider || !model || !body) {
       return Response.json({ success: false, error: "provider, model, and body required" }, { status: 400 });
+    }
+
+    // Same fallback as the chat lane: an id the executor layer cannot resolve
+    // lands in DefaultExecutor, whose config is PROVIDERS.openai — an orphan
+    // connection row here would POST its stored credential to api.openai.com.
+    if (!isRoutableProvider(provider)) {
+      return Response.json({ success: false, error: `Unknown or removed provider: ${provider}` }, { status: 400 });
     }
 
     const connections = await getProviderConnections({ provider });

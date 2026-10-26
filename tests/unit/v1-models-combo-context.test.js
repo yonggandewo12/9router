@@ -81,3 +81,36 @@ describe("/v1/models combo limits", () => {
     });
   });
 });
+
+// /v1/models used to read an empty serviceKinds as "LLM", so a parked provider
+// (perplexity-web) kept advertising a catalog the picker had already hidden.
+// Both now go through providerSupportsKind().
+describe("/v1/models provider kind rule", () => {
+  const listFor = async (providerId, kindFilter) => {
+    db.getProviderConnections.mockResolvedValue([{
+      id: 1,
+      provider: providerId,
+      isActive: true,
+      providerSpecificData: {},
+    }]);
+    db.getCombos.mockResolvedValue([]);
+    return (await buildModelsList(kindFilter)).map((model) => model.id);
+  };
+
+  it("lists a parked provider's catalog nowhere (serviceKinds: [])", async () => {
+    const ids = await listFor("perplexity-web", ["llm"]);
+    expect(ids.filter((id) => id.includes("pplx-"))).toEqual([]);
+  });
+
+  it("keeps a media-only provider out of the LLM list but in its own kind", async () => {
+    const llm = await listFor("muse-web", ["llm"]);
+    expect(llm.filter((id) => id.startsWith("muse-web/"))).toEqual([]);
+    const image = await listFor("muse-web", ["image"]);
+    expect(image).toContain("muse-web/muse-image");
+  });
+
+  it("still lists a normal web provider's chat models", async () => {
+    const ids = await listFor("deepseek-web", ["llm"]);
+    expect(ids).toContain("deepseek-web/deepseek-v4-pro");
+  });
+});

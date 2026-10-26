@@ -1,6 +1,6 @@
 // Tool-call emulation helpers for web-cookie executors.
 //
-// Web-cookie providers (Perplexity Web, Gemini Web, etc.) may have no native
+// A web-cookie provider may have no native
 // function calling. When the OpenAI request carries `tools`, the prompt-side
 // shim (`prepareToolMessages` in ../translator/webTools.js) injects a `<tool>`
 // contract; on the response side we parse `<tool>{...}</tool>` blocks back

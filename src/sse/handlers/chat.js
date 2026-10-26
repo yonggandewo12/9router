@@ -10,7 +10,7 @@ import {
 import { handleAntigravityQuotaError, clearAntigravityStrikes } from "../services/antigravityQuota.js";
 import { getSettings } from "@/lib/localDb";
 import { getModelInfo, getComboModels } from "../services/model.js";
-import { handleChatCore } from "open-sse/handlers/chatCore.js";
+import { handleChatCore, isRoutableProvider } from "open-sse/handlers/chatCore.js";
 import { DEFAULT_HEADROOM_URL } from "@/lib/headroom/detect";
 import { getTransform as getPxpipeTransform } from "@/lib/pxpipe/loader.js";
 import { appendPxpipeEvent } from "@/lib/pxpipe/events.js";
@@ -264,6 +264,14 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
   }
 
   const { provider, model } = modelInfo;
+
+  // A removed provider can still own connection rows. Reject it before the
+  // account loop: handleChatCore's 404 would otherwise be read as an account
+  // failure, briefly bench a healthy row and retry, surfacing as a 503.
+  if (!isRoutableProvider(provider)) {
+    log.warn("AUTH", `Unknown or removed provider: ${provider}`);
+    return errorResponse(HTTP_STATUS.NOT_FOUND, `Unknown or removed provider: ${provider}`);
+  }
 
   // Routing shown in the unified "▶" line (client model → provider/model)
 

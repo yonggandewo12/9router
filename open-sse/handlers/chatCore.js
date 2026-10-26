@@ -1,4 +1,4 @@
-import { detectFormat, getTargetFormat, resolveTransport } from "../services/provider.js";
+import { detectFormat, getTargetFormat, resolveTransport, isCompatibleProvider } from "../services/provider.js";
 import { translateRequest } from "../translator/index.js";
 import { applyThinking, extractThinking, stripThinkingSuffix } from "../translator/concerns/thinkingUnified.js";
 import { FORMATS } from "../translator/formats.js";
@@ -14,7 +14,7 @@ import { upstreamResponseHeaders } from "../utils/upstreamHeaders.js";
 import { HTTP_STATUS, TOKEN_SAVER_HEADER } from "../config/runtimeConfig.js";
 import { handleBypassRequest } from "../utils/bypassHandler.js";
 import { trackPendingRequest, saveRequestDetail } from "@/lib/usageDb.js";
-import { getExecutor } from "../executors/index.js";
+import { getExecutor, hasSpecializedExecutor } from "../executors/index.js";
 import { supportsGrokCliReasoningEffort } from "../config/grokCli.js";
 import { buildRequestDetail, extractRequestConfig, saveFailureUsage } from "./chatCore/requestDetail.js";
 import { handleForcedSSEToJson } from "./chatCore/sseToJsonHandler.js";
@@ -62,8 +62,23 @@ export function stripContinuityFields(body) {
   return body;
 }
 
+/**
+ * Whether the executor layer can actually route this provider id.
+ * Anything else lands in DefaultExecutor, which silently falls back to the
+ * OpenAI config (and thus to api.openai.com) — the failure mode a provider
+ * removed from the registry leaves behind when its connection rows survive.
+ */
+export function isRoutableProvider(provider) {
+  return Boolean(PROVIDERS[provider]) || hasSpecializedExecutor(provider) || isCompatibleProvider(provider);
+}
+
 export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, headroomEnabled, headroomUrl, headroomCompressUserMessages, headroomTimeoutMs, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, customPromptEnabled, customPrompt, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking, providerOverrides }) {
   const { provider, model } = modelInfo;
+  // Backstop for callers that reach chatCore without the handler's pre-loop check.
+  if (!isRoutableProvider(provider)) {
+    log?.warn?.("REQUEST", `Unknown provider: ${provider}`);
+    return createErrorResult(HTTP_STATUS.NOT_FOUND, `Unknown or removed provider: ${provider}`);
+  }
   const requestStartTime = Date.now();
   // Local-pipeline stopwatch. TTFT is measured from requestStartTime, so without
   // this split a slow provider and slow self-service look identical in the logs.
