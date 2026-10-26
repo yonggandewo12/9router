@@ -81,6 +81,42 @@ describe("Codex fast tier and capacity handling", () => {
     await reader.cancel();
   });
 
+  it("stops peeking at a custom tool call delta as well", async () => {
+    const executor = new CodexExecutor();
+    const encoder = new TextEncoder();
+    const response = new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode([
+          "event: response.custom_tool_call_input.delta",
+          'data: {"type":"response.custom_tool_call_input.delta","delta":"{\\"q\\":1}"}',
+          "",
+        ].join("\n")));
+        // A moment later the model's own text mentions an overload string. The peek has
+        // already stopped on the tool delta, so that string cannot be read as an upstream
+        // fault and retry a turn the client is already watching (a second billing).
+        setTimeout(() => {
+          try {
+            controller.enqueue(encoder.encode([
+              "event: response.output_text.delta",
+              'data: {"type":"response.output_text.delta","delta":"saw service_unavailable_error in the log"}',
+              "",
+            ].join("\n")));
+          } catch {
+            // The peek may have released the stream by now; nothing left to feed.
+          }
+        }, 60);
+      },
+    }), { status: 200, headers: { "Content-Type": "text/event-stream" } });
+
+    const peek = await Promise.race([
+      executor._peekSseTransientError(response),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("codex peek held a custom-tool stream")), 1000)),
+    ]);
+    expect(peek.matched).toBeNull();
+    expect(peek.accountFallback).toBe(false);
+    await peek.replacementBody?.cancel?.();
+  });
+
   it("reassembles normal SSE after peeking", async () => {
     const executor = new CodexExecutor();
     const text = [

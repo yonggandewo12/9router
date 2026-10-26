@@ -22,12 +22,16 @@ const CODEX_SSE_ACCOUNT_FALLBACK_PATTERNS = ["selected model is at capacity", "m
 // Any of these events means the upstream is producing model output, so the peek can stop
 // scanning for an error envelope. Reasoning counts: a thinking turn can stream for seconds
 // before its first visible text, and buffering that whole phase only delays the client.
+// The list is kept in step with emptyFailover.inspectResponsesEvent, which treats the same
+// deltas as payload: a custom-tool turn this list missed kept scanning past its own output,
+// where an error-shaped string inside the model's text would have retried a billed turn.
 // Consequence, on purpose: an overload/capacity envelope that arrives AFTER the model has
 // started generating is surfaced to the client in-band instead of being retried or rotated —
 // a retry at that point would double-bill a turn the client has already seen output for.
 const CODEX_SSE_USER_OUTPUT_EVENTS = [
   RESPONSES_EVENT.OUTPUT_TEXT_DELTA,
   RESPONSES_EVENT.FUNCTION_CALL_ARGUMENTS_DELTA,
+  RESPONSES_EVENT.CUSTOM_TOOL_CALL_INPUT_DELTA,
   RESPONSES_EVENT.REASONING_SUMMARY_TEXT_DELTA,
   RESPONSES_EVENT.REASONING_TEXT_DELTA,
 ];
