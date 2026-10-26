@@ -1,5 +1,6 @@
 import { FORMATS } from "../translator/formats.js";
 import { fallbackToolCallId } from "../translator/concerns/toolCall.js";
+import { extractReasoningText } from "../translator/concerns/reasoning.js";
 import { buildErrorBody } from "./error.js";
 import { SSE_DONE } from "./sseConstants.js";
 
@@ -43,11 +44,22 @@ export function hasValuableContent(chunk, format) {
   // OpenAI format
   if (format === FORMATS.OPENAI && chunk.choices?.[0]?.delta) {
     const delta = chunk.choices[0].delta;
-    return delta.content && delta.content !== "" ||
-           delta.reasoning_content && delta.reasoning_content !== "" ||
-           delta.tool_calls && delta.tool_calls.length > 0 ||
-           chunk.choices[0].finish_reason ||
-           delta.role;
+    if (delta.content && delta.content !== "") return true;
+    if (delta.reasoning_content && delta.reasoning_content !== "") return true;
+    if (delta.tool_calls && delta.tool_calls.length > 0) return true;
+    if (chunk.choices[0].finish_reason) return true;
+    if (delta.role) return true;
+    // Alias lanes stream thinking as `reasoning` / `reasoning_details[]`, legacy gateways
+    // as `function_call`, audio-output models as `delta.audio`. The old check recognised
+    // none of them, so those chunks were deleted on the way to the client — the model's own
+    // output, silently — and the turn looked empty to the combo, which re-billed it on the
+    // next member. Forward them; the client's provider chose that shape.
+    if (extractReasoningText(delta).trim()) return true;
+    const fc = delta.function_call;
+    if (fc && typeof fc === "object" && (fc.name || fc.arguments)) return true;
+    const audio = delta.audio;
+    if (audio && typeof audio === "object" && (audio.data || audio.transcript || audio.chunk)) return true;
+    return false;
   }
 
   // Claude format

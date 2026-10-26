@@ -14,16 +14,27 @@ import { dbg } from "../utils/debugLog.js";
 import { readWithTimeout } from "../utils/streamRead.js";
 import { resolveSessionId } from "../utils/sessionManager.js";
 import { stripCodexUnsupportedPatterns } from "../utils/codexToolSchema.js";
+import { RESPONSES_EVENT } from "../translator/schema/streamEvents.js";
 
 // SSE error patterns inside 200-OK bodies. Some retry same account first; capacity rotates accounts.
 const CODEX_SSE_RETRY_PATTERNS = ["server_is_overloaded", "service_unavailable_error"];
 const CODEX_SSE_ACCOUNT_FALLBACK_PATTERNS = ["selected model is at capacity", "model_at_capacity"];
-const CODEX_SSE_USER_OUTPUT_PATTERNS = [
-  "event: response.output_text.delta",
-  "event: response.function_call_arguments.delta",
-  '"type":"response.output_text.delta"',
-  '"type":"response.function_call_arguments.delta"',
+// Any of these events means the upstream is producing model output, so the peek can stop
+// scanning for an error envelope. Reasoning counts: a thinking turn can stream for seconds
+// before its first visible text, and buffering that whole phase only delays the client.
+// Consequence, on purpose: an overload/capacity envelope that arrives AFTER the model has
+// started generating is surfaced to the client in-band instead of being retried or rotated —
+// a retry at that point would double-bill a turn the client has already seen output for.
+const CODEX_SSE_USER_OUTPUT_EVENTS = [
+  RESPONSES_EVENT.OUTPUT_TEXT_DELTA,
+  RESPONSES_EVENT.FUNCTION_CALL_ARGUMENTS_DELTA,
+  RESPONSES_EVENT.REASONING_SUMMARY_TEXT_DELTA,
+  RESPONSES_EVENT.REASONING_TEXT_DELTA,
 ];
+const CODEX_SSE_USER_OUTPUT_PATTERNS = CODEX_SSE_USER_OUTPUT_EVENTS.flatMap((event) => [
+  `event: ${event}`,
+  `"type":"${event}"`,
+]);
 const CODEX_SSE_PEEK_BYTES = 256 * 1024;
 const CODEX_PEEK_STALL_MESSAGE = "codex sse peek stalled";
 const CODEX_MODEL_CAPACITY_MESSAGE = "Selected model is at capacity. Please try a different model.";

@@ -52,6 +52,35 @@ describe("Codex fast tier and capacity handling", () => {
     expect(peek.message).toBe("Selected model is at capacity. Please try a different model.");
   });
 
+  it("stops peeking at a reasoning delta instead of waiting for visible text", async () => {
+    const executor = new CodexExecutor();
+    const encoder = new TextEncoder();
+    const response = new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode([
+          "event: response.reasoning_summary_text.delta",
+          'data: {"type":"response.reasoning_summary_text.delta","delta":"thinking"}',
+          "",
+        ].join("\n")));
+        // ...and then keeps the connection open: no text, no close.
+      },
+    }), { status: 200, headers: { "Content-Type": "text/event-stream" } });
+
+    const peek = await Promise.race([
+      executor._peekSseTransientError(response),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("codex peek held a reasoning stream")), 1000)),
+    ]);
+    expect(peek.matched).toBeNull();
+    expect(peek.accountFallback).toBe(false);
+    // The frame the peek stopped on must still reach the client. Read one chunk then cancel:
+    // the stream above never closes, so draining it would hang the test.
+    expect(peek.replacementBody).toBeInstanceOf(ReadableStream);
+    const reader = peek.replacementBody.getReader();
+    const { value } = await reader.read();
+    expect(new TextDecoder().decode(value)).toContain("response.reasoning_summary_text.delta");
+    await reader.cancel();
+  });
+
   it("reassembles normal SSE after peeking", async () => {
     const executor = new CodexExecutor();
     const text = [

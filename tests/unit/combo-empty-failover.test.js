@@ -2,6 +2,7 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   deltaHasClientContent,
+  deltaHasModelActivity,
   inspectSSELine,
   scanSSEBuffer,
   isNoRetryFinish,
@@ -9,6 +10,7 @@ import {
   reconstructStream,
 } from "../../open-sse/services/emptyFailover.js";
 import { NO_RETRY_EMPTY_FINISH } from "../../open-sse/translator/schema/finishReasons.js";
+import { handleComboChat } from "../../open-sse/services/combo.js";
 
 // The combo cases below build real streaming responses; keep request-detail writes off disk.
 vi.mock("@/lib/usageDb.js", () => ({
@@ -49,7 +51,51 @@ describe("deltaHasClientContent", () => {
   it("non-empty string content IS content", () => expect(deltaHasClientContent({ content: "hi" })).toBe(true));
   it("content array IS content", () => expect(deltaHasClientContent({ content: [{ type: "text", text: "a" }] })).toBe(true));
   it("tool_calls IS content", () => expect(deltaHasClientContent({ tool_calls: [{ id: "1" }] })).toBe(true));
+  it("legacy function_call IS content; an empty one is not", () => {
+    expect(deltaHasClientContent({ function_call: { name: "f", arguments: "{" } })).toBe(true);
+    expect(deltaHasClientContent({ function_call: { name: "", arguments: "" } })).toBe(false);
+  });
   it("null/garbage is NOT content", () => { expect(deltaHasClientContent(null)).toBe(false); expect(deltaHasClientContent("x")).toBe(false); });
+});
+
+// Activity is the peek's commit signal: content OR reasoning. It is deliberately wider
+// than "content" so a thinking stream is not held until its first visible text.
+describe("deltaHasModelActivity", () => {
+  it("role-only / empty delta is NOT activity", () => {
+    expect(deltaHasModelActivity({ role: "assistant" })).toBe(false);
+    expect(deltaHasModelActivity({})).toBe(false);
+    expect(deltaHasModelActivity(null)).toBe(false);
+  });
+  it("reasoning_content / reasoning / reasoning_details ARE activity", () => {
+    expect(deltaHasModelActivity({ reasoning_content: "thinking" })).toBe(true);
+    expect(deltaHasModelActivity({ reasoning: "thinking" })).toBe(true);
+    expect(deltaHasModelActivity({ reasoning_details: [{ type: "reasoning.text", text: "t" }] })).toBe(true);
+  });
+  it("empty reasoning strings are NOT activity", () => {
+    expect(deltaHasModelActivity({ reasoning_content: "" })).toBe(false);
+    expect(deltaHasModelActivity({ reasoning: "" })).toBe(false);
+    expect(deltaHasModelActivity({ reasoning_details: [] })).toBe(false);
+  });
+  // Whitespace-only output is not a payload on either side of the peek: the JSON verdict
+  // (combo.js isZeroContentResponse) trims, so the stream must not commit on " " either.
+  it("blank-only payload is neither content nor activity", () => {
+    expect(deltaHasClientContent({ content: " " })).toBe(false);
+    expect(deltaHasClientContent({ content: "\n" })).toBe(false);
+    expect(deltaHasModelActivity({ content: " " })).toBe(false);
+    expect(deltaHasModelActivity({ reasoning_content: "   " })).toBe(false);
+    expect(deltaHasModelActivity({ reasoning_content: " real thought " })).toBe(true);
+  });
+  it("content and tool calls are activity too", () => {
+    expect(deltaHasModelActivity({ content: "hi" })).toBe(true);
+    expect(deltaHasModelActivity({ tool_calls: [{ id: "1" }] })).toBe(true);
+    expect(deltaHasModelActivity({ function_call: { name: "f", arguments: "{}" } })).toBe(true);
+  });
+  it("a streaming audio delta is activity only with a payload (structural handle is not)", () => {
+    expect(deltaHasModelActivity({ audio: { id: "a1", data: "AAAA" } })).toBe(true);
+    expect(deltaHasModelActivity({ audio: { transcript: "hi" } })).toBe(true);
+    expect(deltaHasModelActivity({ audio: {} })).toBe(false);
+    expect(deltaHasModelActivity({ audio: { id: "a1" } })).toBe(false);
+  });
 });
 
 describe("inspectSSELine", () => {
@@ -63,6 +109,11 @@ describe("inspectSSELine", () => {
     expect(r.content).toBe(false); expect(r.finishReason).toBe("stop");
   });
   it("content frame: content true", () => expect(inspectSSELine(CONTENT.trim()).content).toBe(true));
+  it("reasoning frame: activity true, content false", () => {
+    const r = inspectSSELine(REASONING.trim());
+    expect(r.content).toBe(false);
+    expect(r.activity).toBe(true);
+  });
   it("non-data lines are inert", () => {
     expect(inspectSSELine("event: ping").content).toBe(false);
     expect(inspectSSELine(": keep-alive").content).toBe(false);
@@ -72,11 +123,16 @@ describe("inspectSSELine", () => {
 describe("scanSSEBuffer latches", () => {
   it("stays empty across role+stop", () => {
     const st = scanSSEBuffer(ROLE + EMPTY_STOP);
-    expect(st.sawContent).toBe(false); expect(st.finishReason).toBe("stop");
+    expect(st.sawActivity).toBe(false); expect(st.finishReason).toBe("stop");
   });
-  it("latches content once seen", () => {
+  it("latches once content is seen", () => {
     const st = scanSSEBuffer(ROLE + CONTENT + EMPTY_STOP);
-    expect(st.sawContent).toBe(true);
+    expect(st.sawActivity).toBe(true);
+  });
+  it("latches once reasoning is seen (activity, but still no usable content)", () => {
+    const st = scanSSEBuffer(ROLE + REASONING);
+    expect(st.sawActivity).toBe(true);
+    expect(st.sawContent).toBe(false);
   });
 });
 
@@ -99,9 +155,45 @@ describe("peekStreamForContent", () => {
     expect(p.outcome).toBe("content");
   });
 
-  it("reasoning-only then abort → still empty (reasoning is not content)", async () => {
+  it("reasoning-only then abort → committed on activity (reasoning is not client content but IS model output)", async () => {
     const p = await peekStreamForContent(sseStream([ROLE, REASONING, EMPTY_STOP, DONE]));
+    expect(p.outcome).toBe("content");
+    // The head still replays byte-for-byte, so the client receives the reasoning frame.
+    const rebuilt = reconstructStream(p.head, p.reader);
+    const out = await (async () => { const rd = rebuilt.getReader(); let s = ""; while (true) { const { done, value } = await rd.read(); if (done) break; s += dec.decode(value); } return s; })();
+    expect(out).toContain('"reasoning_content":"thinking..."');
+  });
+
+  // The reason activity commits: waiting for client text adds the whole thinking phase to
+  // TTFT (and this test would otherwise sit here until the 45s deadline).
+  it("commits on the reasoning frame instead of waiting for text", async () => {
+    const stream = new ReadableStream({
+      start(c) {
+        c.enqueue(enc.encode(ROLE + REASONING));
+        // ...then the upstream goes quiet: no further frame ever arrives.
+      },
+    });
+    const p = await Promise.race([
+      peekStreamForContent(stream),
+      new Promise((_, rej) => setTimeout(() => rej(new Error("peek held a reasoning stream")), 1000)),
+    ]);
+    expect(p.outcome).toBe("content");
+    expect(dec.decode(p.head[p.head.length - 1])).toContain("thinking...");
+    await p.reader.cancel();
+  });
+
+  // The peek's error branch had no coverage: a stream that dies before any payload must
+  // still be judged empty (so the combo moves to the next candidate) and the replay handed
+  // back to the caller must surface the same failure rather than look like a clean end.
+  it("a stream that errors before any payload → empty, error surfaced on replay", async () => {
+    const stream = new ReadableStream({
+      pull() { return Promise.reject(new Error("network reset")); },
+    });
+    const p = await peekStreamForContent(stream);
     expect(p.outcome).toBe("empty");
+    expect(p.error?.message).toBe("network reset");
+    await expect(new Response(reconstructStream(p.head, p.reader, p.pendingRead)).text())
+      .rejects.toThrow("network reset");
   });
 
   it("content-filter empty → empty with content_filter reason (caller won't retry)", async () => {
@@ -147,17 +239,26 @@ describe("partial lines", () => {
     const warn = vi.spyOn(console, "log").mockImplementation(() => {});
     const half = CONTENT.slice(0, 30); // a data: line cut mid-JSON
     const st = scanSSEBuffer(ROLE + half);
-    expect(st.sawContent).toBe(false);
+    expect(st.sawActivity).toBe(false);
     expect(st.pending).toBe(half);
     expect(warn).not.toHaveBeenCalled();
     scanSSEBuffer(st.pending + CONTENT.slice(30), st); // completed by the next chunk
-    expect(st.sawContent).toBe(true);
+    expect(st.sawActivity).toBe(true);
     warn.mockRestore();
   });
 
   it("detects content on a final line that has no trailing newline", async () => {
     const p = await peekStreamForContent(sseStream([ROLE, CONTENT.trim()]));
     expect(p.outcome).toBe("content");
+  });
+
+  // The done branch decides on activity too: a reasoning line that arrives as the last
+  // fragment (no trailing newline) has to commit, or a thinking turn that ends exactly
+  // there is billed as an empty generation and replayed on the next combo member.
+  it("detects reasoning on a final line with no trailing newline", async () => {
+    const p = await peekStreamForContent(sseStream([ROLE, REASONING.trim()]));
+    expect(p.outcome).toBe("content");
+    expect(p.finishReason).toBe(null);
   });
 });
 
@@ -192,8 +293,16 @@ describe("inspectSSELine — Anthropic Messages client format", () => {
     expect(inspectSSELine(ev({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "hi" } })).content).toBe(true);
     expect(inspectSSELine(ev({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "" } })).content).toBe(false);
   });
-  it("thinking_delta is NOT content (as reasoning_content is not)", () => {
-    expect(inspectSSELine(ev({ type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "hmm" } })).content).toBe(false);
+  it("thinking_delta is NOT content (as reasoning_content is not), but IS activity", () => {
+    const r = inspectSSELine(ev({ type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "hmm" } }));
+    expect(r.content).toBe(false);
+    expect(r.activity).toBe(true);
+  });
+  it("a thinking block start commits only when it carries text; an empty one is structural", () => {
+    expect(inspectSSELine(ev({ type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } })).activity).toBe(false);
+    expect(inspectSSELine(ev({ type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "hmm" } })).activity).toBe(true);
+    expect(inspectSSELine(ev({ type: "content_block_start", index: 0, content_block: { type: "redacted_thinking", data: "Zk" } })).activity).toBe(true);
+    expect(inspectSSELine(ev({ type: "content_block_start", index: 0, content_block: { type: "redacted_thinking", data: "" } })).activity).toBe(false);
   });
   it("a tool_use block start IS content; input_json_delta with JSON IS content", () => {
     expect(inspectSSELine(ev({ type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "t", name: "f", input: {} } })).content).toBe(true);
@@ -237,15 +346,34 @@ describe("inspectSSELine — OpenAI Responses client format", () => {
     expect(inspectSSELine(ev({ type: "response.function_call_arguments.delta", item_id: "fc_call_1", delta: "" })).content).toBe(false);
     expect(inspectSSELine(ev({ type: "response.custom_tool_call_input.delta", item_id: "ctc_call_2", delta: "*** Begin Patch" })).content).toBe(true);
   });
-  it("reasoning items and reasoning / reasoning-summary deltas are NOT content", () => {
+  it("reasoning payload frames are NOT content but ARE activity", () => {
     for (const o of [
-      { type: "response.output_item.added", output_index: 0, item: { id: "rs_1", type: "reasoning", summary: [] } },
-      { type: "response.reasoning_summary_part.added", item_id: "rs_1", summary_index: 0, part: { type: "summary_text", text: "" } },
       { type: "response.reasoning_summary_text.delta", item_id: "rs_1", summary_index: 0, delta: "thinking" },
       { type: "response.reasoning_summary_text.done", item_id: "rs_1", summary_index: 0, text: "thinking" },
       { type: "response.reasoning_text.delta", item_id: "rs_1", delta: "thinking" },
-      { type: "response.output_item.done", output_index: 0, item: { id: "rs_1", type: "reasoning", summary: [{ type: "summary_text", text: "thinking" }] } },
-    ]) expect(inspectSSELine(ev(o)).content).toBe(false);
+    ]) {
+      expect(inspectSSELine(ev(o)).content).toBe(false);
+      expect(inspectSSELine(ev(o)).activity).toBe(true);
+    }
+  });
+  it("a reasoning item counts as activity only when the wire gave it a payload", () => {
+    const withSummary = { type: "response.output_item.done", output_index: 0, item: { id: "rs_1", type: "reasoning", summary: [{ type: "summary_text", text: "thinking" }] } };
+    const withEncrypted = { type: "response.output_item.added", output_index: 0, item: { id: "rs_1", type: "reasoning", encrypted_content: "Ekg..." } };
+    expect(inspectSSELine(ev(withSummary)).content).toBe(false);
+    expect(inspectSSELine(ev(withSummary)).activity).toBe(true);
+    expect(inspectSSELine(ev(withEncrypted)).activity).toBe(true);
+    // blank payload on the item is still nothing
+    expect(inspectSSELine(ev({ ...withEncrypted, item: { id: "rs_1", type: "reasoning", encrypted_content: "  " } })).activity).toBe(false);
+  });
+  it("structural item / part announcements with no payload are neither content nor activity", () => {
+    for (const o of [
+      { type: "response.output_item.added", output_index: 0, item: { id: "rs_1", type: "reasoning", summary: [] } },
+      { type: "response.reasoning_summary_part.added", item_id: "rs_1", summary_index: 0, part: { type: "summary_text", text: "" } },
+      { type: "response.reasoning_summary_text.delta", item_id: "rs_1", summary_index: 0, delta: "" },
+    ]) {
+      expect(inspectSSELine(ev(o)).content).toBe(false);
+      expect(inspectSSELine(ev(o)).activity).toBe(false);
+    }
   });
   it("response.created, response.in_progress, a message item / empty content part are NOT content", () => {
     for (const o of [
@@ -344,10 +472,12 @@ describe("combo fall-through per client format (real combo.js + streaming pipeli
         const { tried } = await combo([[ROLE, TOOL, DONE], [ROLE, C("from-m1"), STOP, DONE]], fmt);
         expect(tried).toEqual(["openai/m0"]);
       });
-      it("reasoning-only first member falls through", async () => {
-        const { out, tried } = await combo([[ROLE, REASONING, STOP, DONE], [ROLE, C("from-m1"), STOP, DONE]], fmt);
-        expect(tried).toEqual(["openai/m0", "openai/m1"]);
-        expect(out).toContain("from-m1");
+      it("reasoning-only first member is committed (model output, not an empty stream)", async () => {
+        // Trade-off documented on deltaHasModelActivity: committing on the first token is
+        // what keeps the peek from adding the thinking phase to client TTFT. A think-then-
+        // abort no longer fails over; a stream that never emits a token still does.
+        const { tried } = await combo([[ROLE, REASONING, STOP, DONE], [ROLE, C("from-m1"), STOP, DONE]], fmt);
+        expect(tried).toEqual(["openai/m0"]);
       });
     });
   }
@@ -384,14 +514,143 @@ describe("combo fall-through per client format (real combo.js + streaming pipeli
       expect(out).toContain("from-m1");
       expect(out).not.toContain("response.failed");
     });
-    it("a function_call item counts as content; reasoning-only does not", async () => {
+    it("a function_call item counts as content; reasoning-only is committed as activity", async () => {
       expect((await combo([[CREATED, FC, COMPLETED], [CREATED, TEXT("from-m1"), COMPLETED]], RESP)).tried).toEqual(["openai/m0"]);
-      expect((await combo([[CREATED, REASON, COMPLETED], [CREATED, TEXT("from-m1"), COMPLETED]], RESP)).tried).toEqual(["openai/m0", "openai/m1"]);
+      expect((await combo([[CREATED, REASON, COMPLETED], [CREATED, TEXT("from-m1"), COMPLETED]], RESP)).tried).toEqual(["openai/m0"]);
     });
     it("response.incomplete (content_filter) is NOT retried", async () => {
       const { out, tried } = await combo([[CREATED, FILTERED], [CREATED, TEXT("from-m1"), COMPLETED]], RESP);
       expect(tried).toEqual(["openai/m0"]);
       expect(out).toContain('"reason":"content_filter"');
     });
+  });
+});
+
+// TTFT regression: the content peek used to hold the client's stream for the whole
+// reasoning phase (until the first visible text or the 45s deadline). It must now
+// release as soon as the model emits anything, and not run at all when no failover
+// target is left.
+describe("combo peek does not add thinking latency", () => {
+  const silent = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {}, line: () => {}, errorLine: () => {} };
+  const sseResponse = (frames) => new Response(new ReadableStream({
+    start(c) {
+      for (const f of frames) c.enqueue(enc.encode(f));
+      // deliberately never closed: an upstream that started generating and then stalled
+    },
+  }), { status: 200, headers: { "content-type": "text/event-stream" } });
+
+  it("commits a reasoning-first stream immediately instead of waiting for text", async () => {
+    const res = await Promise.race([
+      handleComboChat({
+        body: { messages: [{ role: "user", content: "hi" }] },
+        models: ["openai/m0", "openai/m1"],
+        handleSingleModel: async () => sseResponse([ROLE, REASONING]),
+        log: silent, comboName: "peek-latency", comboStrategy: "fallback",
+      }),
+      new Promise((_, rej) => setTimeout(() => rej(new Error("combo held a reasoning stream")), 1000)),
+    ]);
+    expect(res.status).toBe(200);
+    const reader = res.body.getReader();
+    let head = "";
+    while (!head.includes('"reasoning_content":"thinking..."')) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      head += dec.decode(value);
+    }
+    expect(head).toContain('"reasoning_content":"thinking..."');
+    await reader.cancel();
+  });
+
+  const sseResponseClosed = (frames) => new Response(new ReadableStream({
+    start(c) { for (const f of frames) c.enqueue(enc.encode(f)); c.close(); },
+  }), { status: 200, headers: { "content-type": "text/event-stream" } });
+  const mkLog = () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(), line: vi.fn(), errorLine: vi.fn() });
+
+  async function lastSeat(frames, log = mkLog()) {
+    const raced = await Promise.race([
+      handleComboChat({
+        body: { messages: [{ role: "user", content: "hi" }] },
+        models: ["openai/only"],
+        handleSingleModel: async () => sseResponseClosed(frames),
+        log, comboName: `last-${Math.random()}`, comboStrategy: "fallback",
+        emptyTurnNotice: true,
+      }),
+      new Promise((_, rej) => setTimeout(() => rej(new Error("last candidate was peeked")), 500)),
+    ]);
+    return { out: await raced.text(), log };
+  }
+
+  it("returns the last candidate immediately (no failover target left to decide for)", async () => {
+    const stream = new ReadableStream({
+      start(c) { c.enqueue(enc.encode(ROLE)); /* never closed: the old peek would park 45s here */ },
+    });
+    const res = await Promise.race([
+      handleComboChat({
+        body: { messages: [{ role: "user", content: "hi" }] },
+        models: ["openai/only"],
+        handleSingleModel: async () => new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } }),
+        log: mkLog(), comboName: "peek-last", comboStrategy: "fallback",
+        emptyTurnNotice: true,
+      }),
+      new Promise((_, rej) => setTimeout(() => rej(new Error("last candidate was peeked")), 500)),
+    ]);
+    expect(res.status).toBe(200);
+    const reader = res.body.getReader();
+    expect(dec.decode((await reader.read()).value)).toContain('"role":"assistant"');
+    await reader.cancel();
+  });
+
+  // Media/search lanes share handleComboChat but not the chat stream shape (codex image
+  // models stream their own SSE event types). They opt out, so no tap is attached at all.
+  it("a lane without the chat opt-in gets no tap and no empty-turn warning", async () => {
+    const frames = [ROLE, EMPTY_STOP, DONE];
+    const log = mkLog();
+    const res = await handleComboChat({
+      body: { prompt: "a cat" },
+      models: ["openai/only"],
+      handleSingleModel: async () => sseResponseClosed(frames),
+      log, comboName: "media-lane", comboStrategy: "fallback",
+    });
+    expect(await res.text()).toBe(frames.join(""));
+    expect(log.warn).not.toHaveBeenCalled();
+  });
+
+  it("an answered last seat streams byte-identically and logs no empty-turn warning", async () => {
+    const frames = [ROLE, CONTENT, EMPTY_STOP, DONE];
+    const { out, log } = await lastSeat(frames);
+    expect(out).toBe(frames.join(""));
+    expect(log.warn).not.toHaveBeenCalled();
+  });
+
+  // The warn the removed last-seat peek used to print, kept alive by a byte-transparent tap.
+  it("a last seat that reasoned but never answered still warns, without holding the stream", async () => {
+    const frames = [ROLE, REASONING, EMPTY_STOP, DONE];
+    const { out, log } = await lastSeat(frames);
+    expect(out).toBe(frames.join(""));
+    const warnings = log.warn.mock.calls.map((c) => c.slice(1).join(" "));
+    expect(warnings.some((w) => /reasoning but never answered/.test(w))).toBe(true);
+  });
+
+  it("a last seat that produced no payload at all warns as empty", async () => {
+    const frames = [ROLE, EMPTY_STOP, DONE];
+    const { out, log } = await lastSeat(frames);
+    expect(out).toBe(frames.join(""));
+    const warnings = log.warn.mock.calls.map((c) => c.slice(1).join(" "));
+    expect(warnings.some((w) => /returned empty \(stop\)/.test(w))).toBe(true);
+  });
+
+  it("a non-SSE last seat is returned untouched (no tap, no warn)", async () => {
+    const json = new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), {
+      status: 200, headers: { "content-type": "application/json" },
+    });
+    const log = mkLog();
+    const res = await handleComboChat({
+      body: { messages: [{ role: "user", content: "hi" }] },
+      models: ["openai/only"],
+      handleSingleModel: async () => json,
+      log, comboName: "last-json", comboStrategy: "fallback",
+    });
+    expect(res).toBe(json);
+    expect(log.warn).not.toHaveBeenCalled();
   });
 });
