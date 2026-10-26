@@ -1,3 +1,21 @@
+# v0.6.19 (2026-10-26)
+
+Gemini Web is gone, and a provider id that no longer exists can no longer carry a stored credential to OpenAI.
+
+## Fixes
+
+- **A removed provider could still ship its credential to `api.openai.com`.** `DefaultExecutor`'s constructor is `PROVIDERS[provider] || PROVIDERS.openai`, and nothing on the request path checked that the id still exists — so a leftover connection row naming a deleted provider was enough to send that row's stored cookie jar out as `Authorization: Bearer <jar>`. Reproduced live before the fix by re-inserting one `gemini-web` row: `/v1/chat/completions` dialed api.openai.com:443, retried for 54 s, answered 503, and left a `FAILED 502` row in the usage ledger. `isRoutableProvider()` now gates on what the executor layer can actually resolve (registry transports, specialized executors including aliases that live only there such as `brx`/`veo-free`, and OpenAI/Anthropic-compatible nodes), and it runs in `chat.js` **before** the account loop: the `chatCore` 404 alone was read as an account failure, which benched a healthy row for two minutes, retried, and surfaced 503 instead of 404. The same check closes `/api/translator/send`, which took its provider straight from the request body. A restricted key is still answered 403 first, so nothing new is disclosed about whether a provider exists.
+- **Unroutable providers fail fast instead of half-working.** Registry audit: of 142 ids, the 40 with neither a transport nor an executor are media/search/TTS/embedding and none declares `llm`, so no working chat provider is affected. Chat requests naming `sdwebui`, `comfyui` or `huggingface` used to be forwarded to OpenAI with their stored key; they now 404 with `model_not_found`.
+- **The model picker listed chat models for providers that do not do chat.** `ModelSelectModal` ignored `serviceKinds` whenever no kind filter was set — that is how three `gemini-web` chat models reached "add models to combo", while `muse-web`/`grok-web` (image/video only) and the parked `perplexity-web` were listed too. The rule is `providerSupportsKind()` now: a provider that does not declare the listed kind contributes no static catalog, while the aliases and custom models you added under it stay pickable, because hiding those would strand an existing mapping.
+- **`/v1/models` carried a second copy of that rule**, which read an empty `serviceKinds` as "LLM", so a parked provider kept advertising a catalog the UI had already hidden. Both lists go through the shared helper now.
+
+## Notes
+
+- **Gemini Web removed end to end**: registry entry, `GeminiWebExecutor` and the DOM helpers it mirrored (modeSelection / domCapture / capabilities / imageGen / browserLease), the image adapter, the cookie normalizer, the session-identity probe, the browser-login config and its dashboard entry, the icon alias, plus the provider/alias baselines and two obsolete golden snapshots. Deleting only its models would not have stopped a client that still names them from launching Chromium. If you had it configured, delete that connection — the credential is useless now, and the request path rejects the id either way.
+- **Claude Code's local probes (Warmup, topic title) now 404 for an unroutable provider** instead of getting the synthetic 200 they used to, so a dead model target shows up at session start rather than on the first real turn. Requests rejected this way also stop writing `FAILED` rows into the usage ledger, since nothing upstream is ever called.
+- Existing `gemini-web` rows in Usage history are kept — that ledger is the record of what was really spent — and show under the raw provider id.
+- **Test suite**: 445 files / 4610 passing / 0 failing. New coverage for the guard semantics, the registry routing invariant checked against the real executor map, the pre-loop placement, and the `/v1/models` kind rule. Each was mutation-checked: removing either guard, or restoring the old rule, fails exactly those cases. The production `next build` gate (207 routes) was run before tagging.
+
 # v0.6.18 (2026-10-25)
 
 ChatGPT Web becomes a chat provider, and the web-cookie lanes learn to route through a proxy.
