@@ -278,7 +278,11 @@ function assistantTextLength(responseBody) {
 /**
  * Handle non-streaming response from provider.
  */
-export async function handleNonStreamingResponse({ providerResponse, provider, model, sourceFormat, targetFormat, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, customToolNames, trackDone, pxpipe, perf, reqTag, log }) {
+// Two accounting sinks meet here, and both are load-bearing: `saveUsageStats` /
+// `saveFailureUsage` write the usageHistory row the Usage panel and cost totals read
+// (this fork's convention), while `appendLog` is upstream's per-request log line, passed
+// in by chatCore. Optional so a caller without a log sink still bills correctly.
+export async function handleNonStreamingResponse({ providerResponse, provider, model, sourceFormat, targetFormat, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, customToolNames, trackDone, appendLog = null, pxpipe, perf, reqTag, log }) {
   trackDone();
   const contentType = providerResponse.headers.get("content-type") || "";
   let responseBody;
@@ -288,6 +292,7 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
     const parsed = parseSSEToOpenAIResponse(sseText, model);
     if (!parsed) {
       saveFailureUsage({ provider, model, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, status: HTTP_STATUS.BAD_GATEWAY });
+      appendLog?.({ status: `FAILED ${HTTP_STATUS.BAD_GATEWAY}` });
       return createErrorResult(HTTP_STATUS.BAD_GATEWAY, "Invalid SSE response for non-streaming request");
     }
     // A provider can fail mid-stream after committing HTTP 200 (qoder queue
@@ -303,6 +308,7 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
         ? upstreamStatus
         : HTTP_STATUS.BAD_GATEWAY;
       saveFailureUsage({ provider, model, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, status });
+      appendLog?.({ status: `FAILED ${status}` });
       return createErrorResult(status, parsed.error.message || "Upstream SSE stream failed");
     }
     responseBody = parsed;
@@ -311,6 +317,7 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
       responseBody = await providerResponse.json();
     } catch (err) {
       saveFailureUsage({ provider, model, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, status: HTTP_STATUS.BAD_GATEWAY });
+      appendLog?.({ status: `FAILED ${HTTP_STATUS.BAD_GATEWAY}` });
       console.error(`[ChatCore] Failed to parse JSON from ${provider}:`, err.message);
       return createErrorResult(HTTP_STATUS.BAD_GATEWAY, `Invalid JSON response from ${provider}`);
     }
@@ -345,6 +352,7 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
     ? reportedUsage
     : estimateUsage(body, assistantTextLength(responseBody), clientUsageFormat);
   saveUsageStats({ provider, model, tokens: usage, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, silent: true });
+  appendLog?.({ tokens: usage, status: "200 OK" });
   if (log?.line) log.line(reqTag, "📊", formatDoneLine({ usage, latency: { total: Date.now() - requestStartTime, ...(perf || {}) } }));
 
   const translatedResponse = needsTranslation(targetFormat, sourceFormat)

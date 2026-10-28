@@ -41,7 +41,9 @@ const SPECIALIZED = new Set([
 // X-Msh-Version is the app version, so it changes on every release bump.
 // X-Mavis-Session-Id is a fresh random UUID per request, X-Mavis-Timezone-Offset
 // is the host's UTC offset — both miniMax Code, both unstable on any machine.
-const VOLATILE_HEADER_NAME = /^(x-platform(-version)?|x-msh-device-(id|model|name)|x-msh-version|x-mavis-(session-id|timezone-offset))$/i;
+// codebuddy's plugin ids are per-request UUIDs (upstream v0.5.112): the golden file
+// must lock their presence, never the value, or every second run fails.
+const VOLATILE_HEADER_NAME = /^(x-platform(-version)?|x-msh-device-(id|model|name)|x-msh-version|x-mavis-(session-id|timezone-offset)|x-(conversation-(id|message-id|request-id)|request-id))$/i;
 function sanitize(headers) {
   const out = {};
   for (const [k, v] of Object.entries(headers)) {
