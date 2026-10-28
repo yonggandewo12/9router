@@ -37,7 +37,12 @@ function expectFailed(ctx, result, status) {
   expect(ctx.reqLogger.logConvertedResponse).not.toHaveBeenCalled();
   expect(ctx.log.line).not.toHaveBeenCalled();
   expect(saveRequestDetail).not.toHaveBeenCalled();
-  expect(saveRequestUsage).not.toHaveBeenCalled();
+  // Fork policy, deliberately opposite to upstream's: a failed turn still gets
+  // exactly one usageHistory row (`status: "FAILED <code>"`), because the Usage
+  // panel and the recent-logs line read that table and an invisible failure is
+  // the bug this fork fixed. What must not happen is a success row or a second write.
+  expect(saveRequestUsage).toHaveBeenCalledOnce();
+  expect(saveRequestUsage.mock.calls[0][0]).toMatchObject({ status: `FAILED ${status}` });
 }
 
 describe("non-streaming SSE errors", () => {
