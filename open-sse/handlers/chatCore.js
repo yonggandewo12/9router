@@ -164,7 +164,11 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
 
   const clientRequestedStreaming = body.stream === true || sourceFormat === FORMATS.ANTIGRAVITY || sourceFormat === FORMATS.GEMINI || sourceFormat === FORMATS.GEMINI_CLI;
   const providerRequiresStreaming = PROVIDERS[provider]?.forceStream === true;
-  let stream = providerRequiresStreaming ? true : (body.stream !== false);
+  // An omitted `stream` means non-streaming, and a same-format lane forwards the
+  // client body untouched — so treating the omission as streaming picked the SSE
+  // response handler for a provider that was never asked to stream, and the client
+  // got 200 + text/event-stream wrapping a bare JSON body plus `data: [DONE]`.
+  let stream = providerRequiresStreaming ? true : clientRequestedStreaming;
 
   // Image generation models require non-streaming (Google v1internal:generateContent)
   const modelType = getModelType(alias, model);
