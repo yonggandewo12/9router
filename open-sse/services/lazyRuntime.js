@@ -143,7 +143,16 @@ async function load(pkg) {
   }
   const dir = getRuntimeDir();
   await installIntoRuntime(pkg, version);
-  const installed = resolvePackageEntry(dir, pkg);
+  let installed = resolvePackageEntry(dir, pkg);
+  if (!installed) {
+    // npm exits 0 on a partially extracted install, so "no entry file" right after
+    // a successful install usually means a torn node_modules, not a bad package
+    // (upstream's fix for the same symptom). Wipe just this package and retry once;
+    // the error below is the honest fallback if it is still unresolvable.
+    fs.rmSync(path.join(dir, "node_modules", pkg), { recursive: true, force: true });
+    await installIntoRuntime(pkg, version);
+    installed = resolvePackageEntry(dir, pkg);
+  }
   if (!installed) {
     throw new Error(
       `${pkg}@${version} installed into "${dir}" but no entry file could be resolved — ` +
