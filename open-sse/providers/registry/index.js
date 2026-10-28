@@ -148,6 +148,10 @@ import p146 from "./muse-web.js";
 import p147 from "./chatgpt-web.js";
 import p148 from "./veoaifree-web.js";
 import p149 from "./uc-web.js";
+// Upstream's two new providers, in the next free slots. gemini-web is not
+// imported: this fork removed the provider (its chat lane never worked reliably).
+import p150 from "./runcrate.js";
+import p151 from "./nace.js";
 export default [
   p0,
   p1,
@@ -294,4 +298,6 @@ export default [
   p147,
   p148,
   p149,
+  p150,
+  p151,
 ];

@@ -96,6 +96,11 @@ describe("CodeBuddy Intl block backoff (#5024)", () => {
     expect(result.status).toBe(400);
     expect(await result.json()).toEqual({ error: { message: "first message is not system prompt" } });
     expect(dispatch).toHaveBeenCalledTimes(2);
+    // No member served it, so the first request-scoped failure is handed back —
+    // the caller still sees the member that named the real cause (asserted through
+    // its status and body above: the combo returns the member's own response, not
+    // the object the mock built, since each attempt is a clone).
+    // Crucially, no account cooldown is persisted for a client-side fault.
     expect(db.updateProviderConnection).not.toHaveBeenCalled();
   });
 });

@@ -110,7 +110,7 @@ export class BaseExecutor {
     return { status: response.status, message: bodyText || `HTTP ${response.status}` };
   }
 
-  async execute({ model, body, stream, credentials, signal, log, proxyOptions = null, providerOverrides = null, hookCtx = null }) {
+  async execute({ model, body, stream, credentials, signal, log, proxyOptions = null, providerOverrides = null, hookCtx = null, directFetch = null }) {
     // One scratch object per execute() call, handed to buildUrl/transformRequest/
     // buildHeaders. Executors are process-wide singletons, so anything derived from a
     // request body has to live here; on `this` it is read by whichever request happens
@@ -163,7 +163,10 @@ export class BaseExecutor {
           method: "POST",
           headers,
           body: bodyStr,
-          signal: guard.signal
+          signal: guard.signal,
+          // Protocol adapters that need their own transport (opencode's TLS
+          // fingerprint) override the direct path; proxies still take priority.
+          ...(directFetch ? { directFetch } : {}),
         }, proxyOptions);
         // Known gap: the bound ends at headers. A streaming upstream that answers
         // 200 with SSE headers and then sends nothing holds this request, its

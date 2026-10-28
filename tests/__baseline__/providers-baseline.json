@@ -206,7 +206,10 @@
     "auth": {
       "combined": true,
       "header": "Authorization",
-      "scheme": "bearer"
+      "scheme": "bearer",
+      "hooks": [
+        "codebuddyHeaders"
+      ]
     },
     "usage": {
       "url": "https://copilot.tencent.com/v2/billing/meter/get-user-resource"
@@ -242,8 +245,11 @@
     "format": "commandcode",
     "forceStream": true,
     "headers": {
-      "x-command-code-version": "0.25.7",
-      "x-cli-environment": "cli"
+      "User-Agent": "cli",
+      "x-command-code-version": "1.88.0",
+      "x-cli-environment": "production",
+      "x-cli-surface": "cli",
+      "x-taste-learning": "false"
     }
   },
   "cursor": {
@@ -1029,7 +1035,10 @@
     "auth": {
       "combined": true,
       "header": "Authorization",
-      "scheme": "bearer"
+      "scheme": "bearer",
+      "hooks": [
+        "codebuddyHeaders"
+      ]
     },
     "usage": {
       "url": "https://www.codebuddy.ai/v2/billing/meter/get-user-resource"
@@ -1306,5 +1315,10 @@
     "baseUrl": "https://internal.chatuncensored.ai",
     "format": "openai",
     "authType": "cookie"
+  },
+  "runcrate": {
+    "baseUrl": "https://api.runcrate.ai/v1/chat/completions",
+    "validateUrl": "https://www.runcrate.ai/api/v1/billing/balance",
+    "format": "openai"
   }
 }
