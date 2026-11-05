@@ -89,7 +89,7 @@ export default function ApiKeySelect({ value, onChange, apiKeys = [], cloudEnabl
           {options.map((o) => (
             <option key={o.value} value={o.value}>{o.label}</option>
           ))}
-          {canSave && <option value={SAVE_VALUE}>+ Save current as...</option>}
+          {canSave && <option value={SAVE_VALUE} suppressHydrationWarning>+ Save current as...</option>}
         </select>
         {isSaved && (
           <button type="button" onClick={handleDeleteSaved} className="p-1 text-text-muted hover:text-red-500 rounded transition-colors shrink-0" title="Delete saved key">

@@ -154,11 +154,15 @@ export default function RequestDetailsTab() {
     }
   }, [pagination.page, pagination.pageSize, filters]);
 
+  // Initial data load. The rule flags the call because its callback calls
+  // setState, but those land after the await — they are not render-time writes.
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchProviders();
   }, [fetchProviders]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchDetails();
   }, [fetchDetails]);
 
@@ -196,7 +200,7 @@ export default function RequestDetailsTab() {
               )}
               style={{ colorScheme: 'auto' }}
             >
-              <option value="">All Providers</option>
+              <option value="" suppressHydrationWarning>All Providers</option>
               {providers.map((provider) => (
                 <option key={provider.id} value={provider.id}>
                   {provider.name}

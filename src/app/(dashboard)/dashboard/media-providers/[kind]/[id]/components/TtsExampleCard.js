@@ -104,6 +104,9 @@ export function TtsExampleCard({ providerId }) {
   const [connectionCount, setConnectionCount] = useState(0);
 
   useEffect(() => {
+    // Browser-only values (window.origin, /api/keys) can't be lazy initializers:
+    // the server render has no window, so they are read after mount.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setLocalEndpoint(window.location.origin);
     fetch("/api/keys")
       .then((r) => r.json())
@@ -171,6 +174,7 @@ export function TtsExampleCard({ providerId }) {
   useEffect(() => {
     if (!config.voicesPerModel || !selectedModel) return;
     const voices = getTtsVoicesForModel(providerId, selectedModel) || [];
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- voices are derived from external model data on model switch
     setCountryVoices(voices);
     if (voices.length) {
       setSelectedVoice(voices[0].id);
@@ -400,7 +404,7 @@ export function TtsExampleCard({ providerId }) {
                 onChange={(e) => setLanguageHint(e.target.value)}
                 className="w-full px-3 py-1.5 text-sm border border-border rounded-lg bg-background focus:outline-none focus:border-primary"
               >
-                <option value="">Auto-detect</option>
+                <option value="" suppressHydrationWarning>Auto-detect</option>
                 {(config.languageOptions || GOOGLE_TTS_LANGUAGES).map((l) =>
                   typeof l === "string"
                     ? <option key={l} value={l}>{l}</option>

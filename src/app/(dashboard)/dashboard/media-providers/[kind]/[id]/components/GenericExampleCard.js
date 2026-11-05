@@ -77,6 +77,9 @@ export function GenericExampleCard({ providerId, kind }) {
   const { copied: copiedRes, copy: copyRes } = useCopyToClipboard();
 
   useEffect(() => {
+    // Browser-only values (window.origin, /api/keys) can't be lazy initializers:
+    // the server render has no window, so they are read after mount.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setLocalEndpoint(window.location.origin);
     fetch("/api/keys")
       .then((r) => r.json())
@@ -311,7 +314,7 @@ export function GenericExampleCard({ providerId, kind }) {
               onChange={(e) => setPinnedConnectionId(e.target.value)}
               className="w-full px-3 py-1.5 text-sm border border-border rounded-lg bg-background focus:outline-none focus:border-primary"
             >
-              <option value="">Auto (by priority)</option>
+              <option value="" suppressHydrationWarning>Auto (by priority)</option>
               {connections.map((c) => {
                 const plan = c.providerSpecificData?.chatgptPlanType;
                 const label = c.email || c.name || c.id.slice(0, 8);
@@ -521,7 +524,7 @@ export function GenericExampleCard({ providerId, kind }) {
               className="w-full px-3 py-1.5 text-sm border border-border rounded-lg bg-background focus:outline-none focus:border-primary"
             >
               <option value="json">JSON (Base64)</option>
-              <option value="binary">Binary File</option>
+              <option value="binary" suppressHydrationWarning>Binary File</option>
             </select>
           </Row>
         )}

@@ -505,7 +505,12 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
             style={{ colorScheme: 'auto' }}
           >
             {TABLE_OPTIONS.map((opt) => (
-              <option key={opt.value} value={opt.value}>{opt.label}</option>
+              // suppressHydrationWarning is load-bearing, same as SegmentedControl:
+              // this page's content streams in a Suspense boundary that hydrates
+              // AFTER the root layout's i18n effect has already rewritten these
+              // text nodes to the locale translation, so React would report a
+              // server/client text mismatch on exactly this <option>.
+              <option key={opt.value} value={opt.value} suppressHydrationWarning>{opt.label}</option>
             ))}
           </select>
           <div className="grid grid-cols-2 items-center gap-1 rounded-lg border border-border bg-bg-subtle p-1 sm:flex">

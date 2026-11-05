@@ -77,6 +77,9 @@ export default function BaseUrlSelect({
       });
     };
     sync();
+    // Presets live in localStorage: they can only be read after mount, so this
+    // is a mount-sync effect, not a render-derived value.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setPresetsLoaded(true);
     return subscribePresets(sync);
   }, []);
@@ -98,6 +101,7 @@ export default function BaseUrlSelect({
       ? options.find((o) => o.value !== CUSTOM_VALUE && normalizeUrl(o.url) === current)
       : null;
     if (matched) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- syncs the selection with the incoming config URL
       setCustomInput("");
       customInputRef.current = "";
       setMode(matched.value);
@@ -173,7 +177,7 @@ export default function BaseUrlSelect({
           {options.map((o) => (
             <option key={o.value} value={o.value}>{o.label}</option>
           ))}
-          {canSave && <option value={SAVE_VALUE}>+ Save current as...</option>}
+          {canSave && <option value={SAVE_VALUE} suppressHydrationWarning>+ Save current as...</option>}
         </select>
         {isSaved && (
           <button type="button" onClick={handleDeleteSaved} className="p-1 text-text-muted hover:text-red-500 rounded transition-colors shrink-0" title="Delete saved endpoint">

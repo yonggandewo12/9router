@@ -8,6 +8,8 @@ const ICON_ALIASES = {
   "ollama-search": "ollama",
   // Same brand artwork as consumer Trae (no separate enterprise logo).
   "trae-enterprise": "trae",
+  // Legacy CN connection rows outlive the retired provider entry; keep the mark.
+  "trae-cn": "trae",
   // MiniMax Code rides the existing MiniMax brand mark
   "minimax-code": "minimax",
   "minimax-code-global": "minimax",

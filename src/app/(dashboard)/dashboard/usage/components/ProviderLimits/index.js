@@ -1440,7 +1440,7 @@ export default function ProviderLimits() {
                     {option} / page
                   </option>
                 ))}
-                <option value="custom">Custom</option>
+                <option value="custom" suppressHydrationWarning>Custom</option>
               </select>
               <input
                 type="number"

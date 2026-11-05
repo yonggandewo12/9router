@@ -119,9 +119,9 @@ export default function McpMarketplaceModal({ isOpen, onClose, onAdd, addedNames
             onChange={(e) => setFilter(e.target.value)}
             className="px-2 py-1.5 bg-surface rounded text-xs border border-border focus:outline-none focus:ring-1 focus:ring-primary/50"
           >
-            <option value="all">All</option>
-            <option value="authless">Authless</option>
-            <option value="oauth">OAuth</option>
+            <option value="all" suppressHydrationWarning>All</option>
+            <option value="authless" suppressHydrationWarning>Authless</option>
+            <option value="oauth" suppressHydrationWarning>OAuth</option>
           </select>
         </div>
 
