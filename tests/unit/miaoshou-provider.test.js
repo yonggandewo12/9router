@@ -192,6 +192,46 @@ describe("妙手 message conversion", () => {
     });
   });
 
+  // Upstream rejects two adjacent `tool` messages ("tool 消息后面只能是 user 或
+  // assistant，实际是: tool", code 1005010001) — measured live 2026-11-05 — while
+  // OpenAI clients send one `role:"tool"` message per result of a parallel round.
+  it("folds consecutive tool results into one tool message", () => {
+    const converted = toMiaoshouMessages([
+      { role: "user", content: "weather in 北京 and 上海?" },
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          { id: "call_bj", type: "function", function: { name: "get_weather", arguments: '{"city":"北京"}' } },
+          { id: "call_sh", type: "function", function: { name: "get_weather", arguments: '{"city":"上海"}' } },
+        ],
+      },
+      { role: "tool", tool_call_id: "call_bj", name: "get_weather", content: '{"temp":12}' },
+      { role: "tool", tool_call_id: "call_sh", name: "get_weather", content: '{"temp":18}' },
+    ]);
+    expect(converted.map((m) => m.type)).toEqual(["user", "assistant", "tool"]);
+    expect(converted[2].content).toEqual([
+      { type: "tool_result", toolCallId: "call_bj", toolName: "get_weather", toolResult: '{"temp":12}' },
+      { type: "tool_result", toolCallId: "call_sh", toolName: "get_weather", toolResult: '{"temp":18}' },
+    ]);
+  });
+
+  it("never emits adjacent tool messages, even across a dropped empty turn", () => {
+    const converted = toMiaoshouMessages([
+      { role: "user", content: "go" },
+      { role: "tool", tool_call_id: "a", name: "t", content: "1" },
+      // An assistant turn with neither text nor tool_calls is skipped, which
+      // would otherwise leave the next result adjacent to the previous one.
+      { role: "assistant", content: "" },
+      { role: "tool", tool_call_id: "b", name: "t", content: "2" },
+    ]);
+    for (let i = 1; i < converted.length; i++) {
+      expect(`${converted[i - 1].type}->${converted[i].type}`).not.toBe("tool->tool");
+    }
+    expect(converted.map((m) => m.type)).toEqual(["user", "tool"]);
+    expect(converted[1].content).toHaveLength(2);
+  });
+
   it("gives every message a fresh id (the gateway answers 431 on reuse)", () => {
     const a = toMiaoshouMessages([{ role: "user", content: "one" }]);
     const b = toMiaoshouMessages([{ role: "user", content: "two" }]);

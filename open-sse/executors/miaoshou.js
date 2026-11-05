@@ -22,6 +22,13 @@
 // After an OpenAI tool round the history ends in tool results, so a one-line
 // user continuation prompt is appended and the tool messages stay in the
 // replay, where the model reads them (verified live 2026-11-05).
+//
+// Adjacency rule (measured 2026-11-05): a `tool` message may only be followed
+// by `user` or `assistant` — two consecutive `tool` messages are a 400
+// ("tool 消息后面只能是 user 或 assistant，实际是: tool", code 1005010001). OpenAI
+// clients send one `role:"tool"` message PER result, so a parallel tool round is
+// exactly that illegal run; the results are therefore merged into a single
+// `tool` message holding one `tool_result` block each.
 import { randomUUID } from "node:crypto";
 import { BaseExecutor } from "./base.js";
 import { SSE_DONE, SSE_HEADERS_NO_BUFFER } from "../utils/sseConstants.js";
@@ -197,7 +204,8 @@ function toolConfigsWithBuiltinsOff(tools) {
  * Roles: user/assistant/tool are legal ("客户端只能发送 user、tool 或 assistant").
  * tool_calls on an assistant become a sibling `tool_use` block on that same
  * assistant message (the gateway's own shape), and OpenAI `role:"tool"` turns
- * become `role:"tool"` messages carrying a single `tool_result` block.
+ * become `tool_result` blocks — consecutive results fold into ONE `tool`
+ * message, because two adjacent `tool` messages are a 400 upstream.
  */
 export function toMiaoshouMessages(messages) {
   const out = [];
@@ -208,18 +216,24 @@ export function toMiaoshouMessages(messages) {
     if (m.role === "tool") {
       const toolCallId = m.tool_call_id || m.toolCallId;
       if (!toolCallId) continue;
+      const block = {
+        type: "tool_result",
+        toolCallId,
+        toolName: m.name || m.toolName || "tool",
+        toolResult: textOf(m.content),
+      };
+      // One result per OpenAI message, but 妙手 forbids two adjacent `tool`
+      // messages, so a parallel round folds into the message already open.
+      const prev = out[out.length - 1];
+      if (prev?.type === "tool") {
+        prev.content.push(block);
+        continue;
+      }
       out.push({
         type: "tool",
         messageId: freshId(),
         finished: true,
-        content: [
-          {
-            type: "tool_result",
-            toolCallId,
-            toolName: m.name || m.toolName || "tool",
-            toolResult: textOf(m.content),
-          },
-        ],
+        content: [block],
       });
       continue;
     }
