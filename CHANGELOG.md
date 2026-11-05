@@ -1,3 +1,25 @@
+# v0.6.22 (2026-11-05)
+
+妙手 (CatPaw) is a new provider lane, and the dashboard no longer reports hydration errors on pages whose labels the client-side i18n rewrites.
+
+## Features
+
+- **妙手 (CatPaw) chat lane** (`miaoshou`, alias `ms`): Meituan's desktop assistant, driven over the same upstream HTTP API the official CLI uses — no local app process is required at runtime. One turn is three calls: `/conversation/round` creates the conversation, `/conversation/event` marks the message running, `/conversation/turn` answers with an SSE stream, and a terminal `/conversation/turn/stop` is sent when the client disconnects early. **Auth is the Passport SSO token carried as `Cookie: X-Passport-Token`** (there is no refresh; a dead token maps to the gateway's own `unifyCode 1003010001` so the account loop cools down on the right code). It lands as a webCookie provider with a paste-a-token modal that can also auto-detect a signed-in desktop app from this machine (`ps eww` / `~/.meituan-catpaw/auth.json`), or import the same token from a cookie export.
+- **The upstream's own agent loop is disabled per request.** CatPaw ships 41 built-in tools (`web_search`, `bash`, `read_file`, `task`…); left on, the gateway runs them itself and the client sees tool frames it never asked for. The executor disables the whole list explicitly rather than relying on the upstream default.
+- **Cumulative SSE, per-model windows.** Turn frames carry the full answer so far rather than deltas, so the executor diffs each frame against what it already emitted (and forwards the captured `reasoningContent` as `reasoning_content`). Context windows are the measured per-model values from each turn's `contextInfo` — 1.02M for `deepseek-v4.1-flash`, 921k for `minimax-m3`, 900k for `kimi-k3.1-pro`, 204800 for the rest — not a flat guess, because the capacity adapter trims history against them. Vision is declared per model from a live image probe; `auto` keeps `vision:true` deliberately, since Auto can resolve to the one text-only row and stripping images from every auto turn would degrade the common case.
+- **Connect guard is 120s for the three conversation calls**, overridable via `MIAOSHOU_CONNECT_TIMEOUT_MS`; the 600s stream budget is separate, so an upstream that accepts the handshake but never returns headers no longer parks the request (and its account concurrency slot) until the client gives up.
+
+## Fixes
+
+- **Dashboard hydration errors on i18n-rewritten labels.** The pure-client i18n rewrites text nodes with a `MutationObserver`, so a locale-cookie client has the server-rendered source label replaced before React 19 hydrates and React reports a text mismatch — first visible as `UsageStats`' "Usage by Model". The host elements that carry those labels (`<option>`s across usage, CLI-tool, media-provider and MCP-marketplace selects, plus `SegmentedControl`) now opt out with `suppressHydrationWarning`, following the existing precedent: the check applies to an element's direct text children, React re-renders the same source labels on its next commit, and the observer re-translates idempotently.
+- **Missing provider icons in the usage pages.** `miaoshou` had no `public/providers` mark (added), and legacy `trae-cn` connection rows outlived their registry entry, so the usage/limits pages requested a 404 every load — it now aliases to the existing Trae artwork.
+- **`react-hooks/set-state-in-effect` errors in touched components** (mount-sync effects that read `localStorage`/`window` after mount, or whose setState calls land after an `await`) are annotated with the reason instead of firing on every lint run.
+
+## Notes
+
+- **Test suite**: 467 files / 4877 passing / 0 failing (15 expected-fail, 97 skipped). Baselines gated byte-for-byte with the two new provider/alias entries. The miaoshou lane adds 36 tests covering the catalog, the three-call turn (cumulative diffing, tool-disable list, terminal stop de-duplication), error-envelope mapping, the credential parser, and the auto-import guard boundary.
+- **Production `next build` gate run before tagging**, in a throwaway worktree so the running dev server and its data dir are untouched.
+
 # v0.6.21 (2026-10-28)
 
 A request that omits `stream` was getting a body no client can parse, and leaving no trace in cost stats. Upstream v0.5.110–v0.5.112 is merged in.
