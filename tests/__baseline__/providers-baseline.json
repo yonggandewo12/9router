@@ -1320,5 +1320,12 @@
     "baseUrl": "https://api.runcrate.ai/v1/chat/completions",
     "validateUrl": "https://www.runcrate.ai/api/v1/billing/balance",
     "format": "openai"
+  },
+  "miaoshou": {
+    "baseUrl": "https://ai.catpaw.meituan.com/api/agent/conversation/turn",
+    "format": "openai",
+    "forceStream": true,
+    "authType": "cookie",
+    "timeoutMs": 600000
   }
 }

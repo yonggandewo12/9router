@@ -85,6 +85,11 @@ const LOCAL_ONLY_PATHS = [
   "/api/oauth/cursor/auto-import",
   "/api/oauth/kiro/auto-import",
   "/api/oauth/zed/auto-import",
+  // 妙手 auto-import shells out to `ps eww` and reads ~/.meituan-catpaw/auth.json,
+  // then returns a live Passport token — local-only like the three above. Unlike
+  // them it stays out of ALWAYS_PROTECTED: it is the only way to connect a 妙手
+  // account, so it has to work with requireLogin=false (loopback + local Origin).
+  "/api/oauth/miaoshou/auto-import",
   "/api/oauth/minimax-code/lease",
   "/api/oauth/minimax-code-global/lease",
   "/api/auth/reset-password",

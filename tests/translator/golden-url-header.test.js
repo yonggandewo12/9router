@@ -34,6 +34,10 @@ const SPECIALIZED = new Set([
   // an unresolved `{region}` host and a thrown header. Locked in
   // tests/unit/bedrock-provider.test.js + aws-sigv4.test.js.
   "bedrock", "bedrock-xai",
+  // 妙手 (CatPaw): three upstream calls per turn with its own header set
+  // (Cookie: X-Passport-Token, no bearer) on a session-scoped SSE API. Locked in
+  // tests/unit/miaoshou-provider.test.js.
+  "miaoshou",
 ]);
 
 // Sanitize header:  khử token + field thời gian động (kimi X-Msh-Device-Id) để snapshot ổn định.

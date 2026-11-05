@@ -152,6 +152,8 @@ import p149 from "./uc-web.js";
 // imported: this fork removed the provider (its chat lane never worked reliably).
 import p150 from "./runcrate.js";
 import p151 from "./nace.js";
+// Fork-only lane (not upstream): 妙手 (CatPaw) desktop-assistant chat.
+import p152 from "./miaoshou.js";
 export default [
   p0,
   p1,
@@ -300,4 +302,5 @@ export default [
   p149,
   p150,
   p151,
+  p152,
 ];

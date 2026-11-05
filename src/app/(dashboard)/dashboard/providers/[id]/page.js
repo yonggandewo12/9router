@@ -5,7 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import Image from "next/image";
 import { getProviderIconSrc, markProviderIconMissing } from "@/shared/utils/providerIcon";
-import { Card, Button, Badge, Input, Modal, CardSkeleton, OAuthModal, KiroOAuthWrapper, CursorAuthModal, ZedAuthModal, XiaomiMimoAuthModal, IFlowCookieModal, GitLabAuthModal, Toggle, Select, EditConnectionModal, NoAuthProxyCard, ConfirmModal } from "@/shared/components";
+import { Card, Button, Badge, Input, Modal, CardSkeleton, OAuthModal, KiroOAuthWrapper, CursorAuthModal, ZedAuthModal, MiaoshouAuthModal, XiaomiMimoAuthModal, IFlowCookieModal, GitLabAuthModal, Toggle, Select, EditConnectionModal, NoAuthProxyCard, ConfirmModal } from "@/shared/components";
 import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, WEB_COOKIE_PROVIDERS, getProviderAlias, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, AI_PROVIDERS } from "@/shared/constants/providers";
 import { getModelsByProviderId, getModelKind } from "@/shared/constants/models";
 import { getThinkingLevels } from "open-sse/providers/thinkingLevels.js";
@@ -67,6 +67,7 @@ export default function ProviderDetailPage() {
   const [showOAuthModal, setShowOAuthModal] = useState(false);
   const [showXiaomiMimoModal, setShowXiaomiMimoModal] = useState(false);
   const [showIFlowCookieModal, setShowIFlowCookieModal] = useState(false);
+  const [showMiaoshouModal, setShowMiaoshouModal] = useState(false);
   const [showAddApiKeyModal, setShowAddApiKeyModal] = useState(false);
   const [addConnectionError, setAddConnectionError] = useState("");
   const [showBulkImportCodex, setShowBulkImportCodex] = useState(false);
@@ -127,6 +128,12 @@ export default function ProviderDetailPage() {
       setShowXiaomiMimoModal(true);
       return;
     }
+    // 妙手 (CatPaw): the credential lives in the desktop app, so the modal
+    // auto-detects it first and falls back to a manual token paste.
+    if (providerId === "miaoshou") {
+      setShowMiaoshouModal(true);
+      return;
+    }
     if (isOAuth) {
       openOAuthConnection();
       return;
@@ -141,6 +148,10 @@ export default function ProviderDetailPage() {
   };
 
   const triggerAddConnection = () => {
+    if (providerId === "miaoshou") {
+      setShowMiaoshouModal(true);
+      return;
+    }
     if (isOAuth) {
       triggerOAuthConnection();
       return;
@@ -496,6 +507,7 @@ export default function ProviderDetailPage() {
   };
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- mount-time loaders; their setState calls land after the awaits
     fetchConnections();
     fetchAliases();
     fetchCustomModels();
@@ -509,6 +521,7 @@ export default function ProviderDetailPage() {
   useEffect(() => {
     const isLiveCatalog = providerId === "cursor" || providerId === "zed";
     if (!isLiveCatalog) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- clears the previous provider's live catalog when the route changes
       setLiveModels([]);
       return;
     }
@@ -982,6 +995,7 @@ export default function ProviderDetailPage() {
   };
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- prunes selections when the connection list changes
     setSelectedConnectionIds((prev) => prev.filter((id) => connections.some((conn) => conn.id === id)));
   }, [connections]);
 
@@ -1256,7 +1270,10 @@ export default function ProviderDetailPage() {
             isTesting={testingModelIds.has(model.id)}
             isCustom
             isFree={false}
-            caps={getCaps(`${providerId}/${model.id}`)}
+            // Key by the table key (/api/models lists ms/, not miaoshou/): a
+            // provider-id miss falls back to byId and collides with other
+            // providers' same-named models (glm-5.3 exists under cbcn/glm/ark).
+            caps={getCaps(`${providerStorageAlias}/${model.id}`)}
             thinkingSuffix={resolveThinkingSuffix(model.id)}
           />
         ))}
@@ -1278,7 +1295,7 @@ export default function ProviderDetailPage() {
               isTesting={testingModelIds.has(model.id)}
               isFree={model.isFree}
               onDisable={() => handleDisableModel(model.id)}
-              caps={getCaps(`${providerId}/${model.id}`)}
+              caps={getCaps(`${providerStorageAlias}/${model.id}`)}
               thinkingSuffix={resolveThinkingSuffix(model.id)}
             />
           );
@@ -1932,6 +1949,11 @@ export default function ProviderDetailPage() {
         isOpen={showXiaomiMimoModal}
         onSuccess={handleOAuthSuccess}
         onClose={() => setShowXiaomiMimoModal(false)}
+      />
+      <MiaoshouAuthModal
+        isOpen={showMiaoshouModal}
+        onSuccess={handleOAuthSuccess}
+        onClose={() => setShowMiaoshouModal(false)}
       />
       {providerId === "iflow" && (
         <IFlowCookieModal

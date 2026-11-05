@@ -266,6 +266,42 @@ export const PROVIDER_CAPABILITIES = {
     "openpangu-2.0-pro": { reasoning: true, contextWindow: 524288, maxOutput: 131072 },
     "openpangu-2.0-flash": { reasoning: true, contextWindow: 524288, maxOutput: 131072 },
   },
+  // 妙手 (CatPaw). Live-probed 2026-11-05 with a solid-color PNG through /turn:
+  // every catalog model except MiniMax-M3 read the image back correctly, so
+  // vision is declared per model rather than inherited from the name heuristics
+  // (which know none of these ids). Reasoning is a wire fact — the turn SSE
+  // carries `reasoningContent` inside the text block for these models.
+  // contextWindow/maxOutput are read back from the upstream's own per-turn
+  // `contextInfo` (contextWindowTokens / maxOutputTokens), measured for all 11
+  // rows on 2026-11-05 — they are NOT uniform (DeepSeek-flash 1.02M, MiniMax-M3
+  // 921k, Kimi-K3.1-Pro 900k, everything else 204800), and capacityAdapter trims
+  // history against these numbers, so a flat guess would throw away context.
+  "miaoshou": {
+    // Vision verified model-by-model with a solid-color PNG on 2026-11-05;
+    // MiniMax-M3 returned an empty answer for the same image, so it is the only
+    // text-only row. No `reasoning` flag on purpose: the gateway decides per
+    // request when to think (the same model produced reasoningContent on one
+    // prompt and none on the next), and `reasoning_effort` / `thinking` in the
+    // turn body were accepted but changed nothing — declaring a thinking knob
+    // would advertise control this lane does not have. Captured
+    // `reasoningContent` is still forwarded as `reasoning_content` deltas.
+    "longcat-2.5":         { vision: true, contextWindow: 204800, maxOutput: 32768 },
+    "longcat-2.0":         { vision: true, contextWindow: 204800, maxOutput: 32768 },
+    "glm-5.3":             { vision: true, contextWindow: 204800, maxOutput: 32000 },
+    "glm-5.3-flash":       { vision: true, contextWindow: 204800, maxOutput: 32000 },
+    "glm-5.3-flashx":      { vision: true, contextWindow: 204800, maxOutput: 32000 },
+    "deepseek-v4.1-flash": { vision: true, contextWindow: 1024000, maxOutput: 32768 },
+    "deepseek-v4-pro":     { vision: true, contextWindow: 204800, maxOutput: 32768 },
+    "minimax-m3":          { vision: false, contextWindow: 921600, maxOutput: 32768 },
+    "kimi-k3.1-pro":       { vision: true, contextWindow: 900000, maxOutput: 32768 },
+    "kimi-k3":             { vision: true, contextWindow: 204800, maxOutput: 32000 },
+    // `auto` vision:true is a deliberate tradeoff: Auto resolves server-side
+    // per request and CAN pick MiniMax-M3 (the one text-only row — a vision
+    // request then answers empty). Stripping images for EVERY auto turn to
+    // cover that rare case would degrade the common one, so vision stays
+    // declared and the rare miss is the user's cue to pin a concrete model.
+    "auto":                { vision: true, contextWindow: 204800, maxOutput: 32000 },
+  },
   // NVIDIA NIM is OpenAI-compatible → rejects MiniMax/GLM native `thinking` field.
   // Force openai reasoning_effort format for its reasoning models. #issue
   "nvidia": {

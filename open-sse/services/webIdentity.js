@@ -8,6 +8,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import { extractCookieValue, normalizeSessionCookieHeader } from "../utils/webCookieAuth.js";
+import { extractMiaoshouToken } from "../shared/miaoshou/credentials.js";
 import { grokTlsFetch, GROK_TLS_USER_AGENT } from "./grokTlsClient.js";
 import { unwrapLocalStorageToken } from "./webLoginConfig.js";
 
@@ -28,7 +29,6 @@ export function cookieJar(raw) {
   }
   return jar;
 }
-
 
 function decodeJwtPayload(token) {
   try {
@@ -93,6 +93,33 @@ const PROBES = {
     const biz = json?.data?.biz_data;
     if (!biz?.token) return REJECTED("DeepSeek rejected the userToken");
     return OK(biz.email || "");
+  },
+
+  async "miaoshou"(credential) {
+    // 妙手 (CatPaw): the Passport token is opaque, so the catalog endpoint is
+    // the cheapest liveness check — it answers 401 {unifyCode:1003010001} on a
+    // dead token and a 12-row model list on a live one. The CLI's m-appkey header
+    // is required or the list comes back empty for a VALID session.
+    const token = extractMiaoshouToken({ apiKey: credential });
+    if (!token) return REJECTED("Missing X-Passport-Token");
+    const res = await request("https://ai.catpaw.meituan.com/api/agent/models?mode=CATX_APP", {
+      // The generic request() helper sends GET.
+      headers: {
+        Cookie: `X-Passport-Token=${token}`,
+        "m-appkey": "com.sankuai.mcopilot.cli",
+        "x-agent-version": "1.2.0-beta.45",
+        Accept: "application/json",
+      },
+    });
+    if (!res.status) return UNKNOWN(res.error);
+    if (res.status === 401 || res.status === 403) return REJECTED("X-Passport-Token is invalid or expired");
+    if (!res.ok) return UNKNOWN(`妙手 returned HTTP ${res.status}`);
+    let json = null;
+    try { json = JSON.parse(res.text); } catch { return UNKNOWN("妙手 returned invalid JSON"); }
+    if (Number(json?.unifyCode) === 1003010001) return REJECTED("X-Passport-Token is invalid or expired");
+    const models = Array.isArray(json?.data) ? json.data : [];
+    if (!models.length) return REJECTED("妙手 session is not signed in");
+    return OK("");
   },
 
   async "chatgpt-web"(credential) {

@@ -66,6 +66,7 @@ const PROVIDER_ID_TO_ALIAS = {
   kiro: "kr",
   "minimax-code": "mm",
   "minimax-code-global": "mmg",
+  miaoshou: "ms",
   opencode: "oc",
   "opencode-zen": "ocz",
   qoder: "qd",

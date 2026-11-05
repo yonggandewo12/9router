@@ -287,6 +287,77 @@ describe("dashboard guard local-only access", () => {
   });
 });
 
+describe("dashboard guard host-credential import routes", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.NINEROUTER_PEER_TOKEN = PEER_TOKEN;
+    mocks.getSettings.mockResolvedValue({ requireLogin: true });
+    mocks.validateApiKey.mockResolvedValue(false);
+    mocks.getConsistentMachineId.mockResolvedValue("cli-token");
+    mocks.verifyDashboardAuthToken.mockResolvedValue(false);
+  });
+
+  // 妙手's auto-import shells out to `ps eww` and reads ~/.meituan-catpaw/auth.json,
+  // then returns a LIVE Passport token. It is local-only like the cursor/kiro/zed
+  // auto-imports, but deliberately NOT in ALWAYS_PROTECTED: those three also
+  // require a JWT, while this form is the only way to sign a 妙手 connection in
+  // and must keep working with requireLogin=false (loopback + local origin).
+  it("refuses 妙手 auto-import to a non-loopback peer even with requireLogin=false", async () => {
+    mocks.getSettings.mockResolvedValue({ requireLogin: false });
+
+    const response = await proxy(request("/api/oauth/miaoshou/auto-import", {
+      host: "router.example.com",
+    }));
+
+    expect(response.status).toBe(403);
+    expect(response.body.error).toBe("Local only: CLI token required");
+  });
+
+  it("allows 妙手 auto-import on loopback with requireLogin=false", async () => {
+    mocks.getSettings.mockResolvedValue({ requireLogin: false });
+
+    const response = await proxy(localRequest("/api/oauth/miaoshou/auto-import", {
+      host: "localhost:20127",
+      origin: "http://localhost:20127",
+    }));
+
+    expect(response).toBe(mocks.nextResponse);
+  });
+
+  it("allows 妙手 auto-import on loopback with a dashboard JWT", async () => {
+    mocks.verifyDashboardAuthToken.mockResolvedValue(true);
+
+    const response = await proxy({
+      ...localRequest("/api/oauth/miaoshou/auto-import", {
+        host: "localhost:20128",
+        origin: "http://localhost:20128",
+      }),
+      cookies: { get: vi.fn(() => ({ value: "jwt-fixture" })) },
+    });
+
+    expect(response).toBe(mocks.nextResponse);
+  });
+
+  it("allows 妙手 auto-import for the CLI with a machine token", async () => {
+    const response = await proxy(request("/api/oauth/miaoshou/auto-import", {
+      host: "router.example.com",
+      "x-9r-cli-token": "cli-token",
+    }));
+
+    expect(response).toBe(mocks.nextResponse);
+  });
+
+  it("keeps the token POST-import at normal dashboard auth", async () => {
+    mocks.getSettings.mockResolvedValue({ requireLogin: false });
+
+    const response = await proxy(request("/api/oauth/miaoshou/import", {
+      host: "router.example.com",
+    }));
+
+    expect(response).toBe(mocks.nextResponse);
+  });
+});
+
 describe("dashboard guard helpers", () => {
   it("extracts bearer API keys before x-api-key", () => {
     const apiRequest = request("/v1/chat/completions", {

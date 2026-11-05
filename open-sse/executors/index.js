@@ -36,6 +36,7 @@ import { DefaultExecutor } from "./default.js";
 import { MinimaxCodeExecutor } from "./minimax-code.js";
 import { DevinCliExecutor } from "./devin-cli.js";
 import { ZcodeExecutor } from "./zcode.js";
+import { MiaoshouExecutor } from "./miaoshou.js";
 
 const executors = {
   antigravity: new AntigravityExecutor(),
@@ -82,6 +83,8 @@ const executors = {
   "minimax-code-global": new MinimaxCodeExecutor("minimax-code-global"),
   "devin-cli": new DevinCliExecutor(),
   zcode: new ZcodeExecutor(),
+  miaoshou: new MiaoshouExecutor(),
+  ms: new MiaoshouExecutor(), // Alias
   bedrock: new BedrockExecutor(),
   br: new BedrockExecutor(), // Alias for bedrock
   // Second Bedrock entry for xAI's Grok, which speaks OpenAI Chat Completions rather than the
