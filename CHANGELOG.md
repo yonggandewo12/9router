@@ -1,3 +1,20 @@
+# v0.6.23 (2026-11-05)
+
+Two 妙手 (CatPaw) defects found by review, both in how a tool round is carried. The first one is user-facing: any model that called two tools in one turn got a hard 400.
+
+## Fixes
+
+- **A parallel tool round no longer 400s.** 妙手 allows a `tool` message to be followed only by `user` or `assistant`, so two adjacent results are rejected (`code 1005010001`, "tool 消息后面只能是 user 或 assistant，实际是: tool"). OpenAI clients send one `role:"tool"` message **per** result, so every parallel tool call hit exactly that run and the agent could not continue. The converter now folds consecutive results into the `tool` message it already opened, one `tool_result` block each — the shape the gateway itself uses. Folding keys off "the previous emitted message is a tool", which also covers the case where a skipped empty assistant turn would otherwise bring two results together. Verified live: the request that reproduced the 400 returns 200 and the model reads both results; streaming, a two-round sequential history and a three-way parallel round all pass.
+- **The non-streaming fold now agrees with the stream on the same frames.** Two consumers of one cumulative frame sequence had drifted: a tool was recorded at **first sighting**, so its `arguments` froze at the empty/partial prefix and never took the complete JSON that arrives in later frames (a non-streaming tool turn handed the client a call with no arguments); and text/reasoning were last-block-wins inside a frame while the streaming path concatenates the frame's blocks, so a multi-block message lost every block but the last. Blast radius measured, not assumed: `chatCore` keeps `stream` true for a `forceStream` provider, so an ordinary non-streaming client is served by the forced-SSE→JSON path over the streaming output and was never affected — only `deepseek-tui` without `stream` reaches this code. That is also why a live probe passed while the frame-level probe failed.
+- **A revised (not extended) tool-argument prefix is logged instead of silently truncating.** OpenAI deltas cannot be unsent, so the tail would simply never arrive; the lane now says so in the log.
+- **Corrected a comment that credited dead config with bounding the stream.** The registry's `transport.timeoutMs` is read only by `BaseExecutor.execute()`, which this lane replaces wholesale; what actually bounds an open stream is the engine's inter-chunk watchdog (360s). The three adjacency rules the upstream enforces are now recorded at the top of the file, including the two measured only this round (a `tool` may not follow a `user`, and may not open the list).
+
+## Notes
+
+- **Test suite**: 467 files / 4881 passing / 0 failing (15 expected-fail, 97 skipped). Four new tests pin the fold shape, the adjacency invariant, complete-arguments-over-cumulative-frames and multi-block text, the last two asserting the two paths produce the **same** string for the same bytes.
+- **Mutation-checked**: disabling the fold fails exactly the two fold tests; freezing tool args at first sighting and switching block text back to last-block-wins each fail exactly one. No test passes for the wrong reason.
+- **Production `next build` gate run before tagging** (isolated `NEXT_DIST_DIR` so the running dev server's `.next` is untouched).
+
 # v0.6.22 (2026-11-05)
 
 妙手 (CatPaw) is a new provider lane, and the dashboard no longer reports hydration errors on pages whose labels the client-side i18n rewrites.
