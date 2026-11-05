@@ -613,6 +613,46 @@ describe("妙手 non-streaming fold (jsonBodyResponse)", () => {
     expect(body.usage).toEqual({ prompt_tokens: 10, completion_tokens: 3, total_tokens: 13 });
   });
 
+  // The upstream sends CUMULATIVE frames, so a tool's arguments arrive in
+  // pieces ("" → `{"city": ` → the full JSON) under one toolCallId. Recording
+  // each tool at first sighting froze the empty prefix here; the streaming path
+  // was already correct, so the two paths disagreed on the same stream.
+  it("keeps complete tool arguments when they arrive across frames", async () => {
+    const frames = [
+      { message: { content: [{ type: "tool_use", toolCallId: "call_1", toolName: "get_weather", toolParams: "" }] } },
+      { message: { content: [{ type: "tool_use", toolCallId: "call_1", toolName: "get_weather", toolParams: '{"city": ' }] } },
+      { message: { content: [{ type: "tool_use", toolCallId: "call_1", toolName: "get_weather", toolParams: '{"city": "上海"}' }] } },
+      { message: { content: [{ type: "tool_use", toolCallId: "call_1", toolName: "get_weather", toolParams: '{"city": "上海"}' }], finished: true } },
+    ];
+
+    const { body } = await __internal__.jsonBodyResponse(sseBody(frames), STREAM_CTX());
+    expect(body.choices[0].message.tool_calls).toEqual([
+      { id: "call_1", type: "function", function: { name: "get_weather", arguments: '{"city": "上海"}' } },
+    ]);
+
+    // Same bytes through the streaming path must say the same thing.
+    const chunks = await readChunks(__internal__.streamResponse(sseBody(frames), STREAM_CTX()));
+    const streamed = chunks
+      .flatMap((c) => c.choices?.[0]?.delta?.tool_calls || [])
+      .map((t) => t.function?.arguments || "")
+      .join("");
+    expect(streamed).toBe(body.choices[0].message.tool_calls[0].function.arguments);
+  });
+
+  it("keeps every text block of a frame, matching the streaming path", async () => {
+    const frames = [
+      { message: { content: [{ type: "text", text: "第一段" }, { type: "text", text: "第二段" }] } },
+      { message: { content: [{ type: "text", text: "第一段" }, { type: "text", text: "第二段" }], finished: true } },
+    ];
+
+    const { body } = await __internal__.jsonBodyResponse(sseBody(frames), STREAM_CTX());
+    expect(body.choices[0].message.content).toBe("第一段第二段");
+
+    const chunks = await readChunks(__internal__.streamResponse(sseBody(frames), STREAM_CTX()));
+    const streamed = chunks.map((c) => c.choices?.[0]?.delta?.content || "").join("");
+    expect(streamed).toBe("第一段第二段");
+  });
+
   it("returns the mapped status for an in-band error instead of HTTP 200", async () => {
     const frames = [{ error: { code: 400, unifyCode: 1005010001, message: "会话未在执行中" } }];
     const { status, body } = await __internal__.jsonBodyResponse(sseBody(frames), STREAM_CTX());

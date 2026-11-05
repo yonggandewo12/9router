@@ -23,12 +23,19 @@
 // user continuation prompt is appended and the tool messages stay in the
 // replay, where the model reads them (verified live 2026-11-05).
 //
-// Adjacency rule (measured 2026-11-05): a `tool` message may only be followed
-// by `user` or `assistant` — two consecutive `tool` messages are a 400
-// ("tool 消息后面只能是 user 或 assistant，实际是: tool", code 1005010001). OpenAI
-// clients send one `role:"tool"` message PER result, so a parallel tool round is
-// exactly that illegal run; the results are therefore merged into a single
-// `tool` message holding one `tool_result` block each.
+// Adjacency rules (measured 2026-11-05, all three arrive as HTTP 200 envelopes
+// with unifyCode 1005010001):
+//   • after `tool`  → only user|assistant. Two consecutive `tool` messages are a
+//     400 ("tool 消息后面只能是 user 或 assistant，实际是: tool"), and OpenAI clients
+//     send one `role:"tool"` message PER result, so a parallel tool round is
+//     exactly that illegal run — the results are merged into a single `tool`
+//     message holding one `tool_result` block each.
+//   • after `user`  → only user|assistant ("user 消息后面只能是 user 或 assistant,
+//     实际是: tool"). A result with no preceding assistant tool_use turn cannot be
+//     placed, so that request stays the client's error rather than an invented
+//     assistant turn.
+//   • a `tool` message may not OPEN the list ("上一条消息不是 assistant 消息,
+//     无法添加 tool 消息").
 import { randomUUID } from "node:crypto";
 import { BaseExecutor } from "./base.js";
 import { SSE_DONE, SSE_HEADERS_NO_BUFFER } from "../utils/sseConstants.js";
@@ -56,11 +63,16 @@ const TURN_STOP_URL = `${MIAOSHOU_BASE}/api/agent/conversation/turn/stop`;
 // Connect-guard ceiling for the three conversation calls, i.e. the wait for
 // /round, /event and /turn's RESPONSE HEADERS only (guardedFetch clears the
 // guard as soon as /turn answers, so the SSE stream itself is never cut by this
-// number — the stream's own budget stays the registry's 600s transport.timeout).
-// All three calls answered in ~1s across every measurement; the ceiling exists
-// for the hung case, where 120s bounds how long a dead upstream can park the
-// request, its socket and the account's concurrency slot. Overridable without a
-// code change via MIAOSHOU_CONNECT_TIMEOUT_MS.
+// number). All three calls answered in ~1s across every measurement; the ceiling
+// exists for the hung case, where 120s bounds how long a dead upstream can park
+// the request, its socket and the account's concurrency slot. Overridable without
+// a code change via MIAOSHOU_CONNECT_TIMEOUT_MS.
+//
+// What bounds the OPEN stream is the engine's own inter-chunk watchdog
+// (streamingHandler.js:103 → pipeWithDisconnect, STREAM_STALL_TIMEOUT_MS = 360s),
+// which starts once this executor has returned. The registry's transport
+// .timeoutMs does NOT apply here: it is read only by BaseExecutor.execute(), and
+// this lane replaces execute() wholesale.
 const REQUEST_TIMEOUT_MS = (() => {
   const raw = parseInt(process.env.MIAOSHOU_CONNECT_TIMEOUT_MS, 10);
   return Number.isFinite(raw) && raw > 0 ? raw : 120 * 1000;
@@ -968,6 +980,14 @@ function streamResponse(upstreamBody, { model, conversationId, turnRequestId, to
                       },
                     ],
                   });
+                } else if (tool.args !== already && !tool.args.startsWith(already)) {
+                  // A revised (not extended) prefix cannot be undone in OpenAI
+                  // deltas, so what already went out stays wrong — say so loudly
+                  // instead of truncating silently.
+                  log?.warn?.(
+                    "MIAOSHOU",
+                    `tool args revised, not extended (id=${tool.id}): sent ${already.length} chars, frame has ${tool.args.length}`,
+                  );
                 }
               }
             }
@@ -1020,8 +1040,10 @@ function streamResponse(upstreamBody, { model, conversationId, turnRequestId, to
 async function jsonBodyResponse(upstreamBody, { model, conversationId, turnRequestId, token, proxyOptions, clientSignal, log }) {
   let text = "";
   let reasoning = "";
-  const toolCalls = [];
-  const seenTools = new Set();
+  // toolCallId → {id, name, args}. Frames are cumulative, so the LAST frame
+  // holds each tool's complete arguments; recording at first sighting would
+  // freeze the partial prefix (measured: args arrive "" → `{"city": ` → full).
+  const toolsById = new Map();
   let usage = null;
   let failure = null;
   let failureStatus = HTTP_STATUS.BAD_GATEWAY;
@@ -1042,21 +1064,23 @@ async function jsonBodyResponse(upstreamBody, { model, conversationId, turnReque
         continue;
       }
       const blocks = Array.isArray(message.content) ? message.content : [];
+      // Join this frame's blocks exactly like streamResponse does — a message can
+      // carry several text blocks, and last-block-wins would drop the others.
+      let frameText = "";
+      let frameReasoning = "";
       for (const block of blocks) {
-        const blockT = blockText(block);
-        if (blockT) text = blockT;
-        const blockR = blockReasoning(block);
-        if (blockR) reasoning = blockR;
+        frameText += blockText(block);
+        frameReasoning += blockReasoning(block);
         const tool = blockToolUses(block);
-        if (tool && !seenTools.has(tool.id)) {
-          seenTools.add(tool.id);
-          toolCalls.push({
-            id: tool.id,
-            type: "function",
-            function: { name: tool.name, arguments: tool.args },
-          });
+        if (tool) {
+          const entry = toolsById.get(tool.id) || { id: tool.id, name: tool.name, args: "" };
+          entry.name = tool.name || entry.name;
+          entry.args = tool.args;
+          toolsById.set(tool.id, entry);
         }
       }
+      if (frameText) text = frameText;
+      if (frameReasoning) reasoning = frameReasoning;
       const frameUsage = usageOf(frame);
       if (frameUsage) usage = frameUsage;
     }
@@ -1068,6 +1092,12 @@ async function jsonBodyResponse(upstreamBody, { model, conversationId, turnReque
       log?.warn?.("MIAOSHOU", `non-stream turn failed: ${String(failure).slice(0, 200)}`);
     }
   }
+
+  const toolCalls = [...toolsById.values()].map((tool) => ({
+    id: tool.id,
+    type: "function",
+    function: { name: tool.name, arguments: tool.args },
+  }));
 
   if (failure) {
     return { status: failureStatus, body: { error: openaiError(failureStatus, String(failure), failurePayload) } };
