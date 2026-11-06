@@ -428,3 +428,59 @@ describe("codebuddy-intl parity", () => {
     expect(result.models.map((m) => m.id)).not.toContain("gpt-6-astra");
   });
 });
+
+describe("codebuddy final-review fixes", () => {
+  beforeEach(() => clearCodeBuddyCatalogCache());
+
+  it("shares one probe pass between concurrent callers", async () => {
+    let chats = 0;
+    const slow = async (url, opts = {}) => {
+      if (url.endsWith("/v3/config")) {
+        const data = { models: [row({ id: "glm-5.0-turbo" })], agents: [] };
+        return { ok: true, status: 200, json: async () => ({ code: 0, data }), text: async () => "" };
+      }
+      chats++;
+      await new Promise((r) => setTimeout(r, 30));
+      const body = JSON.parse(opts.body);
+      // Only the ambiguous id refuses a bare request; the routers answer as they do live.
+      if (body.model === "glm-5.0-turbo" && !body.reasoning_effort) return { ok: false, status: 400, json: async () => ({}), text: async () => `data: ${JSON.stringify({ code: 11150 })}` };
+      return chatReply(body.model);
+    };
+    const [a, b] = await Promise.all([
+      resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: slow }),
+      resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: slow }),
+    ]);
+    expect(a.models.map((m) => m.id)).toEqual(b.models.map((m) => m.id));
+    // 1 ambiguous id × 2 shapes (bare + effort) + 4 routers, once — not twice.
+    expect(chats).toBeLessThanOrEqual(6);
+  });
+
+  it("treats a reasoning-only reply as an answer, not an inconclusive probe", async () => {
+    const fn = async (url, opts = {}) => {
+      if (url.endsWith("/v3/config")) {
+        const data = { models: [row({ id: "think-only" })], agents: [] };
+        return { ok: true, status: 200, json: async () => ({ code: 0, data }), text: async () => "" };
+      }
+      return {
+        ok: true, status: 200, json: async () => ({}),
+        text: async () => `data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: "hmm" } }] })}\n\n`,
+      };
+    };
+    const first = await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: fn });
+    expect(first.models.map((m) => m.id)).toContain("think-only");
+    let secondCalls = 0;
+    const counting = async (url, opts) => { if (!url.endsWith("/v3/config")) secondCalls++; return fn(url, opts); };
+    await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: counting });
+    expect(secondCalls).toBe(0);   // verdict cached → no re-probe loop
+  });
+
+  it("prefers the lane-corrected context window over the table's opt-in ceiling", () => {
+    // kimi-k2.8-preview publishes maxInputTokens 1000000, but this lane only gets 300000.
+    const models = normalizeCodeBuddyModels(payload([
+      row({ id: "kimi-k2.8-preview", maxInputTokens: 1000000 }),
+      row({ id: "brand-new-model", maxInputTokens: 1000000 }),
+    ]), "codebuddy-cn");
+    expect(models.find((m) => m.id === "kimi-k2.8-preview").contextLength).toBe(300000);
+    expect(models.find((m) => m.id === "brand-new-model").contextLength).toBe(1000000);
+  });
+});

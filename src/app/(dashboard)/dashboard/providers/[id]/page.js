@@ -6,7 +6,7 @@ import Link from "next/link";
 import Image from "next/image";
 import { getProviderIconSrc, markProviderIconMissing } from "@/shared/utils/providerIcon";
 import { Card, Button, Badge, Input, Modal, CardSkeleton, OAuthModal, KiroOAuthWrapper, CursorAuthModal, ZedAuthModal, MiaoshouAuthModal, XiaomiMimoAuthModal, IFlowCookieModal, GitLabAuthModal, Toggle, Select, EditConnectionModal, NoAuthProxyCard, ConfirmModal } from "@/shared/components";
-import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, WEB_COOKIE_PROVIDERS, getProviderAlias, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, AI_PROVIDERS } from "@/shared/constants/providers";
+import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, WEB_COOKIE_PROVIDERS, LIVE_CATALOG_PROVIDERS, getProviderAlias, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, AI_PROVIDERS } from "@/shared/constants/providers";
 import { getModelsByProviderId, getModelKind } from "@/shared/constants/models";
 import { getThinkingLevels } from "open-sse/providers/thinkingLevels.js";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
@@ -190,7 +190,9 @@ export default function ProviderDetailPage() {
   // itself, so the pool has to be selectable before any connection exists.
   const needsPreConnectProxy = providerId === "antigravity" || providerId === "gemini-cli";
   const staticModels = getModelsByProviderId(providerId);
-  const models = (providerId === "cursor" || providerId === "zed") && liveModels.length > 0
+  // Until the live catalog resolves (a cold CodeBuddy refresh probes the ambiguous ids),
+  // the static registry stays on screen — an empty picker would be worse than a stale one.
+  const models = LIVE_CATALOG_PROVIDERS.has(providerId) && liveModels.length > 0
     ? liveModels
     : staticModels;
   const providerAlias = getProviderAlias(providerId);
@@ -519,7 +521,7 @@ export default function ProviderDetailPage() {
   // the provider id or connection list changes — no polling, no loop.
   // Cursor path is statement-identical to before; zed adds error surfacing.
   useEffect(() => {
-    const isLiveCatalog = providerId === "cursor" || providerId === "zed";
+    const isLiveCatalog = LIVE_CATALOG_PROVIDERS.has(providerId);
     if (!isLiveCatalog) {
       // eslint-disable-next-line react-hooks/set-state-in-effect -- clears the previous provider's live catalog when the route changes
       setLiveModels([]);

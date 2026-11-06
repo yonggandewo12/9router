@@ -31,7 +31,7 @@
 import { randomUUID } from "node:crypto";
 import { PROVIDERS } from "../providers/index.js";
 import { getModelsByProviderId } from "../config/providerModels.js";
-import { getCapabilitiesForModel } from "../providers/capabilities.js";
+import { getCapabilitiesForModel, PROVIDER_CAPABILITIES } from "../providers/capabilities.js";
 import { stripThinkingSuffix } from "../translator/concerns/thinkingUnified.js";
 
 // Gateway-side router aliases: never published in the table, verified answering.
@@ -60,10 +60,14 @@ const VERDICT_TTL_MS = 24 * 60 * 60 * 1000;
 const CONFIG_TTL_MS = 6 * 60 * 60 * 1000;
 const verdicts = new Map(); // providerId → { id: { usable, reason, at } }
 const catalogs = new Map(); // providerId → { models, at }
+// Two tabs opening the same provider page must not each run a probe pass: the second
+// caller joins the first one's promise instead of spending another 18 completions.
+const inFlight = new Map(); // providerId → Promise<result>
 
 export function clearCodeBuddyCatalogCache() {
   verdicts.clear();
   catalogs.clear();
+  inFlight.clear();
 }
 
 function configUrl(baseUrl) {
@@ -82,11 +86,18 @@ function isMediaModel(model) {
   return tags.some((tag) => MEDIA_TAG_RE.test(String(tag)));
 }
 
-// contextWindow prefers the server's own default length: maxInputTokens is the opt-in
-// ceiling (kimi-k2.8-preview publishes [300000, 1000000] and the gateway grants 1M only
-// when the request asks), so budgeting history against it would over-promise a window
-// this lane never gets.
-function contextLength(model) {
+// /v3/config carries no contextWindow at all (0 of 37 rows), only maxInputTokens — which
+// is the opt-in ceiling: kimi-k2.8-preview publishes 1000000 but the gateway grants 1M
+// only when the request asks, and this lane never does. The curated capabilities value is
+// the lane-corrected number, so it wins where it exists; live-only ids fall back to the
+// table. Preferring the raw ceiling would over-promise a window the model never gets.
+function contextLength(model, providerId) {
+  // Only an explicit entry counts: getCapabilitiesForModel falls back to
+  // DEFAULT_CAPABILITIES (200000), and treating that default as curated knowledge would
+  // under-promise every live-only model that actually has a 1M window.
+  const declared = PROVIDER_CAPABILITIES[providerId]?.[model?.id];
+  const curated = Number(declared?.contextWindow);
+  if (Number.isFinite(curated) && curated > 0) return curated;
   const def = Number(model?.contextWindow?.defaultLength);
   if (Number.isFinite(def) && def > 0) return def;
   const max = Number(model?.maxInputTokens);
@@ -115,7 +126,7 @@ export function normalizeCodeBuddyModels(data, providerId) {
     const row = { id, name: model.name || id };
     if (agentListed.has(id)) row.agentListed = true;
     if (model.upstreamModelId && model.upstreamModelId !== id) row.upstreamModelId = model.upstreamModelId;
-    const context = contextLength(model);
+    const context = contextLength(model, providerId);
     if (context) row.contextLength = context;
     const maxOutput = Number(model.maxOutputTokens);
     if (Number.isFinite(maxOutput) && maxOutput > 0) row.maxOutputTokens = maxOutput;
@@ -168,7 +179,10 @@ async function probeModel(baseUrl, headers, token, id, fetchFn, timeoutMs, effor
       if (!payload) continue;
       let json;
       try { json = JSON.parse(payload); } catch { continue; }
-      if (json?.choices?.[0]?.delta?.content) answered = true;
+      const delta = json?.choices?.[0]?.delta;
+      // A reasoning-only reply is still an answer: counting only `content` would leave
+      // such an id permanently "inconclusive" and re-probe it on every refresh.
+      if (delta?.content || delta?.reasoning_content) answered = true;
       const raw = json?.code ?? json?.error?.code;
       if (raw != null) code = String(raw);
     }
@@ -312,8 +326,21 @@ export function recordRetirement(providerId, data) {
 /**
  * Fetch, merge and verify the account's live catalog.
  * Returns `{ models, dropped, warning }`; an empty `models` means "use the static list".
+ * Concurrent callers for the same provider share one pass — a probe costs real
+ * completions, so two tabs must not each pay for it.
  */
-export async function resolveCodeBuddyModels({
+export async function resolveCodeBuddyModels(options = {}) {
+  const providerId = options.providerId;
+  if (!providerId) return { models: [], dropped: [], warning: "no providerId" };
+  const key = `${providerId}|${options.forceRefresh ? "force" : "cached"}`;
+  const running = inFlight.get(key);
+  if (running) return running;
+  const task = resolveCatalog(options).finally(() => inFlight.delete(key));
+  inFlight.set(key, task);
+  return task;
+}
+
+async function resolveCatalog({
   providerId,
   accessToken,
   forceRefresh = false,

@@ -9,6 +9,13 @@ const MEDIA_ENTRY_KEYS = [
   "modelsFetcher", "mediaPriority", "hiddenKinds",
 ];
 
+// Providers whose model list is resolved from the live connection catalog instead of the
+// static registry. Mirrors the customResolver entries in
+// src/app/api/providers/[id]/models/route.js. The provider page needs this set in two
+// places (the fetch effect and the models selection), so it is declared once here rather
+// than as a duplicated `cursor || zed` pair that silently excludes new providers.
+export const LIVE_CATALOG_PROVIDERS = new Set(["cursor", "zed", "codebuddy-cn", "codebuddy-intl"]);
+
 // Build provider UI object from registry entry
 function buildProviderEntry(r) {
   const mediaFields = {};
