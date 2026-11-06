@@ -150,7 +150,7 @@ describe("codebuddy catalog verification pass", () => {
       "glm-4.6": { code: "11102" },
       "glm-5.0-turbo": { code: "11150" },
     });
-    const result = await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: fn, probeDelayMs: 0 });
+    const result = await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: fn });
     expect(result.models.map((m) => m.id)).toEqual(["glm-5.3", "hunyuan-chat", "auto", "fast-model", "balanced-model", "deep-model"]);
     expect(result.dropped).toEqual([
       { id: "glm-4.6", reason: "retired upstream" },
@@ -166,7 +166,7 @@ describe("codebuddy catalog verification pass", () => {
       if (url.endsWith("/v3/config")) return { ok: true, status: 200, json: async () => payload(table), text: async () => "" };
       return { ok: false, status: 429, json: async () => ({}), text: async () => "too many" };
     };
-    const result = await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: flaky, probeDelayMs: 0 });
+    const result = await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: flaky });
     expect(result.models.map((m) => m.id)).toContain("glm-4.6");
     expect(result.dropped).toEqual([]);
     expect(fn).toBeDefined();
@@ -174,11 +174,11 @@ describe("codebuddy catalog verification pass", () => {
 
   it("reuses cached verdicts instead of re-probing on the next call", async () => {
     const first = stubFetch(table, { "glm-4.6": { code: "11102" } });
-    await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: first.fn, probeDelayMs: 0 });
+    await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: first.fn });
     const probesAfterFirst = first.calls.chat.length;
 
     const second = stubFetch(table, { "glm-4.6": { code: "11102" } });
-    const again = await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: second.fn, probeDelayMs: 0 });
+    const again = await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: second.fn });
     expect(second.calls.config).toBe(0);            // catalog cached too
     expect(second.calls.chat.length).toBe(0);       // verdicts cached → no re-probe
     expect(again.dropped.map((d) => d.id)).toEqual(["glm-4.6"]);
@@ -187,9 +187,9 @@ describe("codebuddy catalog verification pass", () => {
 
   it("forceRefresh re-probes and can bring a model back", async () => {
     const s1 = stubFetch(table, { "glm-4.6": { code: "11102" } });
-    await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: s1.fn, probeDelayMs: 0 });
+    await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: s1.fn });
     const s2 = stubFetch(table); // glm-4.6 answers now
-    const back = await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: s2.fn, forceRefresh: true, probeDelayMs: 0 });
+    const back = await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: s2.fn, forceRefresh: true });
     expect(back.models.map((m) => m.id)).toContain("glm-4.6");
     expect(back.dropped).toEqual([]);
   });
@@ -199,7 +199,7 @@ describe("codebuddy catalog verification pass", () => {
     expect(noToken).toMatchObject({ models: [], warning: expect.stringContaining("no token") });
 
     const empty = stubFetch([]);
-    const noRows = await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: empty.fn, probeDelayMs: 0 });
+    const noRows = await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: empty.fn });
     expect(noRows.models).toEqual([]);
     expect(noRows.warning).toContain("empty");
   });
@@ -210,12 +210,12 @@ describe("codebuddy verdict cache semantics", () => {
 
   it("probes a newly published id even when the rest of the catalog is cached", async () => {
     const s1 = stubFetch([row({ id: "glm-5.3" })]);
-    await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: s1.fn, probeDelayMs: 0 });
+    await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: s1.fn });
 
     // The server publishes a second model. A whole-pass cache check would skip it and
     // ship an unverified id; the per-id check has to probe exactly this one.
     const s2 = stubFetch([row({ id: "glm-5.3" }), row({ id: "brand-new", credits: "x0.10 credits" })], { "brand-new": { code: "11102" } });
-    const second = await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: s2.fn, forceRefresh: true, probeDelayMs: 0 });
+    const second = await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: s2.fn, forceRefresh: true });
     expect(s2.calls.chat).toContain("brand-new");
     expect(second.models.map((m) => m.id)).not.toContain("brand-new");
   });
@@ -224,11 +224,11 @@ describe("codebuddy verdict cache semantics", () => {
     const unreachable = async (url) => (url.endsWith("/v3/config")
       ? { ok: true, status: 200, json: async () => payload([row({ id: "glm-5.3" })]), text: async () => "" }
       : { ok: false, status: 429, json: async () => ({}), text: async () => "busy" });
-    const first = await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: unreachable, probeDelayMs: 0 });
+    const first = await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: unreachable });
     expect(first.models.map((m) => m.id)).toContain("glm-5.3");
 
     const retried = stubFetch([row({ id: "glm-5.3" })]);
-    await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: retried.fn, probeDelayMs: 0 });
+    await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: retried.fn });
     expect(retried.calls.chat).toContain("glm-5.3");   // not swallowed by a cached guess
   });
 });

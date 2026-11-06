@@ -162,16 +162,19 @@ async function probeModel(baseUrl, headers, token, id, fetchFn, timeoutMs) {
  * Keep only the models the gateway will actually answer. Cached verdicts make a refresh
  * cheap; `forceRefresh` re-probes everything.
  */
-async function applyProbePass(providerId, models, { token, baseUrl, headers, fetchFn, forceRefresh, log, probeTimeoutMs, probeDelayMs }) {
+async function applyProbePass(providerId, models, { token, baseUrl, headers, fetchFn, forceRefresh, log, probeTimeoutMs, probeConcurrency }) {
   const store = verdicts.get(providerId) || new Map();
   const now = Date.now();
 
-  for (const model of models) {
-    // Verdicts are per id, not per pass: a model the server published since the last
-    // refresh has no verdict at all and must be probed even when everything around it is
-    // still cached.
+  // Verdicts are per id, not per pass: a model the server published since the last
+  // refresh has no verdict at all and must be probed even when everything around it is
+  // still cached.
+  const pending = models.filter((model) => {
     const known = store.get(model.id);
-    if (!forceRefresh && known && now - known.at < VERDICT_TTL_MS) continue;
+    return forceRefresh || !known || now - known.at >= VERDICT_TTL_MS;
+  });
+
+  const probeOne = async (model) => {
     const probe = await probeModel(baseUrl, headers, token, model.id, fetchFn, probeTimeoutMs);
     if (probe.answered) {
       store.set(model.id, { usable: true, reason: "", at: Date.now() });
@@ -183,8 +186,16 @@ async function applyProbePass(providerId, models, { token, baseUrl, headers, fet
       // next refresh re-tries an id we only failed to reach.
       log?.warn?.("CODEBUDDY-MODELS", `probe inconclusive for ${model.id} (HTTP ${probe.status}) — kept, not cached`);
     }
-    if (probeDelayMs) await new Promise((resolve) => setTimeout(resolve, probeDelayMs));
-  }
+  };
+
+  // Bounded parallelism, not a serial loop: the gateway handles 6-way concurrency in
+  // ~8s wall (measured 2026-11-06), while a serial pass over ~37 ids took 137s and stalls
+  // the dashboard request that triggered it.
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < pending.length) await probeOne(pending[cursor++]);
+  };
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(probeConcurrency, pending.length)) }, worker));
   verdicts.set(providerId, store);
 
   const kept = [];
@@ -209,7 +220,7 @@ export async function resolveCodeBuddyModels({
   fetchFn = globalThis.fetch,
   probe = true,
   probeTimeoutMs = 20000,
-  probeDelayMs = 400,
+  probeConcurrency = 4,
 } = {}) {
   const transport = PROVIDERS[providerId];
   if (!transport?.baseUrl) return { models: [], warning: `${providerId} has no transport baseUrl` };
@@ -257,7 +268,7 @@ export async function resolveCodeBuddyModels({
     forceRefresh,
     log,
     probeTimeoutMs,
-    probeDelayMs,
+    probeConcurrency,
   });
   return { models: kept, dropped };
 }
