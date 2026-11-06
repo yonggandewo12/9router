@@ -49,10 +49,14 @@ export default {
   },
   models: [
     { id: "glm-5.2", name: "GLM-5.2" },
-    // glm-5.1 dropped 2026-11-06: it is absent from the account's /v3/config table and a
-    // bare request 400s with code 11150 ("the reasoning effort value is not supported by
-    // the current model") — it only answers once reasoning_effort is sent, which a plain
-    // OpenAI client never does. Keeping it published meant a selectable id that 400'd.
+    // Both ids answer only when the request carries a reasoning_effort (bare → 400 code
+    // 11150); capabilities marks them thinkingRequired and executors/codebuddy-cn.js
+    // injects "low", which is the one combination probed safe on 2026-11-06 — "low" plus
+    // reasoning_summary works too but adds thinking a plain client did not ask for.
+    // They are absent from the account's /v3/config table, so the live refresh does not
+    // surface them and they stay curated here.
+    { id: "glm-5.1", name: "GLM-5.1" },
+    { id: "glm-5.0-turbo", name: "GLM-5.0-Turbo" },
     { id: "minimax-m3", name: "MiniMax-M3" },
     // Catalog mirrors the server's product-config payload. That payload has a
     // real address — GET {baseUrl}/console/enterprises/{enterpriseId}/config/models,

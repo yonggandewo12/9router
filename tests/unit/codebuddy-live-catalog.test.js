@@ -9,6 +9,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 
 import { normalizeCodeBuddyModels } from "open-sse/services/codebuddyModels.js";
 import registry from "open-sse/providers/registry/index.js";
+import { getCapabilitiesForModel } from "open-sse/providers/capabilities.js";
 
 const row = (over) => ({
   id: "glm-5.3",
@@ -100,16 +101,24 @@ describe("codebuddy live catalog normalization", () => {
 });
 
 describe("codebuddy registry hygiene", () => {
-  it("does not publish glm-5.1, which 400s code 11150 on a bare request", () => {
+  it("publishes glm-5.1 / glm-5.0-turbo and marks them thinkingRequired", () => {
     const cn = registry.find((p) => p.id === "codebuddy-cn");
-    expect(cn.models.map((m) => m.id)).not.toContain("glm-5.1");
+    const ids = cn.models.map((m) => m.id);
+    expect(ids).toContain("glm-5.1");
+    expect(ids).toContain("glm-5.0-turbo");
+    // Both 400 code 11150 on a bare request, so the flag that makes the executor inject
+    // an effort has to be set or the id is a selectable dead end again.
+    for (const id of ["glm-5.1", "glm-5.0-turbo"]) {
+      expect(getCapabilitiesForModel("codebuddy-cn", id).thinkingRequired).toBe(true);
+    }
+    expect(getCapabilitiesForModel("codebuddy-cn", "glm-5.3").thinkingRequired).toBeFalsy();
   });
 });
 
 // The table alone cannot answer "is this callable" — seven published CN rows 400 on chat
 // (probed 2026-11-06) — so resolveCodeBuddyModels verifies each id with the smallest
 // possible plain request and only drops the ones the gateway itself disavows.
-import { resolveCodeBuddyModels, clearCodeBuddyCatalogCache } from "open-sse/services/codebuddyModels.js";
+import { resolveCodeBuddyModels, clearCodeBuddyCatalogCache, markModelUnusable, requiresReasoningEffort } from "open-sse/services/codebuddyModels.js";
 
 const chatReply = (id, { code = "", content = "ok" } = {}) => ({
   status: code ? 400 : 200,
@@ -230,5 +239,92 @@ describe("codebuddy verdict cache semantics", () => {
     const retried = stubFetch([row({ id: "glm-5.3" })]);
     await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: retried.fn });
     expect(retried.calls.chat).toContain("glm-5.3");   // not swallowed by a cached guess
+  });
+});
+
+describe("codebuddy 11150 self-healing", () => {
+  beforeEach(() => clearCodeBuddyCatalogCache());
+
+  it("keeps an id that only answers with an injected effort, and records why", async () => {
+    const fn = async (url, opts = {}) => {
+      const body = JSON.parse(opts.body || "{}");
+      if (url.endsWith("/v3/config")) return { ok: true, status: 200, json: async () => payload([row({ id: "glm-5.1" })]), text: async () => "" };
+      // 11150 unless the request carries reasoning_effort — exactly glm-5.1's behaviour
+      if (!body.reasoning_effort) return { ok: false, status: 400, json: async () => ({}), text: async () => `data: ${JSON.stringify({ code: 11150, msg: "no effort" })}` };
+      return chatReply(body.model);
+    };
+    const result = await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: fn });
+    expect(result.models.map((m) => m.id)).toContain("glm-5.1");
+    expect(result.dropped).toEqual([]);
+    expect(requiresReasoningEffort("codebuddy-cn", "glm-5.1")).toBe(true);
+  });
+
+  it("drops the id when even an effort does not help", async () => {
+    const fn = async (url) => (url.endsWith("/v3/config")
+      ? { ok: true, status: 200, json: async () => payload([row({ id: "broken" })]), text: async () => "" }
+      : { ok: false, status: 400, json: async () => ({}), text: async () => `data: ${JSON.stringify({ code: 11150, msg: "no" })}` });
+    const result = await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: fn });
+    expect(result.dropped.map((d) => d.id)).toContain("broken");
+    expect(result.models.map((m) => m.id)).not.toContain("broken");
+  });
+
+  it("records a retirement seen in live traffic so the next refresh drops it at once", async () => {
+    const table = [row({ id: "glm-5.3" }), row({ id: "minimax-m2.5" })];
+    const ok = async (url, opts = {}) => {
+      if (url.endsWith("/v3/config")) return { ok: true, status: 200, json: async () => payload(table), text: async () => "" };
+      return chatReply(JSON.parse(opts.body).model);
+    };
+    const first = await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: ok });
+    expect(first.models.map((m) => m.id)).toContain("minimax-m2.5");
+
+    markModelUnusable("codebuddy-cn", "minimax-m2.5", "retired upstream");
+    const second = await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: ok });
+    expect(second.models.map((m) => m.id)).not.toContain("minimax-m2.5");
+    expect(second.dropped).toEqual([{ id: "minimax-m2.5", reason: "retired upstream" }]);
+  });
+});
+
+// The executor is what makes glm-5.1 callable for a client that asks for nothing.
+import { CodeBuddyExecutor } from "open-sse/executors/codebuddy-cn.js";
+
+describe("codebuddy executor effort injection", () => {
+  const executor = new CodeBuddyExecutor();
+  const base = () => ({ model: "glm-5.1", messages: [{ role: "user", content: "hi" }] });
+
+  it("injects reasoning_effort for a thinkingRequired model on a plain request", () => {
+    const out = executor.transformRequest("glm-5.1", base(), true, {});
+    expect(out.reasoning_effort).toBe("low");
+    // …and deliberately not reasoning_summary, which is what #2071 was about.
+    expect(out.reasoning_summary).toBeUndefined();
+  });
+
+  it("leaves models that accept a bare request untouched", () => {
+    const out = executor.transformRequest("glm-5.3", { ...base(), model: "glm-5.3" }, true, {});
+    expect(out.reasoning_effort).toBeUndefined();
+  });
+
+  it("never overrides an effort the client asked for", () => {
+    const out = executor.transformRequest("glm-5.1", { ...base(), reasoning_effort: "high" }, true, {});
+    expect(out.reasoning_effort).toBe("high");
+    expect(out.reasoning_summary).toBe("auto");
+  });
+
+  it("still drops reasoning_effort:none (the gateway has no none)", () => {
+    const out = executor.transformRequest("glm-5.3", { ...base(), model: "glm-5.3", reasoning_effort: "none" }, true, {});
+    expect(out.reasoning_effort).toBeUndefined();
+  });
+
+  it("learns a retirement from the gateway's own error text", async () => {
+    const res = { status: 400 };
+    executor.parseError(res, JSON.stringify({ code: 11102, msg: "model [kimi-k2-thinking] service info not found" }));
+    // Recorded as unusable, so the next refresh drops it without waiting for the TTL.
+    const refreshed = await resolveCodeBuddyModels({
+      providerId: "codebuddy-cn",
+      accessToken: "T",
+      fetchFn: async (url, opts = {}) => (url.endsWith("/v3/config")
+        ? { ok: true, status: 200, json: async () => payload([row({ id: "kimi-k2-thinking" })]), text: async () => "" }
+        : chatReply(JSON.parse(opts.body).model)),
+    });
+    expect(refreshed.models.map((m) => m.id)).not.toContain("kimi-k2-thinking");
   });
 });

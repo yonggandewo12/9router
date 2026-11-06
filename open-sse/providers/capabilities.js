@@ -448,8 +448,14 @@ export const PROVIDER_CAPABILITIES = {
   // below; it is NOT the inverse of onlyReasoning.
   "codebuddy-cn": {
     "glm-5.2":            { vision: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: true, contextWindow: 1000000, maxOutput: 131072 },
-    // glm-5.1 removed 2026-11-06 with the registry id: unpublished in /v3/config and
-    // 400 code 11150 on a bare request (it needs an explicit reasoning_effort).
+    // thinkingRequired: the gateway 400s code 11150 ("the reasoning effort value is not
+    // supported by the current model") when the request carries NO reasoning_effort, so
+    // executors/codebuddy-cn.js injects "low" for a client that asked for nothing.
+    // Probed 2026-11-06: bare → 400/11150, effort=low → 200 with 657 chars of
+    // reasoning_content. Neither id is in the account's /v3/config table, so the refresh
+    // cannot learn this and it is pinned here.
+    "glm-5.1":            { vision: true, reasoning: true, thinkingFormat: "openai", thinkingRequired: true, contextWindow: 200000, maxOutput: 48000 },
+    "glm-5.0-turbo":      { vision: true, reasoning: true, thinkingFormat: "openai", thinkingRequired: true, contextWindow: 200000, maxOutput: 48000 },
     // table (the old 38000 had no source and truncated output).
     "minimax-m3":         { vision: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false, contextWindow: 512000, maxOutput: 524288 },
     // Per-model values mirror the server's product-config payload (the plugin

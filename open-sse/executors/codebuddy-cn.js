@@ -1,5 +1,15 @@
 import { DefaultExecutor } from "./default.js";
 import { refreshCodebuddyToken } from "../services/tokenRefresh/providers.js";
+import { getCapabilitiesForModel } from "../providers/capabilities.js";
+import { markModelUnusable, requiresReasoningEffort } from "../services/codebuddyModels.js";
+
+const PROVIDER_ID = "codebuddy-cn";
+
+// Codes that are a statement about the model, not about this request.
+const RETIRED_CODES = {
+  "11102": "retired upstream",
+  "11103": "backend not served on the chat endpoint",
+};
 
 /**
  * CodeBuddyExecutor — talks to https://copilot.tencent.com/v2/chat/completions
@@ -74,6 +84,19 @@ export class CodeBuddyExecutor extends DefaultExecutor {
     // No reasoning requested: leave both unset. Forcing reasoning_effort:"medium"
     // + reasoning_summary on plain requests makes CodeBuddy trip its content
     // filter and return an error (#2071).
+    //
+    // Exception, probed 2026-11-06: glm-5.1 and glm-5.0-turbo 400 with code 11150 ("the
+    // reasoning effort value is not supported by the current model") unless the request
+    // carries one at all, so a plain client could never use them. "low" alone (without
+    // reasoning_summary, which is what #2071 was about) answers cleanly and costs less
+    // than the published default of medium/high. The flag comes from capabilities for the
+    // curated ids and from the probe verdict for anything the live catalog surfaced.
+    if (!transformed.reasoning_effort) {
+      const caps = getCapabilitiesForModel(PROVIDER_ID, model);
+      if (caps.thinkingRequired === true || requiresReasoningEffort(PROVIDER_ID, model)) {
+        transformed.reasoning_effort = "low";
+      }
+    }
 
     // tool_choice is a plain string field on the gateway's Go struct, so the
     // OpenAI object form — which translator/formats/openai.js emits when a client
@@ -92,6 +115,15 @@ export class CodeBuddyExecutor extends DefaultExecutor {
       try {
         const data = JSON.parse(bodyText);
         const msg = data?.msg || data?.message || data?.error?.message || "";
+        // A real 11102/11103 in traffic is the gateway telling us this id is gone, and it
+        // names the model in the message. Recording it here means the next catalog
+        // refresh drops the id without waiting out the 24h verdict TTL — no polling, and
+        // a retirement discovered by one user's failed request is fixed for everyone.
+        const code = String(data?.code ?? "");
+        if (RETIRED_CODES[code]) {
+          const named = /model\s*\[([^\]]+)\]/i.exec(msg);
+          if (named) markModelUnusable(PROVIDER_ID, named[1].trim(), RETIRED_CODES[code]);
+        }
         if (data?.code === 6004 || /超出频率限制|frequency limit|限额/i.test(msg)) {
           let resetsAtMs = null;
           const match = msg.match(/(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})(?:\s*UTC\+?([0-9:]+))?/i);

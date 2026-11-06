@@ -131,13 +131,16 @@ export function normalizeCodeBuddyModels(data, providerId) {
 }
 
 // One chat request, one model, no thinking fields: exactly what a plain OpenAI client
-// sends, which is the contract we are testing.
-async function probeModel(baseUrl, headers, token, id, fetchFn, timeoutMs) {
+// sends, which is the contract we are testing. `effort` is the retry shape for the ids that
+// reject a request carrying no reasoning_effort (code 11150).
+async function probeModel(baseUrl, headers, token, id, fetchFn, timeoutMs, effort = null) {
+  const body = { model: id, stream: true, messages: [{ role: "user", content: "ok" }] };
+  if (effort) body.reasoning_effort = effort;
   try {
     const res = await fetchFn(`${new URL(baseUrl).origin}/v2/chat/completions`, {
       method: "POST",
       headers: { ...headers, Authorization: `Bearer ${token}`, Accept: "text/event-stream" },
-      body: JSON.stringify({ model: id, stream: true, messages: [{ role: "user", content: "ok" }] }),
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(timeoutMs),
     });
     const text = await res.text();
@@ -178,6 +181,18 @@ async function applyProbePass(providerId, models, { token, baseUrl, headers, fet
     const probe = await probeModel(baseUrl, headers, token, model.id, fetchFn, probeTimeoutMs);
     if (probe.answered) {
       store.set(model.id, { usable: true, reason: "", at: Date.now() });
+    } else if (probe.code === "11150") {
+      // 11150 is not a retirement: the id rejects a request that carries no
+      // reasoning_effort. Retry once with "low" — the level probed safe on glm-5.1 and
+      // glm-5.0-turbo — and keep the model, remembering that the executor has to inject.
+      const retry = await probeModel(baseUrl, headers, token, model.id, fetchFn, probeTimeoutMs, "low");
+      if (retry.answered) {
+        store.set(model.id, { usable: true, reason: "", thinkingRequired: true, at: Date.now() });
+        log?.warn?.("CODEBUDDY-MODELS", `keep ${model.id}: needs reasoning_effort, injected on the way out`);
+      } else {
+        store.set(model.id, { usable: false, reason: DEAD_CODES["11150"], code: "11150", at: Date.now() });
+        log?.warn?.("CODEBUDDY-MODELS", `drop ${model.id}: still 11150 with an effort`);
+      }
     } else if (DEAD_CODES[probe.code]) {
       store.set(model.id, { usable: false, reason: DEAD_CODES[probe.code], code: probe.code, at: Date.now() });
       log?.warn?.("CODEBUDDY-MODELS", `drop ${model.id}: ${probe.code} ${DEAD_CODES[probe.code]}`);
@@ -206,6 +221,27 @@ async function applyProbePass(providerId, models, { token, baseUrl, headers, fet
     else kept.push(model);
   }
   return { kept, dropped };
+}
+
+/**
+ * Record a retirement seen in real traffic, so the next refresh drops the id
+ * immediately instead of waiting out the 24h verdict TTL. The gateway names the model in
+ * its own error text ("model [x] service info not found"), which is what lets a plain
+ * failed request become catalog knowledge.
+ */
+export function markModelUnusable(providerId, modelId, reason = "retired upstream") {
+  if (!providerId || !modelId) return;
+  const store = verdicts.get(providerId) || new Map();
+  store.set(modelId, { usable: false, reason, at: Date.now() });
+  verdicts.set(providerId, store);
+}
+
+/**
+ * True when the last known verdict says this id needs an explicit reasoning_effort —
+ * either the probe had to inject one, or real traffic hit 11150.
+ */
+export function requiresReasoningEffort(providerId, modelId) {
+  return verdicts.get(providerId)?.get(modelId)?.thinkingRequired === true;
 }
 
 /**
