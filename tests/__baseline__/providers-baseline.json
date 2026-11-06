@@ -1327,5 +1327,16 @@
     "forceStream": true,
     "authType": "cookie",
     "timeoutMs": 600000
+  },
+  "joyagent": {
+    "baseUrl": "https://joyagent.jd.com/work/api/v1/models/openai-u/v1/chat/completions",
+    "format": "openai",
+    "authType": "cookie",
+    "timeoutMs": 300000,
+    "headers": {
+      "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+      "Origin": "https://joyagent.jd.com",
+      "Referer": "https://joyagent.jd.com/app/"
+    }
   }
 }

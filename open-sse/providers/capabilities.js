@@ -302,6 +302,29 @@ export const PROVIDER_CAPABILITIES = {
     // declared and the rare miss is the user's cue to pin a concrete model.
     "auto":                { vision: true, contextWindow: 204800, maxOutput: 32000 },
   },
+  // JoyAgent (京东) openai-u gateway. Every row here is a live measurement from
+  // 2026-11-06, not the models.dev description of the same model:
+  //   • vision:false — the endpoint answers 400 "Bad Request: [message type
+  //     'image_url' is not supported]" for ALL of them, and the catalog's own
+  //     inputModalities is ["TEXT"] only. Declaring it per row is what keeps
+  //     visionPatterns.js from switching it back on by name.
+  //   • reasoning — read off `delta.reasoning_content` / completion_tokens_details
+  //     .reasoning_tokens per model. DeepSeek-v4-pro answered a 鸡兔同笼 prompt
+  //     with a full worked solution and reasoning_tokens:0, so it is the one
+  //     row that genuinely does not think on this gateway; the others all
+  //     emitted reasoning_content.
+  //   • contextWindow/maxOutput — the gateway's declared `contextLength` /
+  //     `responseTokens` from GET /work/api/v1/models. Not measurable from the
+  //     response (this endpoint returns no context metadata); `max_tokens` IS
+  //     honoured (8 → finish_reason "length"), so the ceiling is the number to
+  //     trust until a long generation proves otherwise.
+  "joyagent": {
+    "jd/deepseek-v4-pro-0813": { reasoning: false, vision: false, contextWindow: 200000, maxOutput: 4096 },
+    "kimi-k3": { reasoning: true, vision: false, contextWindow: 2000000, maxOutput: 4096 },
+    "GLM-5.3": { reasoning: true, vision: false, contextWindow: 1000000, maxOutput: 4096 },
+    "MiniMax-M3": { reasoning: true, vision: false, contextWindow: 200000, maxOutput: 4096 },
+    "Qwen3.5-397B-A17B": { reasoning: true, vision: false, contextWindow: 100000, maxOutput: 4096 },
+  },
   // NVIDIA NIM is OpenAI-compatible → rejects MiniMax/GLM native `thinking` field.
   // Force openai reasoning_effort format for its reasoning models. #issue
   "nvidia": {

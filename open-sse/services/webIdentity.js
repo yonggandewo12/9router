@@ -9,6 +9,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import { extractCookieValue, normalizeSessionCookieHeader } from "../utils/webCookieAuth.js";
 import { extractMiaoshouToken } from "../shared/miaoshou/credentials.js";
+import { probeJoyagentCookie } from "../shared/joyagent/credentials.js";
 import { grokTlsFetch, GROK_TLS_USER_AGENT } from "./grokTlsClient.js";
 import { unwrapLocalStorageToken } from "./webLoginConfig.js";
 
@@ -120,6 +121,27 @@ const PROBES = {
     const models = Array.isArray(json?.data) ? json.data : [];
     if (!models.length) return REJECTED("妙手 session is not signed in");
     return OK("");
+  },
+
+  async "joyagent"(credential) {
+    // JoyAgent has no single session token: the gateway accepts the JD passport
+    // cookie jar, or `ptKey` on its own. So the whole pasted header is the
+    // credential and the model catalog is the cheapest live check — it answers
+    // 401 AUTHENTICATION_REQUIRED on a dead session and a 5-row list on a good
+    // one, and it mints the short-lived jwaAccessToken as a side effect.
+    const cookie = normalizeSessionCookieHeader(credential, "ptKey");
+    if (!cookie) return REJECTED("Missing JoyAgent cookie");
+    // `request()` already drained the body and honours the proxy the login
+    // window used, so hand the probe a Response-shaped view of it.
+    const probe = await probeJoyagentCookie(cookie, {
+      fetchImpl: async (url, opts) => {
+        const r = await request(url, { headers: opts?.headers || {} });
+        return { status: r.status, ok: r.ok, error: r.error, text: async () => r.text };
+      },
+    });
+    if (probe.inconclusive) return UNKNOWN(probe.error);
+    if (!probe.ok) return REJECTED(probe.error);
+    return OK(probe.account || "");
   },
 
   async "chatgpt-web"(credential) {

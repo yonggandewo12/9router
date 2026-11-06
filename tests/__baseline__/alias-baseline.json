@@ -134,7 +134,13 @@
     "nous": "nous",
     "nous-portal": "nous",
     "nous-research": "nous",
-    "ns": "nous"
+    "ns": "nous",
+    "ms": "miaoshou",
+    "miaoshou": "miaoshou",
+    "catpaw": "miaoshou",
+    "ja": "joyagent",
+    "joyagent": "joyagent",
+    "joywork": "joyagent"
   },
   "idToAlias": {
     "agnes": "agnes",
@@ -206,6 +212,7 @@
     "inworld": "inworld",
     "jina-ai": "jina",
     "jina-reader": "jina-reader",
+    "joyagent": "ja",
     "kilo-gateway": "kgw",
     "kilocode": "kc",
     "kimchi": "kimchi",
@@ -341,6 +348,7 @@
     "hunyuan",
     "hyperbolic",
     "if",
+    "ja",
     "kc",
     "kgw",
     "kimchi",

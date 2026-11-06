@@ -38,6 +38,10 @@ const SPECIALIZED = new Set([
   // (Cookie: X-Passport-Token, no bearer) on a session-scoped SSE API. Locked in
   // tests/unit/miaoshou-provider.test.js.
   "miaoshou",
+  // JoyAgent (京东): the credential is a JD cookie jar sent as `Cookie`, and
+  // DefaultExecutor's `Authorization: Bearer <apiKey>` is exactly what the
+  // gateway 401s. Locked in tests/unit/joyagent-provider.test.js.
+  "joyagent",
 ]);
 
 // Sanitize header:  khử token + field thời gian động (kimi X-Msh-Device-Id) để snapshot ổn định.

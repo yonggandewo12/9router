@@ -61,6 +61,7 @@ const PROVIDER_ID_TO_ALIAS = {
   "grok-cli": "gcli",
   iflow: "if",
   "jina-ai": "jina",
+  joyagent: "ja",
   "kilo-gateway": "kgw",
   kilocode: "kc",
   kiro: "kr",
