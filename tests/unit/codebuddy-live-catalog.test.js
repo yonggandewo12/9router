@@ -68,15 +68,6 @@ describe("codebuddy live catalog normalization", () => {
     expect(models.find((m) => m.id === "auto")).toMatchObject({ rateMultiplier: 0.2 });
   });
 
-  it("prefers the server's default context length over the opt-in ceiling", () => {
-    // kimi-k2.8-preview publishes [300000, 1000000]; the gateway only grants 1M when the
-    // request opts in, and this lane never does.
-    const models = normalizeCodeBuddyModels(payload([
-      row({ id: "kimi-k2.8-preview", maxInputTokens: 1000000, contextWindow: { defaultLength: 300000, supportedLengths: [300000, 1000000] } }),
-    ]), "codebuddy-cn");
-    expect(models.find((m) => m.id === "kimi-k2.8-preview").contextLength).toBe(300000);
-  });
-
   it("leaves the rate out rather than inventing one", () => {
     const models = normalizeCodeBuddyModels(payload([
       row({ id: "hunyuan-chat", credits: undefined }),
@@ -287,6 +278,8 @@ describe("codebuddy 11150 self-healing", () => {
 // The executor is what makes glm-5.1 callable for a client that asks for nothing.
 import { CodeBuddyExecutor } from "open-sse/executors/codebuddy-cn.js";
 
+const CnExecutor = CodeBuddyExecutor;
+
 describe("codebuddy executor effort injection", () => {
   const executor = new CodeBuddyExecutor();
   const base = () => ({ model: "glm-5.1", messages: [{ role: "user", content: "hi" }] });
@@ -372,6 +365,17 @@ describe("codebuddy probe tiering (model-call budget)", () => {
     markModelUnusable("codebuddy-cn", "glm-5.3", "retired upstream");
     const result = await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: fn });
     expect(result.models.map((m) => m.id)).not.toContain("glm-5.3");
+  });
+});
+
+describe("codebuddy oversized prompt", () => {
+  it("reports 11115 as 413 without trusting the gateway's own numbers", () => {
+    const parsed = new CnExecutor().parseError(
+      { status: 400 },
+      JSON.stringify({ code: 11115, msg: "prompt is too long: 100001 tokens > 100000 maximum" })
+    );
+    expect(parsed.status).toBe(413);
+    expect(parsed.message).toContain("100001 tokens");
   });
 });
 
@@ -474,13 +478,16 @@ describe("codebuddy final-review fixes", () => {
     expect(secondCalls).toBe(0);   // verdict cached → no re-probe loop
   });
 
-  it("prefers the lane-corrected context window over the table's opt-in ceiling", () => {
-    // kimi-k2.8-preview publishes maxInputTokens 1000000, but this lane only gets 300000.
+  it("budgets the LONGEST window the gateway offers, not a client-side default", () => {
+    // supportedLengths / defaultLength are desktop-app history budgets, not wire
+    // parameters: a 493,746-token prompt was accepted with no opt-in (measured 2026-11-06).
     const models = normalizeCodeBuddyModels(payload([
-      row({ id: "kimi-k2.8-preview", maxInputTokens: 1000000 }),
-      row({ id: "brand-new-model", maxInputTokens: 1000000 }),
+      row({ id: "kimi-k2.8-preview", maxInputTokens: 1000000, contextWindow: { defaultLength: 300000, supportedLengths: [300000, 1000000] } }),
+      row({ id: "hy4free", maxInputTokens: 960000, maxAllowedSize: 960000 }),
+      row({ id: "narrow", maxInputTokens: 96000, contextWindow: { supportedLengths: [32000, 64000] } }),
     ]), "codebuddy-cn");
-    expect(models.find((m) => m.id === "kimi-k2.8-preview").contextLength).toBe(300000);
-    expect(models.find((m) => m.id === "brand-new-model").contextLength).toBe(1000000);
+    expect(models.find((m) => m.id === "kimi-k2.8-preview").contextLength).toBe(1000000);
+    expect(models.find((m) => m.id === "hy4free").contextLength).toBe(960000);
+    expect(models.find((m) => m.id === "narrow").contextLength).toBe(96000);
   });
 });

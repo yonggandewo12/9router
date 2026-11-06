@@ -31,7 +31,7 @@
 import { randomUUID } from "node:crypto";
 import { PROVIDERS } from "../providers/index.js";
 import { getModelsByProviderId } from "../config/providerModels.js";
-import { getCapabilitiesForModel, PROVIDER_CAPABILITIES } from "../providers/capabilities.js";
+import { getCapabilitiesForModel } from "../providers/capabilities.js";
 import { stripThinkingSuffix } from "../translator/concerns/thinkingUnified.js";
 
 // Gateway-side router aliases: never published in the table, verified answering.
@@ -86,22 +86,29 @@ function isMediaModel(model) {
   return tags.some((tag) => MEDIA_TAG_RE.test(String(tag)));
 }
 
-// /v3/config carries no contextWindow at all (0 of 37 rows), only maxInputTokens — which
-// is the opt-in ceiling: kimi-k2.8-preview publishes 1000000 but the gateway grants 1M
-// only when the request asks, and this lane never does. The curated capabilities value is
-// the lane-corrected number, so it wins where it exists; live-only ids fall back to the
-// table. Preferring the raw ceiling would over-promise a window the model never gets.
-function contextLength(model, providerId) {
-  // Only an explicit entry counts: getCapabilitiesForModel falls back to
-  // DEFAULT_CAPABILITIES (200000), and treating that default as curated knowledge would
-  // under-promise every live-only model that actually has a 1M window.
-  const declared = PROVIDER_CAPABILITIES[providerId]?.[model?.id];
-  const curated = Number(declared?.contextWindow);
-  if (Number.isFinite(curated) && curated > 0) return curated;
-  const def = Number(model?.contextWindow?.defaultLength);
-  if (Number.isFinite(def) && def > 0) return def;
-  const max = Number(model?.maxInputTokens);
-  return Number.isFinite(max) && max > 0 ? max : undefined;
+// Take the LONGEST window the gateway offers, not its default.
+//
+// The old code preferred the client-side `contextWindow.defaultLength` (300000 for
+// kimi-k2.8-preview) on the theory that the gateway grants 1M only to requests that opt
+// in. That is false: `supportedLengths` is a local history budget in the desktop app
+// (`modelContextSizeBySession`, placeholder sizing) and no such wire field exists in the
+// bundle. Measured 2026-11-06 on the free hy4free row: a 493,746-token prompt answered
+// 200, so nothing had to be asked for.
+//
+// The real ceiling is the model's own, and it is below the published number — hy4free
+// says maxInputTokens 960000 yet rejects ~720,000 tokens with code 11115. The gateway
+// reports that as "prompt is too long: 100001 tokens > 100000 maximum", whose numbers are
+// wrong (we had already passed 493K), so 11115 is surfaced as 413 without parsing it.
+// Budgeting the published maximum is still the right default: it lets long contexts
+// through and the gateway's own refusal is the accurate boundary.
+function contextLength(model) {
+  const candidates = [
+    Number(model?.maxInputTokens),
+    Number(model?.maxAllowedSize),
+    Number(model?.contextWindow?.defaultLength),
+    ...(Array.isArray(model?.contextWindow?.supportedLengths) ? model.contextWindow.supportedLengths.map(Number) : []),
+  ].filter((n) => Number.isFinite(n) && n > 0);
+  return candidates.length ? Math.max(...candidates) : undefined;
 }
 
 export function normalizeCodeBuddyModels(data, providerId) {
@@ -126,7 +133,7 @@ export function normalizeCodeBuddyModels(data, providerId) {
     const row = { id, name: model.name || id };
     if (agentListed.has(id)) row.agentListed = true;
     if (model.upstreamModelId && model.upstreamModelId !== id) row.upstreamModelId = model.upstreamModelId;
-    const context = contextLength(model, providerId);
+    const context = contextLength(model);
     if (context) row.contextLength = context;
     const maxOutput = Number(model.maxOutputTokens);
     if (Number.isFinite(maxOutput) && maxOutput > 0) row.maxOutputTokens = maxOutput;

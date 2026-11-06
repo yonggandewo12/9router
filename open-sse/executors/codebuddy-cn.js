@@ -105,6 +105,14 @@ export class CodeBuddyExecutor extends DefaultExecutor {
         // refresh drops the id without waiting out the 24h verdict TTL — no polling, and
         // a retirement discovered by one user's failed request is fixed for everyone.
         recordRetirement(PROVIDER_ID, data);
+        // 11115 = the prompt is past this model's real ceiling. Report it as 413 so the
+        // client sees an oversized request rather than a generic 400 it might retry. The
+        // gateway's own token counts in the message are wrong (it said "100000 maximum"
+        // for a request that had already passed 493,746), so the text is passed through
+        // unparsed.
+        if (String(data?.code ?? "") === "11115") {
+          return { status: 413, message: msg || "CodeBuddy prompt is too long for this model (11115)" };
+        }
         if (data?.code === 6004 || /超出频率限制|frequency limit|限额/i.test(msg)) {
           let resetsAtMs = null;
           const match = msg.match(/(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})(?:\s*UTC\+?([0-9:]+))?/i);
