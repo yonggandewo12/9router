@@ -5,6 +5,7 @@
 // DeepSeek sign-in page writes {"value":null,...} to localStorage before the
 // user logs in, and treating that envelope as a token ended the capture and
 // closed the browser within a second ("userToken is invalid or expired").
+import { readFileSync } from "node:fs";
 import { describe, it, expect } from "vitest";
 
 import { getWebLoginConfig, unwrapLocalStorageToken, listWebLoginProviders } from "open-sse/services/webLoginConfig.js";
@@ -133,5 +134,28 @@ describe("joyagent web login", () => {
     const found = await harvest(jarContext(LOGGED_IN), config);
     expect(found.cookieHeader).toMatch(/^[^=;]+=[^;]*(; [^=;]+=[^;]*)+$/);
     expect(config.credentialFrom).toBeUndefined();
+  });
+});
+
+describe("dashboard button whitelist stays in sync", () => {
+  // WebLoginButton.js keeps a deliberate CLIENT MIRROR of WEB_LOGIN_CONFIGS'
+  // keys (it is a "use client" JSX module, and this suite runs in the node
+  // environment, so the set is read from source rather than imported).
+  // Without this guard the two drift silently: the server would happily accept
+  // a login for a provider whose button was never rendered — which is exactly
+  // how the joyagent lane nearly shipped as paste-only.
+  const src = readFileSync(
+    new URL("../../src/app/(dashboard)/dashboard/providers/components/WebLoginButton.js", import.meta.url),
+    "utf8"
+  );
+  const block = src.match(/export const WEB_LOGIN_PROVIDERS = new Set\(\[([\s\S]*?)\]\);/);
+
+  it("parses out of the component source", () => {
+    expect(block).toBeTruthy();
+  });
+
+  it("lists exactly the providers the server can actually capture", () => {
+    const listed = [...block[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]).sort();
+    expect(listed).toEqual(listWebLoginProviders().sort());
   });
 });

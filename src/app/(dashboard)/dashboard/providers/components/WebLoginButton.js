@@ -13,6 +13,7 @@ export const WEB_LOGIN_PROVIDERS = new Set([
   "muse-web",
   "deepseek-web",
   "uc-web",
+  "joyagent",
 ]);
 
 const PROFILE_ICON_BY_NAME = {
