@@ -307,7 +307,7 @@ class ZedExecutor extends BaseExecutor {
 
   async refreshCredentials() {
     // Zed uses a long-lived RSA-decrypted access_token — no OAuth refresh.
-    return null;
+    return false;
   }
 
   needsRefresh() {

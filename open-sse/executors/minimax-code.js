@@ -71,7 +71,7 @@ export class MinimaxCodeExecutor extends DefaultExecutor {
         return null;
       }
     }
-    if (!credentials?.refreshToken) return null;
+    if (!credentials?.refreshToken) return false;
     return refreshMiniMaxCodeToken(this.provider, credentials.refreshToken, log);
   }
 }

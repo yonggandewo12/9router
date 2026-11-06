@@ -1154,7 +1154,7 @@ export class KiroExecutor extends BaseExecutor {
   }
 
   async refreshCredentials(credentials, log, proxyOptions = null) {
-    if (!credentials.refreshToken) return null;
+    if (!credentials.refreshToken) return false;
 
     try {
       // Use centralized refreshKiroToken function (handles both AWS SSO OIDC and Social Auth)

@@ -207,7 +207,9 @@ describe("glm executor + usage (dual-auth credentials)", () => {
       { accessToken: PLAN_KEY, refreshToken: null },
       console,
     );
-    expect(result).toBeNull();
+    // `false` is the "nothing to refresh" answer: refreshWithRetry stops on it
+    // instead of sleeping through 3 attempts that could never mint a key.
+    expect(result).toBe(false);
   });
 
   it("fetches quota with the OAuth-minted key stored on accessToken", async () => {

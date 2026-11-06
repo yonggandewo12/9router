@@ -733,11 +733,10 @@ export class MiaoshouExecutor extends BaseExecutor {
     };
   }
 
-  // Auth failures arrive as real 401s here, but keep a refresh hook wired so a
-  // dead passport token produces the same "reconnect" path as other lanes.
-  async refreshCredentials() {
-    return null;
-  }
+  // Auth failures arrive as real 401s here. No refreshCredentials override:
+  // BaseExecutor's `false` is the honest answer for a Passport cookie session,
+  // and it lets refreshWithRetry fail the dead token immediately instead of
+  // sleeping through three attempts that can never mint a new one.
 }
 
 // Mark the server-side conversation terminal. Best-effort: the turn already

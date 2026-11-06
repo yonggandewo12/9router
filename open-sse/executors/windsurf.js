@@ -590,9 +590,6 @@ export class WindsurfExecutor extends BaseExecutor {
   }
 
   // apiKey is long-lived (Firebase-derived or Devin ide_token); refresh handled out-of-band.
-  async refreshCredentials() {
-    return null;
-  }
 }
 
 export default WindsurfExecutor;

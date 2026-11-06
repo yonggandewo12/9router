@@ -280,7 +280,8 @@ export class DefaultExecutor extends BaseExecutor {
   }
 
   async refreshCredentials(credentials, log, proxyOptions = null) {
-    if (!credentials.refreshToken) return null;
+    // Not refreshable (see BaseExecutor's contract): no refresh material at all.
+    if (!credentials.refreshToken) return false;
 
     const refreshers = {
       claude: () => this.refreshFromGrant(credentials, proxyOptions),
@@ -296,7 +297,9 @@ export class DefaultExecutor extends BaseExecutor {
     };
 
     const refresher = refreshers[this.provider];
-    if (!refresher) return null;
+    // A token present but no refresher wired is a config gap, not a transient
+    // failure — retrying the same lookup three times cannot close it.
+    if (!refresher) return false;
 
     try {
       const result = await refresher();

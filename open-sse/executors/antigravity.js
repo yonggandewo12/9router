@@ -348,7 +348,7 @@ export class AntigravityExecutor extends BaseExecutor {
   }
 
   async refreshCredentials(credentials, log, proxyOptions = null) {
-    if (!credentials.refreshToken) return null;
+    if (!credentials.refreshToken) return false;
 
     try {
       const response = await proxyAwareFetch(OAUTH_ENDPOINTS.google.token, {

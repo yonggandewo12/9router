@@ -264,7 +264,7 @@ export class CodexExecutor extends BaseExecutor {
   }
 
   async refreshCredentials(credentials, log) {
-    if (!credentials?.refreshToken) return null;
+    if (!credentials?.refreshToken) return false;
     return refreshProviderCredentials("codex", credentials, log);
   }
 

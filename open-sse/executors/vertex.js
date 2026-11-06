@@ -130,7 +130,7 @@ export class VertexExecutor extends BaseExecutor {
 
   async refreshCredentials(credentials, log) {
     const saJson = parseVertexSaJson(credentials?.apiKey);
-    if (!saJson) return null;
+    if (!saJson) return false;
 
     const result = await refreshVertexToken(saJson, log);
     if (!result) return null;

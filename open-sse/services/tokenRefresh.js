@@ -299,6 +299,13 @@ export async function refreshWithRetry(refreshFn, maxRetries = 3, log = null) {
     try {
       const result = await refreshFn();
       if (result) return result;
+      // `false` is the "this credential can never be refreshed" answer (no
+      // refresh material, no grant for the provider) — retrying it only burns
+      // 1s+2s before the client's 401 comes back, and the "all attempts
+      // failed" line below would then blame a transient failure for what is
+      // really an expired cookie session. null/undefined still mean "this
+      // attempt failed", so those keep retrying.
+      if (result === false) return null;
     } catch (error) {
       log?.warn?.("TOKEN_REFRESH", `Attempt ${attempt + 1}/${maxRetries} failed: ${error.message}`);
     }

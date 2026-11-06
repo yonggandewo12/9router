@@ -372,7 +372,7 @@ export class GrokCliExecutor extends BaseExecutor {
   }
 
   async refreshCredentials(credentials, log, proxyOptions = null) {
-    if (!credentials?.refreshToken) return null;
+    if (!credentials?.refreshToken) return false;
     return refreshProviderCredentials("grok-cli", credentials, log, proxyOptions);
   }
 

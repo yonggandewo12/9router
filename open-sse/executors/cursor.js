@@ -1516,9 +1516,6 @@ export class CursorExecutor extends BaseExecutor {
     });
   }
 
-  async refreshCredentials() {
-    return null;
-  }
 }
 
 export default CursorExecutor;

@@ -406,7 +406,4 @@ export default class TraeExecutor extends BaseExecutor {
 
   // Refresh hook placeholder — Cloud-IDE-JWT is long-lived (~14d); refresh via
   // ExchangeToken (refresh→access) is wired in services/tokenRefresh/providers.js.
-  async refreshCredentials() {
-    return null;
-  }
 }

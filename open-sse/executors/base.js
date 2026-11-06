@@ -97,9 +97,14 @@ export class BaseExecutor {
     return status === HTTP_STATUS.RATE_LIMITED && urlIndex + 1 < this.getFallbackCount();
   }
 
-  // Override in subclass for provider-specific refresh
+  // Override in subclass for provider-specific refresh.
+  // Return contract (read by refreshWithRetry): truthy = new credentials;
+  // null/undefined = this attempt failed, try again; false = this credential
+  // has nothing to refresh with, so the retry loop must not sleep at all.
+  // Cookie-session lanes are the common `false` case: their 401 means the
+  // paste expired, and no number of refresh calls changes that.
   async refreshCredentials(credentials, log, proxyOptions = null) {
-    return null;
+    return false;
   }
 
   needsRefresh(credentials) {
