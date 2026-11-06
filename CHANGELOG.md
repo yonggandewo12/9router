@@ -1,3 +1,23 @@
+# v0.6.25 (2026-11-06)
+
+Follow-up on the JoyAgent lane shipped in v0.6.24: it opened with paste-the-cookie-header as its only credential path, which is the wrong default for a webCookie provider, and fixing that exposed two more defects — one of which meant the button was never rendered at all.
+
+## Features
+
+- **JoyAgent now logs in through a browser window.** `joyagent` is registered in `webLoginConfig.js`, so the dashboard's **Login via Browser** opens a Chromium window at the app, waits for the session, and captures the whole cookie jar — no DevTools, no paste. The paste path stays as the documented fallback. `cookieDomain` must remain `".jd.com"` rather than the app's own host: `matchesDomain()` keeps `.jd.com`, `passport.jd.com` **and** `joyagent.jd.com` under that one filter, and the credential genuinely needs all three tiers — the JD passport cookies alone authenticate the `/work/api` gateway (measured), while `ptKey` lives on the app host. `ptKey` is the readiness signal because it is absent for anonymous visitors (a logged-out jar carried only `qid_*` analytics cookies) and it is the one cookie that authenticates on its own. Verified live end-to-end through the repo's own `startWebLogin`: 35 cookies harvested in 30s, the executor's normalization of the captured header is an identity transform, and the probe reports the session valid.
+
+## Fixes
+
+- **A captured connection is no longer named after a percent-encoded escape.** The probe took the account identity from the `pin` cookie, which JD stores URL-encoded (`%E5%8B%87%E6%95%A2%E7%9A%84%E6%88%9112` for an account whose nick is 勇敢的我12) — and the web-login route uses that value as **both the connection name and the dedup key for a re-login**. The probe now reads `gateway/auth/userInfo`, which answers the decoded identity and is the same single call that mints `jwaAccessToken`. Nothing assumes its shape: an opaque `jd_…` id and a plain nick have both been observed on real accounts. `joyagentAccountLabel` and the catalog URL constant were deleted rather than left as tested-but-unreachable code.
+- **The Login-via-Browser button actually appears.** The previous change assumed the button whitelist is derived from the config table's keys. It is not: `WebLoginButton.js` keeps a deliberate client-side mirror (the component cannot import the server module), and `joyagent` was missing from it — so the config entry alone would have shipped the lane with no button at all. Added to the mirror, and pinned by a parity test that reads the Set out of the component source and asserts it equals `listWebLoginProviders()`.
+
+## Notes
+
+- **Test suite**: 469 files / 4932 passing / 0 failing (15 expected-fail, 97 skipped, 1 todo). 13 cases in `web-login-config.test.js` cover the harvest readiness signal, the domain scoping that keeps the passport tier in the jar, and the mirror parity; the lane suite is 36 cases.
+- **Mutation-checked**: removing `joyagent` from the client mirror fails exactly the parity test and nothing else — the guard has teeth.
+- **One audit correction**: `perplexity-web` showed up as "paste-only" in the previous review pass, but it declares `serviceKinds: []`, which the dashboard reads as **parked** — it is in no provider list, so there is no button to wire. The real inventory is 6 visible webCookie lanes with browser capture and one documented exception (`miaoshou`, whose credential lives in the Meituan desktop app and whose web login was measured to be impossible).
+- **Production `next build` gate run before tagging** (isolated `NEXT_DIST_DIR`).
+
 # v0.6.24 (2026-11-06)
 
 JoyAgent (京东) lands as a cookie-session lane, and the refresh layer finally distinguishes "this credential cannot be refreshed" from "this refresh attempt failed" — the bug that made every dead cookie session cost three seconds and a misleading error line.
