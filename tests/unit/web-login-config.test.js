@@ -7,7 +7,7 @@
 // closed the browser within a second ("userToken is invalid or expired").
 import { describe, it, expect } from "vitest";
 
-import { getWebLoginConfig, unwrapLocalStorageToken } from "open-sse/services/webLoginConfig.js";
+import { getWebLoginConfig, unwrapLocalStorageToken, listWebLoginProviders } from "open-sse/services/webLoginConfig.js";
 import { harvest } from "open-sse/services/webLogin.js";
 
 const PLACEHOLDER = '{"value":null,"__version":"0"}';
@@ -80,5 +80,58 @@ describe("harvest readiness", () => {
   it("still scopes cookies to the provider domain", async () => {
     const found = await harvest(fakeContext({ localStorage: { userToken: REAL_TOKEN } }), config);
     expect(found.cookieHeader).toBe("smidV2=x");
+  });
+});
+
+describe("joyagent web login", () => {
+  // Jar shapes captured live on 2026-11-06 from a real headed-Chromium login:
+  // an anonymous visitor gets only the qid_* analytics cookies, and ptKey /
+  // jwaAccessToken appear on joyagent.jd.com only once the passport flow ends.
+  const GUEST = [
+    { name: "qid_uid", value: "3c85f690", domain: ".jd.com" },
+    { name: "qid_sc", value: "1793926660634", domain: ".jd.com" },
+    { name: "qid_ad", value: "211.61", domain: "joyagent.jd.com" },
+  ];
+  const LOGGED_IN = [
+    ...GUEST,
+    { name: "thor", value: "ABC", domain: ".jd.com" },
+    { name: "pin", value: "jd_AcWZTZQJocwB", domain: ".jd.com" },
+    { name: "unick", value: "jd_test", domain: ".jd.com" },
+    { name: "DeviceSeq", value: "d-1", domain: "passport.jd.com" },
+    { name: "ptKey", value: "jca_E9t3WR7CA-oit73yhf26707LBnOFUJPzCB60K3P7hK0", domain: "joyagent.jd.com" },
+    { name: "jwaAccessToken", value: "jwa_sUVZJL8qzcQQeySJ", domain: "joyagent.jd.com" },
+  ];
+  const jarContext = (cookies) => ({ cookies: async () => cookies, pages: () => [] });
+  const config = getWebLoginConfig("joyagent");
+
+  it("is offered in the dashboard's Login-via-Browser list", () => {
+    // The button whitelist is derived from this table's keys, so a missing
+    // row silently degrades the lane to paste-the-cookie-header.
+    expect(listWebLoginProviders()).toContain("joyagent");
+    expect(config).toBeTruthy();
+    expect(config.loginUrl).toBe("https://joyagent.jd.com/app/#/chat");
+  });
+
+  it("waits for ptKey, which an anonymous visitor never has", async () => {
+    expect(await harvest(jarContext(GUEST), config)).toMatchObject({ ready: false });
+    expect((await harvest(jarContext(LOGGED_IN), config)).ready).toBe(true);
+  });
+
+  it("scopes the jar to .jd.com so the passport tier survives alongside ptKey", async () => {
+    // The gateway authenticates the passport cookies on their own (measured),
+    // so dropping them would trade a year-long session for the ~7-day ptKey.
+    const found = await harvest(jarContext(LOGGED_IN), config);
+    expect(found.cookieHeader).toContain("thor=ABC");
+    expect(found.cookieHeader).toContain("pin=jd_AcWZTZQJocwB");
+    expect(found.cookieHeader).toContain("DeviceSeq=d-1");
+    expect(found.cookieHeader).toContain("ptKey=jca_");
+    // Analytics-only cookies are kept too: harvest filters by domain, not name.
+    expect(found.cookieHeader).toContain("qid_uid=3c85f690");
+  });
+
+  it("keeps the credential a Cookie header rather than a single value", async () => {
+    const found = await harvest(jarContext(LOGGED_IN), config);
+    expect(found.cookieHeader).toMatch(/^[^=;]+=[^;]*(; [^=;]+=[^;]*)+$/);
+    expect(config.credentialFrom).toBeUndefined();
   });
 });

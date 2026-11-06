@@ -85,6 +85,21 @@ export const WEB_LOGIN_CONFIGS = {
       },
     ],
   },
+  // JoyAgent (京东). cookieDomain MUST stay ".jd.com" rather than the app's own
+  // host: matchesDomain() keeps `.jd.com`, `passport.jd.com` AND
+  // `joyagent.jd.com` under that one filter, and the credential genuinely needs
+  // all three tiers — measured 2026-11-06, the JD passport cookies alone
+  // authenticate the /work/api gateway (it mints its own jwaAccessToken per
+  // call), while ptKey lives on joyagent.jd.com.
+  joyagent: {
+    loginUrl: "https://joyagent.jd.com/app/#/chat",
+    cookieDomain: ".jd.com",
+    // ptKey is the login signal: a logged-out jar on this profile carried only
+    // the qid_* analytics cookies, and ptKey appeared once the passport flow
+    // completed. It is also the one cookie that authenticates on its own, so it
+    // is the right thing to wait for.
+    tokenSources: [{ type: "cookie", name: "ptKey" }],
+  },
 };
 
 export function getWebLoginConfig(providerId) {

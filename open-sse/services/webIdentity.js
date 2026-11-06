@@ -126,9 +126,9 @@ const PROBES = {
   async "joyagent"(credential) {
     // JoyAgent has no single session token: the gateway accepts the JD passport
     // cookie jar, or `ptKey` on its own. So the whole pasted header is the
-    // credential and the model catalog is the cheapest live check — it answers
-    // 401 AUTHENTICATION_REQUIRED on a dead session and a 5-row list on a good
-    // one, and it mints the short-lived jwaAccessToken as a side effect.
+    // credential, and userInfo is the probe — it answers 401
+    // AUTHENTICATION_REQUIRED on a dead session and the account's own pin on a
+    // live one, which is also what names the web-login connection.
     const cookie = normalizeSessionCookieHeader(credential, "ptKey");
     if (!cookie) return REJECTED("Missing JoyAgent cookie");
     // `request()` already drained the body and honours the proxy the login

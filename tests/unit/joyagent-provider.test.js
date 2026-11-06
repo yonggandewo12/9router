@@ -21,7 +21,6 @@ import { parseJoyagentError, JoyagentExecutor } from "../../open-sse/executors/j
 import {
   extractJoyagentCookie,
   probeJoyagentCookie,
-  joyagentAccountLabel,
   JOYAGENT_CHAT_URL,
 } from "../../open-sse/shared/joyagent/credentials.js";
 import { hasWebIdentityProbe, fetchWebIdentity } from "../../open-sse/services/webIdentity.js";
@@ -154,12 +153,6 @@ describe("JoyAgent credential parsing", () => {
     expect(extractJoyagentCookie({})).toBe("");
     expect(extractJoyagentCookie(null)).toBe("");
   });
-
-  it("only labels an account when the jar really has name=value pairs", () => {
-    expect(joyagentAccountLabel(JAR)).toBe("jd_AcWZTZQJocwB");
-    // A single-value jar would otherwise echo "ptKey=jca_x" as the account.
-    expect(joyagentAccountLabel("ptKey=jca_x")).toBe("");
-  });
 });
 
 describe("JoyagentExecutor headers", () => {
@@ -224,26 +217,29 @@ describe("JoyAgent error envelopes", () => {
 });
 
 describe("JoyAgent probe", () => {
-  const modelsBody = {
+  // Real shape of GET /work/api/v1/gateway/auth/userInfo, captured live.
+  const userBody = {
     code: 0,
     message: "success",
-    data: { records: [{ id: 26, code: "GLM-5.3", displayName: "GLM-5.3", contextLength: 1000000, responseTokens: 4096 }] },
+    data: { userId: "4131", pin: "jd_AcWZTZQJocwB", displayName: "JoyAgent 默认租户", tenantCode: "default-tenant" },
   };
 
   const fetcher = (impl) => probeJoyagentCookie(JAR, { fetchImpl: impl });
 
-  it("accepts a live session and maps the catalog codes", async () => {
+  it("accepts a live session and returns the account's own pin", async () => {
     const calls = [];
     const res = await fetcher(async (url, opts) => {
       calls.push({ url, cookie: opts.headers.Cookie });
-      return { status: 200, ok: true, text: async () => JSON.stringify(modelsBody) };
+      return { status: 200, ok: true, text: async () => JSON.stringify(userBody) };
     });
     expect(res.ok).toBe(true);
-    expect(res.models).toEqual([{ id: "GLM-5.3", name: "GLM-5.3", contextLength: 1000000, maxOutputTokens: 4096 }]);
+    // The opaque ASCII pin, NOT the percent-encoded `pin` cookie: this value
+    // names the web-login connection and is its dedup key.
     expect(res.account).toBe("jd_AcWZTZQJocwB");
+    expect(res.displayName).toBe("JoyAgent 默认租户");
     // One request only: a second serial call would double the validation latency.
     expect(calls.length).toBe(1);
-    expect(calls[0].url).toBe("https://joyagent.jd.com/work/api/v1/models");
+    expect(calls[0].url).toBe("https://joyagent.jd.com/work/api/v1/gateway/auth/userInfo");
     expect(calls[0].cookie).toBe(JAR);
   });
 
@@ -273,14 +269,17 @@ describe("JoyAgent probe", () => {
     expect(noStatus.error).toBe("proxy refused");
   });
 
-  it("treats an empty catalog as not-provisioned rather than healthy", async () => {
+  it("stays inconclusive when the identity shape changes", async () => {
+    // A live session always answers its pin, but a JD-side shape change says
+    // more about the endpoint than about the credential — never mark it dead.
     const res = await fetcher(async () => ({
       status: 200,
       ok: true,
-      text: async () => JSON.stringify({ code: 0, data: { records: [] } }),
+      text: async () => JSON.stringify({ code: 0, data: null }),
     }));
     expect(res.ok).toBe(false);
-    expect(res.error).toContain("no models");
+    expect(res.inconclusive).toBe(true);
+    expect(res.error).toContain("no account pin");
   });
 
   it("reads an HTTP-200 business failure as a rejection", async () => {
@@ -372,7 +371,7 @@ describe("JoyAgent webIdentity probe registration", () => {
 
   it("reports valid on a live catalog", async () => {
     proxyAwareFetch.mockImplementation(async () =>
-      new Response(JSON.stringify({ code: 0, data: { records: [{ code: "GLM-5.3", displayName: "GLM-5.3" }] } }), { status: 200 }),
+      new Response(JSON.stringify({ code: 0, data: { userId: "4131", pin: "jd_AcWZTZQJocwB", displayName: "JoyAgent 默认租户" } }), { status: 200 }),
     );
     const res = await fetchWebIdentity("joyagent", JAR);
     expect(res.status).toBe("valid");
@@ -393,7 +392,7 @@ describe("JoyAgent webIdentity probe registration", () => {
 
   it("accepts a bare ptKey value as the credential", async () => {
     proxyAwareFetch.mockImplementation(async () =>
-      new Response(JSON.stringify({ code: 0, data: { records: [{ code: "kimi-k3", displayName: "Kimi-k3" }] } }), { status: 200 }),
+      new Response(JSON.stringify({ code: 0, data: { userId: "4131", pin: "jd_AcWZTZQJocwB" } }), { status: 200 }),
     );
     const res = await fetchWebIdentity("joyagent", "jca_abc123");
     expect(res.status).toBe("valid");

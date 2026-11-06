@@ -38,7 +38,7 @@ export default {
   category: "webCookie",
   authType: "cookie",
   authHint:
-    "Paste the whole Cookie header of a logged-in joyagent.jd.com request (DevTools → Network → any /work/api/ call → cookie). The JD passport cookies are what carry the session; a bare `ptKey=…` value also works for ~7 days.",
+    "Use “Login via Browser” — a JoyAgent window opens, you sign in with your JD account, and the session cookies are captured for you (re-login refreshes the same connection). Manual fallback: paste the whole Cookie header of a logged-in joyagent.jd.com request (DevTools → Network → any /work/api/ call → cookie). The JD passport cookies are what carry the session; a bare `ptKey=…` value also works for ~7 days.",
   display: {
     name: "JoyAgent (京东)",
     icon: "auto_awesome",
@@ -66,8 +66,10 @@ export default {
     // that wants a long answer must not also cap the turn at maxOutput.
     timeoutMs: 300000,
     // No validateUrl: that field is probed with `Authorization: Bearer` by the
-    // generic validator, which a cookie session fails. Liveness goes through the
-    // webIdentity probe instead (services/webIdentity.js → GET /work/api/v1/models).
+    // generic validator, which a cookie session fails. Liveness and identity go
+    // through the webIdentity probe instead (services/webIdentity.js →
+    // GET /work/api/v1/gateway/auth/userInfo), which is also what the
+    // Login-via-Browser flow uses to name and dedup the connection.
     headers: {
       // Not required today (measured), but this is a consumer login endpoint and
       // JD gates several of its hosts on a browser-shaped request.
