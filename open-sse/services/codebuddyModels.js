@@ -56,9 +56,19 @@ const DEAD_CODES = {
 };
 
 // Probe verdicts outlive a session: availability changes on the server's schedule, and a
-// full pass costs ~37 requests, so re-running it on every dashboard mount is waste.
+// cold pass costs 18 real completions (~37 without the agent-listed trust), so re-running
+// it on every dashboard mount is waste.
 const VERDICT_TTL_MS = 24 * 60 * 60 * 1000;
 const CONFIG_TTL_MS = 6 * 60 * 60 * 1000;
+// 4-way measured 2026-11-06: the gateway answers 6 concurrent requests in ~8s wall with no
+// throttling errors, while a serial pass over the whole table took 137s. A larger fan-out
+// is what produced the transient-401 sweep, so the concurrency stays modest.
+const PROBE_TIMEOUT_MS = 20000;
+const PROBE_CONCURRENCY = 4;
+// An id we could not reach gets tried again on the next refresh, not on every request: a
+// client polls /v1/models, and re-probing an unreachable id each time puts a real round
+// trip (up to the probe timeout) inside the listing path.
+const PROBE_RETRY_MS = 10 * 60 * 1000;
 // Keyed by account, not just provider: /v3/config is an account-scoped table (a plan
 // account sees ids a personal one does not), so two connections of the same provider must
 // not serve each other's catalog or verdicts.
@@ -84,6 +94,29 @@ export function clearCodeBuddyCatalogCache() {
   reasoningRequired.clear();
   verifying.clear();
   inFlight.clear();
+}
+
+// A token rotation mints a brand-new account key, so without a sweep the caches grow for
+// the life of the daemon. Deleting only what the read path already treats as expired keeps
+// this behaviour-preserving: an entry past CONFIG_TTL_MS is re-fetched anyway, and a
+// verdict store whose newest verdict is past VERDICT_TTL_MS re-probes every id anyway.
+// Runs when a new account shows up rather than on a timer.
+function pruneStaleCaches(now) {
+  for (const [key, entry] of catalogs) {
+    if (now - entry.at > CONFIG_TTL_MS) catalogs.delete(key);
+  }
+  for (const [key, store] of verdicts) {
+    // Never drop the store a running pass is still writing into: it holds the reference, so
+    // its verdicts would land in a map nobody reads any more.
+    if (verifying.has(key)) continue;
+    let newest = 0;
+    for (const verdict of store.values()) if (verdict.at > newest) newest = verdict.at;
+    if (!store.size || now - newest > VERDICT_TTL_MS) verdicts.delete(key);
+  }
+  for (const [key, table] of reportedDead) {
+    for (const [id, hit] of table) if (now - hit.at > VERDICT_TTL_MS) table.delete(id);
+    if (!table.size) reportedDead.delete(key);
+  }
 }
 
 function reportedUnusable(providerId, modelId) {
@@ -196,8 +229,16 @@ export function normalizeCodeBuddyModels(data, providerId) {
 // One chat request, one model, no thinking fields: exactly what a plain OpenAI client
 // sends, which is the contract we are testing. `effort` is the retry shape for the ids that
 // reject a request carrying no reasoning_effort (code 11150).
+//
+// The output is capped, and that matters more than it looks: an uncapped "ok" is not a
+// small request. Measured 2026-11-06, `default` streamed 127 KB in 10.2s at the x2 rate and
+// a reasoning row filled a whole chain of thought before stopping. At 8 tokens every id
+// answers in ~1.8s with `finish_reason: "length"`, so the 18-id pass costs a fraction of a
+// credit instead of several.
+const PROBE_MAX_TOKENS = 8;
+
 async function probeModel(baseUrl, headers, token, id, fetchFn, timeoutMs, effort = null) {
-  const body = { model: id, stream: true, messages: [{ role: "user", content: "ok" }] };
+  const body = { model: id, stream: true, max_tokens: PROBE_MAX_TOKENS, messages: [{ role: "user", content: "ok" }] };
   if (effort) body.reasoning_effort = effort;
   try {
     const res = await fetchFn(`${new URL(baseUrl).origin}/v2/chat/completions`, {
@@ -214,16 +255,25 @@ async function probeModel(baseUrl, headers, token, id, fetchFn, timeoutMs, effor
       if (!payload) continue;
       let json;
       try { json = JSON.parse(payload); } catch { continue; }
-      const delta = json?.choices?.[0]?.delta;
-      // A reasoning-only reply is still an answer: counting only `content` would leave
-      // such an id permanently "inconclusive" and re-probe it on every refresh.
-      if (delta?.content || delta?.reasoning_content) answered = true;
+      const choice = json?.choices?.[0];
+      // Any accepted completion counts. With the output cap the gateway normally stops at
+      // finish_reason "length" before printing anything, and a reasoning-only reply is
+      // still a reply — either treated as "no answer" would leave the id permanently
+      // inconclusive and re-probe it on every single call.
+      if (choice && (choice.delta?.content || choice.delta?.reasoning_content || choice.finish_reason || choice.message)) answered = true;
       const raw = json?.code ?? json?.error?.code;
-      if (raw != null) code = String(raw);
+      // `code: 0` is this gateway's word for success, not a refusal.
+      if (raw != null && String(raw) !== "0") code = String(raw);
     }
+    // An error code in the stream outranks a chunk: some paths emit the role frame before
+    // the refusal.
+    if (code) answered = false;
     return { answered, code, status: res.status };
-  } catch {
-    return { answered: false, code: "", status: 0 };
+  } catch (error) {
+    // Keep the reason: HTTP 0 covered a timeout, a reset and a refused socket identically,
+    // which is how one slow id looked like a network fluke for a whole session.
+    const message = error?.name === "TimeoutError" ? "timeout" : (error?.message || String(error));
+    return { answered: false, code: "", status: 0, error: message };
   }
 }
 
@@ -240,7 +290,8 @@ async function probeModel(baseUrl, headers, token, id, fetchFn, timeoutMs, effor
  *   - otherwise a cached verdict answers outright; ids with none do NOT: they stay in
  *     `kept` (fail-open) and land in `pending` for the probe half.
  *
- * `pending` is also where an inconclusive id stays, since only a real verdict is cached.
+ * `pending` is also where an inconclusive id lands once its retry window passes: the
+ * attempt is remembered so the listing path cannot hammer it, never trusted as a verdict.
  * Verdicts are per id, not per pass: a model the server published since the last refresh
  * has none at all and must be probed even when everything around it is still cached.
  */
@@ -262,7 +313,11 @@ function splitByVerdicts(providerId, store, models, { forceRefresh = false, now 
       continue;
     }
     const known = store.get(model.id);
-    if (known && now - known.at < VERDICT_TTL_MS) {
+    // A verdict we never actually got from the gateway (an id we could not reach) expires
+    // on the retry clock, not the 24h one — but it still holds the id in, so the failure is
+    // fail-open and not a silent prune.
+    const verdictTtl = known?.inconclusive ? PROBE_RETRY_MS : VERDICT_TTL_MS;
+    if (known && now - known.at < verdictTtl) {
       if (known.usable === false) dropped.push({ id: model.id, reason: known.reason });
       else kept.push(model);
       continue;
@@ -287,9 +342,9 @@ function splitByVerdicts(providerId, store, models, { forceRefresh = false, now 
  * caching of anything the gateway did not state. `store` is mutated in place so a caller
  * watching the verdicts sees each id land as it is answered.
  */
-async function probePending(providerId, store, pending, { token, baseUrl, headers, fetchFn, log, probeTimeoutMs, probeConcurrency }) {
+async function probePending(providerId, store, pending, { token, baseUrl, headers, fetchFn, log }) {
   const probeOne = async (model) => {
-    const probe = await probeModel(baseUrl, headers, token, model.id, fetchFn, probeTimeoutMs);
+    const probe = await probeModel(baseUrl, headers, token, model.id, fetchFn, PROBE_TIMEOUT_MS);
     if (probe.answered) {
       store.set(model.id, { usable: true, reason: "", at: Date.now() });
       reportedDead.get(providerId)?.delete(model.id);
@@ -297,7 +352,7 @@ async function probePending(providerId, store, pending, { token, baseUrl, header
       // 11150 is not a retirement: the id rejects a request that carries no
       // reasoning_effort. Retry once with "low" — the level probed safe on glm-5.1 and
       // glm-5.0-turbo — and keep the model, remembering that the executor has to inject.
-      const retry = await probeModel(baseUrl, headers, token, model.id, fetchFn, probeTimeoutMs, "low");
+      const retry = await probeModel(baseUrl, headers, token, model.id, fetchFn, PROBE_TIMEOUT_MS, "low");
       if (retry.answered) {
         store.set(model.id, { usable: true, reason: "", thinkingRequired: true, at: Date.now() });
         markReasoningRequired(providerId, model.id);
@@ -310,20 +365,20 @@ async function probePending(providerId, store, pending, { token, baseUrl, header
       store.set(model.id, { usable: false, reason: DEAD_CODES[probe.code], code: probe.code, at: Date.now() });
       log?.warn?.("CODEBUDDY-MODELS", `drop ${model.id}: ${probe.code} ${DEAD_CODES[probe.code]}`);
     } else {
-      // Inconclusive: keep the model for this pass but do NOT cache the guess, so the
-      // next refresh re-tries an id we only failed to reach.
-      log?.warn?.("CODEBUDDY-MODELS", `probe inconclusive for ${model.id} (HTTP ${probe.status}) — kept, not cached`);
+      // Inconclusive: keep the model, and remember the attempt on the short retry clock so
+      // a client poll cannot turn one unreachable id into a stalled request every time.
+      store.set(model.id, { usable: true, reason: "", inconclusive: true, at: Date.now() });
+      log?.warn?.("CODEBUDDY-MODELS", `probe inconclusive for ${model.id} (HTTP ${probe.status}${probe.error ? ` ${probe.error}` : ""}) — kept, retried in ${PROBE_RETRY_MS / 60000}m`);
     }
   };
 
-  // Bounded parallelism, not a serial loop: the gateway handles 6-way concurrency in
-  // ~8s wall (measured 2026-11-06), while a serial pass over ~37 ids took 137s and stalls
-  // the request that triggered it.
+  // Bounded parallelism, not a serial loop: a serial pass over the table took 137s and
+  // stalls whatever waited on it.
   let cursor = 0;
   const worker = async () => {
     while (cursor < pending.length) await probeOne(pending[cursor++]);
   };
-  await Promise.all(Array.from({ length: Math.max(1, Math.min(probeConcurrency, pending.length)) }, worker));
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(PROBE_CONCURRENCY, pending.length)) }, worker));
 }
 
 /**
@@ -425,9 +480,6 @@ async function resolveCatalog({
   wait = false,
   log = null,
   fetchFn = globalThis.fetch,
-  probe = true,
-  probeTimeoutMs = 20000,
-  probeConcurrency = 4,
 } = {}) {
   const transport = PROVIDERS[providerId];
   if (!transport?.baseUrl) return { models: [], dropped: [], warning: `${providerId} has no transport baseUrl` };
@@ -435,6 +487,7 @@ async function resolveCatalog({
 
   const headers = { ...(transport.headers || {}) };
   const account = accountKey(providerId, accessToken);
+  if (!catalogs.has(account)) pruneStaleCaches(Date.now());
   const cached = catalogs.get(account);
   let models = null;
 
@@ -479,11 +532,6 @@ async function resolveCatalog({
     })));
   };
 
-  if (!probe) {
-    publish(models);
-    return { models, dropped: [] };
-  }
-
   let store = verdicts.get(account);
   if (!store) {
     store = new Map();
@@ -496,6 +544,14 @@ async function resolveCatalog({
   const split = splitByVerdicts(providerId, store, models, { forceRefresh, now });
   publish(split.kept);
 
+  const settled = () => {
+    // Re-split rather than reuse `split`: the ids just probed now have verdicts, so this
+    // is what turns "the gateway refuses it" into a pruned list.
+    const done = splitByVerdicts(providerId, store, models, { now: Date.now() });
+    publish(done.kept);
+    return { models: done.kept, dropped: done.dropped };
+  };
+
   const verify = async () => {
     await probePending(providerId, store, split.pending, {
       token: accessToken,
@@ -503,14 +559,7 @@ async function resolveCatalog({
       headers,
       fetchFn,
       log,
-      probeTimeoutMs,
-      probeConcurrency,
     });
-    // Re-split rather than reuse `split`: the ids just probed now have verdicts, so this
-    // pass is what turns "the gateway refuses it" into a pruned list.
-    const done = splitByVerdicts(providerId, store, models, { now: Date.now() });
-    publish(done.kept);
-    return { models: done.kept, dropped: done.dropped };
   };
 
   // Nothing to prove: the cached verdicts are the answer, and this caller gets them
@@ -519,7 +568,10 @@ async function resolveCatalog({
 
   // An explicit refresh re-verifies everything and waits: the user clicked "refresh" to
   // get the verified list, including the ids a cached verdict already says are dead.
-  if (forceRefresh) return verify();
+  if (forceRefresh) {
+    await verify();
+    return settled();
+  }
 
   // Start the pass for the ids nobody has a verdict for — once per account, however many
   // callers arrive while it runs.
@@ -530,20 +582,17 @@ async function resolveCatalog({
   }
 
   // A client-facing poll must not block: /v1/models is what an SDK hits on startup, and a
-  // cold pass costs ~20s of real completions. Serve the optimistically-pruned table (ids
+  // cold pass costs ~10s of real completions. Serve the optimistically-pruned table (ids
   // already known dead are out, unknown ids stay in) and let the pass settle behind it, so
   // the next caller gets the verified list.
   if (!wait) return { models: split.kept, dropped: split.dropped };
 
   // A request the user is watching waits instead — joining the pass that is already
-  // running, so waiting never costs a second set of calls.
-  const settled = await task;
-  if (settled) return settled;
-  // Either this caller joined another's pass or the probe threw: decide from whatever
-  // verdicts exist. Nothing was proven against the ids still lacking one, so they stay in.
-  const done = splitByVerdicts(providerId, store, models, { now: Date.now() });
-  publish(done.kept);
-  return { models: done.kept, dropped: done.dropped };
+  // running, so waiting never costs a second set of calls. Decide from this call's own
+  // table afterwards: the pass may have been started by someone else, and an id the pass
+  // could not reach stays in.
+  await task;
+  return settled();
 }
 
 export default resolveCodeBuddyModels;

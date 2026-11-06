@@ -5,7 +5,7 @@
 //     so the filter is data-driven.
 //   - usable ≠ published: the five gateway routers answer and are NOT in the table, so a
 //     naive "trust the table" refresh would hide four working models.
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 import { normalizeCodeBuddyModels } from "open-sse/services/codebuddyModels.js";
 import registry from "open-sse/providers/registry/index.js";
@@ -136,7 +136,7 @@ function stubFetch(table, replies = {}) {
 }
 
 // Two production contracts, and the difference between them is the whole point: /v1/models
-// is polled by clients and must never block on ~20s of real completions, while a dashboard
+// is polled by clients and must never block on ~10s of real completions, while a dashboard
 // page a human is watching waits for the verified list. Tests that assert verdicts use
 // `verified`; see the "poll must not block" case for the other one.
 const verified = (opts) => resolveCodeBuddyModels({ ...opts, wait: true });
@@ -189,6 +189,25 @@ describe("codebuddy catalog verification pass", () => {
     expect(probesAfterFirst).toBeGreaterThan(0);
   });
 
+  it("reads a refusal that lands after the first chunk as a refusal", async () => {
+    const fn = async (url) => (url.endsWith("/v3/config")
+      ? { ok: true, status: 200, json: async () => payload([row({ id: "glm-4.6" })]), text: async () => "" }
+      : {
+        ok: false, status: 400, json: async () => ({}),
+        // Some paths print a role/content frame before the refusal. Counting the chunk as
+        // the answer would keep an id the gateway has already retired.
+        text: async () => [
+          `data: ${JSON.stringify({ choices: [{ index: 0, delta: { role: "assistant", content: "" } }] })}`,
+          `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: "partial" } }] })}`,
+          `data: ${JSON.stringify({ code: 11102, msg: "model [glm-4.6] service info not found" })}`,
+          "",
+        ].join("\n"),
+      });
+    const result = await verified({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: fn });
+    expect(result.dropped.map((d) => d.id)).toContain("glm-4.6");
+    expect(result.models.map((m) => m.id)).not.toContain("glm-4.6");
+  });
+
   it("forceRefresh re-probes and can bring a model back", async () => {
     const s1 = stubFetch(table, { "glm-4.6": { code: "11102" } });
     await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: s1.fn });
@@ -196,6 +215,36 @@ describe("codebuddy catalog verification pass", () => {
     const back = await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: s2.fn, forceRefresh: true });
     expect(back.models.map((m) => m.id)).toContain("glm-4.6");
     expect(back.dropped).toEqual([]);
+  });
+
+  it("probes with the output capped, and reads the gateway's code:0 as success", async () => {
+    const bodies = [];
+    const fn = async (url, opts = {}) => {
+      if (url.endsWith("/v3/config")) return { ok: true, status: 200, json: async () => payload(table), text: async () => "" };
+      const body = JSON.parse(opts.body);
+      bodies.push(body);
+      // The live reply: a role frame, then finish_reason "length" with no text, and frames
+      // that carry code:0 for success. Treating either half of that as a refusal would keep
+      // the id permanently inconclusive.
+      return {
+        ok: true, status: 200, json: async () => ({}),
+        text: async () => [
+          `data: ${JSON.stringify({ code: 0, choices: [{ index: 0, delta: { role: "assistant" } }] })}`,
+          `data: ${JSON.stringify({ code: 0, choices: [{ index: 0, delta: {}, finish_reason: "length" }] })}`,
+          "data: [DONE]",
+          "",
+        ].join("\n"),
+      };
+    };
+    const result = await verified({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: fn });
+    expect(result.dropped).toEqual([]);
+    expect(result.models).toHaveLength(table.length + 4);   // nothing pruned
+    // An uncapped "ok" is a 127 KB, 10s, x2-rate reply on `default` — measured 2026-11-06.
+    expect(bodies.length).toBeGreaterThan(0);
+    for (const body of bodies) {
+      expect(body.max_tokens).toBeLessThanOrEqual(16);
+      expect(body.stream).toBe(true);
+    }
   });
 
   it("returns nothing on an unauthenticated or empty catalog so the caller falls back", async () => {
@@ -211,7 +260,30 @@ describe("codebuddy catalog verification pass", () => {
 
 describe("codebuddy verdict cache semantics", () => {
   beforeEach(() => clearCodeBuddyCatalogCache());
+  afterEach(() => vi.useRealTimers());
 
+  it("ages the caches out instead of trusting them forever", async () => {
+    const table = [row({ id: "glm-5.3" }), row({ id: "glm-4.6" })];
+    const s1 = stubFetch(table, { "glm-4.6": { code: "11102" } });
+    await verified({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: s1.fn });
+    expect(s1.calls.config).toBe(1);
+
+    // A second connection is a second account key: its own table, its own verdicts.
+    const s2 = stubFetch(table, { "glm-4.6": { code: "11102" } });
+    await verified({ providerId: "codebuddy-cn", accessToken: "OTHER", fetchFn: s2.fn });
+    expect(s2.calls.config).toBe(1);
+
+    // Past both TTLs the daemon must stop trusting what it stored — and the sweep that
+    // keeps a long-running process from accumulating one cache per token rotation runs on
+    // the same boundary, so it may not skip a re-read or a re-probe.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(Date.now() + 25 * 60 * 60 * 1000));
+    const s3 = stubFetch(table, { "glm-4.6": { code: "11102" } });
+    const aged = await verified({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: s3.fn });
+    expect(s3.calls.config).toBe(1);                 // catalog expired → re-read
+    expect(s3.calls.chat.length).toBeGreaterThan(0); // verdicts expired → re-proved
+    expect(aged.dropped.map((d) => d.id)).toEqual(["glm-4.6"]);
+  });
   it("probes a newly published id instead of trusting its presence in the table", async () => {
     const s1 = stubFetch([row({ id: "glm-5.3" })]);
     await verified({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: s1.fn });
@@ -225,16 +297,27 @@ describe("codebuddy verdict cache semantics", () => {
     expect(second.models.map((m) => m.id)).not.toContain("brand-new");
   });
 
-  it("does not cache an inconclusive probe, so the next refresh retries it", async () => {
+  it("does not hammer an id it could not reach, and tries again on the retry clock", async () => {
     const unreachable = async (url) => (url.endsWith("/v3/config")
       ? { ok: true, status: 200, json: async () => payload([row({ id: "glm-5.3" })]), text: async () => "" }
       : { ok: false, status: 429, json: async () => ({}), text: async () => "busy" });
     const first = await verified({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: unreachable });
-    expect(first.models.map((m) => m.id)).toContain("glm-5.3");
+    expect(first.models.map((m) => m.id)).toContain("glm-5.3");  // fail-open, never pruned
+    expect(first.dropped).toEqual([]);
 
+    // A client poll would otherwise pay for a doomed round trip (up to the probe timeout)
+    // on every call, so the failed attempt is remembered for a while…
+    const immediate = stubFetch([row({ id: "glm-5.3" })]);
+    await verified({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: immediate.fn });
+    expect(immediate.calls.chat.length).toBe(0);
+
+    // …and retried once that window passes. The guess is still never trusted: the id stays
+    // in, and the next pass proves it.
     const retried = stubFetch([row({ id: "glm-5.3" })]);
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(Date.now() + 11 * 60 * 1000));
     await verified({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: retried.fn });
-    expect(retried.calls.chat).toContain("glm-5.3");   // not swallowed by a cached guess
+    expect(retried.calls.chat).toContain("glm-5.3");
   });
 });
 
@@ -375,22 +458,23 @@ describe("codebuddy probe tiering (model-call budget)", () => {
   });
 
   it("answers a client poll from the table and proves the rest in the background", async () => {
-    // /v1/models is polled by SDKs, so a cold verification pass may not hold it open for
-    // ~20s: the first call returns the optimistically-pruned list, and once the pass has
-    // settled the very next poll gets the pruned one.
-    const cold = await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: fn });
+    const calls = [];
+    const spy = async (url, opts = {}) => {
+      if (!url.endsWith("/v3/config")) calls.push(JSON.parse(opts.body).model);
+      return fn(url, opts);
+    };
+    // /v1/models is polled by SDKs, so a cold pass may not hold it open for ~10s: the poll
+    // answers from the table and the pass proves the rest behind it.
+    const cold = await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: spy });
+    expect(cold.dropped).toEqual([]);
     expect(cold.models.map((m) => m.id)).toContain("minimax-m2.5");
-    expect(cold.dropped).toEqual([]);          // nothing was known yet, so nothing was claimed
 
-    // The pass is real async I/O even against the stub, so give it the ticks it needs
-    // rather than pretending one await is enough.
-    let settled = cold;
-    for (let i = 0; i < 50 && !settled.dropped.length; i++) {
-      await new Promise((resolve) => setTimeout(resolve, 2));
-      settled = await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: fn });
-    }
+    // A caller that does wait joins that same pass rather than returning a half-answer,
+    // and sharing is what keeps the budget at one pass (6 ids + 1 effort retry).
+    const settled = await verified({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: spy });
     expect(settled.dropped.map((d) => d.id)).toEqual(["minimax-m2.5"]);
     expect(settled.models.map((m) => m.id)).not.toContain("minimax-m2.5");
+    expect(calls.length).toBeLessThanOrEqual(7);
   });
 });
 

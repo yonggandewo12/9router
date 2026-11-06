@@ -149,7 +149,7 @@ const buildOAuthResolver = ({ refreshFn, fetchFn, parseFn, errorLabel }) => asyn
 // CodeBuddy's catalog needs a bearer, and verifying it costs one small chat request per
 // model, so the pass runs through the service (which caches verdicts for a day) instead of
 // the credential-free generic resolver. `wait` is what makes this endpoint the *verified*
-// list: a dashboard page is a human looking at it, so it can afford the ~20s cold pass
+// list: a dashboard page is a human looking at it, so it can afford the ~10s cold pass
 // that a client's /v1/models poll must never block on. A 401/403 refreshes and persists
 // like every other OAuth lane, then retries once.
 const buildCodeBuddyResolver = (providerId, refreshFn) => async (connection) => {

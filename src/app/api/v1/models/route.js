@@ -50,7 +50,7 @@ async function resolveQoderLiveModels(conn, provider) {
 
 // CodeBuddy's account catalog needs a bearer, so it goes through its own service rather
 // than the credential-free transport path. Poll mode: this endpoint is what an SDK hits on
-// startup, and a verification pass costs ~20s of real completions, so ids with no verdict
+// startup, and a verification pass costs ~10s of real completions, so ids with no verdict
 // yet are advertised while a background pass proves them. The service also publishes the
 // catalog into the live capability overlay, so the chat path uses the same numbers.
 async function resolveCodeBuddyLiveModels(providerId, conn) {
