@@ -1,3 +1,36 @@
+# v0.6.27 (2026-11-07)
+
+The CodeBuddy model list is now read from the account's own gateway config and proved before it is offered. This also supersedes v0.6.26's "not done, deliberately": the catalog was not the enterprise-gated `/console/enterprises/{id}/config/models` after all — it is `GET {origin}/v3/config`, which a personal bearer reads fine (without one it answers 200 with `data.models: null`, which is why it could not ride the credential-free transport path).
+
+## Features
+
+- **`codebuddy-cn` and `codebuddy-intl` resolve their model list live** (`open-sse/services/codebuddyModels.js`). The table gives per-model truth the name heuristics cannot: `maxInputTokens`, `maxOutputTokens`, `supportsToolCall/Images/Reasoning`, the credit multiplier, and the `agents[].models` membership. Wired into both consumers — the dashboard per-connection catalog and `/v1/models` — and published through a new provider-keyed capability overlay (`open-sse/providers/liveCapabilities.js`) so `getCapabilitiesForModel` gives the chat path the same numbers the picker shows.
+- **Presence in the table is not evidence; a reply is.** Every id that has no cached verdict is proved with one capped chat request, and only the gateway's own codes count as verdicts: 11102 / 11103 retire an id, 11150 means "send me an effort" and is healed rather than dropped. Measured on this account: 37 published rows → 31 usable, 6 refused (`minimax-m2.5`, `glm-4.6`, `glm-4.6v`, `glm-4.7`, `kimi-k2-thinking`, `hy4-preview-x`), and `glm-5.0-turbo` kept only because the executor now injects `reasoning_effort: "low"`.
+- **18 ids become reachable that the static registry never carried** — `hy4free`, `space-bunny`, `step-5-preview`, `kimi-k3.1-pro-highspeed`, `glm-5.3-flashx`, `mimo-v2.6-pro` and the rest. Proved end-to-end through the running proxy, not just listed: `cbcn/hy4free` and `cbcn/space-bunny` both answered 200 with real `usage`.
+- **A retirement seen in traffic is believed at once.** The gateway names the model in its own error text (`model [x] service info not found`), so one failed request becomes a verdict; the next listing drops that id without waiting out the 24-hour cache, and an explicit refresh re-probes it so a model that comes back can come back.
+- **Context is budgeted to the longest window the gateway offers**, not to the desktop app's `contextWindow.defaultLength`. `supportedLengths` turned out to be a local history budget with no wire field behind it: a 493,746-token prompt was accepted on the free row with nothing asked for.
+
+## Fixes
+
+- **The refresh had no trigger.** The dashboard effect and the selection were both gated on a hardcoded `cursor || zed` pair, so the resolver wired in for CodeBuddy was dead code — one shared `LIVE_CATALOG_PROVIDERS` set now drives both gates.
+- **The capability overlay was invisible to the chat path until it accepted the wire alias.** `PROVIDER_CAPABILITIES` is keyed by provider id, callers arrive with `cbcn`, and the static layer already normalizes that while the new overlay did not: advertised numbers right, routed numbers wrong. Found only by measuring the running server against the live table, which is the only reason it is stated here.
+- **`usage.credit` is not the bill.** The per-response field disagreed with `CycleCapacityUsedPrecise` deltas in both directions (`glm-5.1`: 1.30 reported / 0.25 billed, `glm-5.3`: 0.84 / 1.07), so cost claims in this release are taken from the billing endpoint.
+- **An in-stream refusal outranks an earlier content chunk**, and `code: 0` is read as the success word it is rather than as a refusal.
+- **Account caches are swept when a new account appears.** `data` holds the token, so every rotation minted a fresh cache key and nothing freed the old ones for the life of the process.
+
+## Performance
+
+- **Cold verification pass: 137s → 9.9s.** Three separate wins: 4-way bounded concurrency (the gateway handles 6-way in ~8s wall; a serial pass over 37 ids took 137s and stalled the request that triggered it), then agent-listed trust (20 of 37 ids are vouched for by the CLI's own agent model list, and none of the six retired ids appears in it — that asymmetry cuts the pass to 18 calls), then capping the probe.
+- **An uncapped probe is not a small request.** Asking for "ok" with no limit let `default` stream 127 KB in 10.2s at the x2 rate and a reasoning row fill a whole chain of thought first. At `max_tokens: 8` every id answers in ~1.8s with `finish_reason: "length"`, and a whole pass's credit delta measured 0.00 on the billing endpoint — read that as ≲0.02, because billing is asynchronous, not as nothing.
+- **A request path never waits on a probe it did not ask for.** Cached verdicts and live retirements prune inline (no model call); the half that needs proving runs in the background, shared once per account, so `/v1/models` answers in ~1.6s having probed nothing while the dashboard page a human is watching waits for the settled list. Warm: 0.03s.
+
+## Notes
+
+- **Fail-open is the rule, and it was earned.** During development one un-paced sweep returned 401 for sixteen ids that had answered 200 minutes apart on an unchanged, unexpired token — so 401 / 403 / 429 / timeout are never treated as "unusable". The failed attempt is remembered on a 10-minute retry clock instead of per call, which is what keeps one unreachable id from stalling every client poll.
+- **`/v1/models` still honours the user's disabled list on top of the live catalog** — this account sees 23 of its 31 usable ids because its 15 disabled entries include 8 ids the live table still offers. Verified rather than assumed; the gap between those two numbers is the first thing a reviewer will rightly ask about.
+- **Test suite**: 471 files / 4989 passing / 0 failing (15 expected-fail, 93 skipped, 1 todo). Thirty-nine new cases in `tests/unit/codebuddy-live-catalog.test.js`: normalization, the media-row filter, router ids the table omits, tiered probe budgets, the 11150 self-heal, reported-retirement precedence, cache semantics including both TTL boundaries, the poll/wait/force contracts sharing one pass, the intl parity lane, and the overlay reaching `getCapabilitiesForModel` through both the id and the alias.
+- **Mutation-checked**: removing the probe cap fails 1 test, forgetting the inconclusive attempt fails 1, dropping the alias lookup fails 1, removing the refusal-outranks-chunk line fails 1. Not covered, honestly: removing the cache sweep fails nothing, because account-key reclamation is not observable through the public API — it deletes only entries the read path already treats as expired, and it skips any account with a pass in flight.
+- **Deliberately not done**: one OAuth token covers `copilot.tencent.com`, `www.codebuddy.cn` and `www.workbuddy.cn` (the same 37-row table and the same 37 credit packages, byte-identical), so no separate WorkBuddy provider was added; `www.codebuddy.ai` does publish a different 28-row table and stays its own provider.
 # v0.6.26 (2026-11-06)
 
 Four defects in the CodeBuddy chain, found by auditing it rather than by a bug report. The first one meant an expired token could not recover at all.
