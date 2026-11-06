@@ -36,6 +36,7 @@
 // 2.0+, Grok, Perplexity). Verify with: curl -s https://models.dev/api.json
 
 import { matchPattern } from "./pricing.js";
+import { getLiveCapabilities } from "./liveCapabilities.js";
 import { looksLikeVisionModel } from "./visionPatterns.js";
 import REGISTRY from "./registry/index.js";
 
@@ -934,7 +935,7 @@ function isCommandCodeTextOnly(model) {
 // Providers whose chat wire is the Trae SOLO remote-agent API.
 const TRAE_SOLO_PROVIDERS = new Set(["trae", "trae-enterprise"]);
 
-export function getCapabilitiesForModel(provider, model) {
+function resolveStaticCapabilities(provider, model) {
   if (!model) return { ...DEFAULT_CAPABILITIES };
 
   // Canonical exact lookup strips vendor prefix: "anthropic/claude-opus-4.7" -> "claude-opus-4.7".
@@ -992,6 +993,27 @@ export function getCapabilitiesForModel(provider, model) {
 
   // 4. Floor
   return refine(null, provider, model);
+}
+
+/**
+ * What the router believes about a model: the static tables, then the live-catalog
+ * overlay for this provider. Live values win where they are defined, and a partial live
+ * row never erases curated knowledge — most resolvers only return { id, name }.
+ *
+ * Without this layer, a model discovered from a live catalog is advertised correctly but
+ * routed with DEFAULT_CAPABILITIES: reasoning:false silently strips a client's thinking
+ * parameters, and contextWindow 200000 budgets history far below the real window.
+ */
+export function getCapabilitiesForModel(provider, model) {
+  const base = resolveStaticCapabilities(provider, model);
+  if (!provider || typeof model !== "string" || !model) return base;
+  const baseModel = model.includes("/") ? model.split("/").pop() : model;
+  // The same alias tolerance the static tables use: callers arrive with either the
+  // provider id ("codebuddy-cn") or the wire alias ("cbcn"), and a miss here is exactly
+  // the split brain this layer exists to close — advertised numbers right, routed numbers
+  // wrong.
+  const live = getLiveCapabilities(provider, baseModel) || getLiveCapabilities(PROVIDER_ID_BY_ALIAS.get(provider), baseModel);
+  return live ? { ...base, ...live } : base;
 }
 
 // Gemini 4 (Argon) drops sampling params and requires functionResponse-last merged user turns.

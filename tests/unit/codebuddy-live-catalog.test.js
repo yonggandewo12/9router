@@ -135,6 +135,12 @@ function stubFetch(table, replies = {}) {
   return { fn, calls };
 }
 
+// Two production contracts, and the difference between them is the whole point: /v1/models
+// is polled by clients and must never block on ~20s of real completions, while a dashboard
+// page a human is watching waits for the verified list. Tests that assert verdicts use
+// `verified`; see the "poll must not block" case for the other one.
+const verified = (opts) => resolveCodeBuddyModels({ ...opts, wait: true });
+
 describe("codebuddy catalog verification pass", () => {
   const table = [
     row({ id: "glm-5.3" }),
@@ -150,7 +156,7 @@ describe("codebuddy catalog verification pass", () => {
       "glm-4.6": { code: "11102" },
       "glm-5.0-turbo": { code: "11150" },
     });
-    const result = await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: fn });
+    const result = await verified({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: fn });
     expect(result.models.map((m) => m.id)).toEqual(["glm-5.3", "hunyuan-chat", "auto", "fast-model", "balanced-model", "deep-model"]);
     expect(result.dropped).toEqual([
       { id: "glm-4.6", reason: "retired upstream" },
@@ -161,20 +167,18 @@ describe("codebuddy catalog verification pass", () => {
   });
 
   it("keeps a model whose probe told it nothing (401/429/timeout are not verdicts)", async () => {
-    const { fn } = stubFetch(table);
     const flaky = async (url, opts = {}) => {
       if (url.endsWith("/v3/config")) return { ok: true, status: 200, json: async () => payload(table), text: async () => "" };
       return { ok: false, status: 429, json: async () => ({}), text: async () => "too many" };
     };
-    const result = await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: flaky });
+    const result = await verified({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: flaky });
     expect(result.models.map((m) => m.id)).toContain("glm-4.6");
     expect(result.dropped).toEqual([]);
-    expect(fn).toBeDefined();
   });
 
   it("reuses cached verdicts instead of re-probing on the next call", async () => {
     const first = stubFetch(table, { "glm-4.6": { code: "11102" } });
-    await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: first.fn });
+    await verified({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: first.fn });
     const probesAfterFirst = first.calls.chat.length;
 
     const second = stubFetch(table, { "glm-4.6": { code: "11102" } });
@@ -208,12 +212,13 @@ describe("codebuddy catalog verification pass", () => {
 describe("codebuddy verdict cache semantics", () => {
   beforeEach(() => clearCodeBuddyCatalogCache());
 
-  it("probes a newly published id even when the rest of the catalog is cached", async () => {
+  it("probes a newly published id instead of trusting its presence in the table", async () => {
     const s1 = stubFetch([row({ id: "glm-5.3" })]);
-    await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: s1.fn });
+    await verified({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: s1.fn });
 
-    // The server publishes a second model. A whole-pass cache check would skip it and
-    // ship an unverified id; the per-id check has to probe exactly this one.
+    // The server publishes a second model. Only an explicit refresh re-reads the config —
+    // a cached catalog cannot show a new id — and the new row must be verified like every
+    // other one, not waved in because the table listed it.
     const s2 = stubFetch([row({ id: "glm-5.3" }), row({ id: "brand-new", credits: "x0.10 credits" })], { "brand-new": { code: "11102" } });
     const second = await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: s2.fn, forceRefresh: true });
     expect(s2.calls.chat).toContain("brand-new");
@@ -224,11 +229,11 @@ describe("codebuddy verdict cache semantics", () => {
     const unreachable = async (url) => (url.endsWith("/v3/config")
       ? { ok: true, status: 200, json: async () => payload([row({ id: "glm-5.3" })]), text: async () => "" }
       : { ok: false, status: 429, json: async () => ({}), text: async () => "busy" });
-    const first = await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: unreachable });
+    const first = await verified({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: unreachable });
     expect(first.models.map((m) => m.id)).toContain("glm-5.3");
 
     const retried = stubFetch([row({ id: "glm-5.3" })]);
-    await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: retried.fn });
+    await verified({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: retried.fn });
     expect(retried.calls.chat).toContain("glm-5.3");   // not swallowed by a cached guess
   });
 });
@@ -244,7 +249,7 @@ describe("codebuddy 11150 self-healing", () => {
       if (!body.reasoning_effort) return { ok: false, status: 400, json: async () => ({}), text: async () => `data: ${JSON.stringify({ code: 11150, msg: "no effort" })}` };
       return chatReply(body.model);
     };
-    const result = await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: fn });
+    const result = await verified({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: fn });
     expect(result.models.map((m) => m.id)).toContain("glm-5.1");
     expect(result.dropped).toEqual([]);
     expect(requiresReasoningEffort("codebuddy-cn", "glm-5.1")).toBe(true);
@@ -254,7 +259,7 @@ describe("codebuddy 11150 self-healing", () => {
     const fn = async (url) => (url.endsWith("/v3/config")
       ? { ok: true, status: 200, json: async () => payload([row({ id: "broken" })]), text: async () => "" }
       : { ok: false, status: 400, json: async () => ({}), text: async () => `data: ${JSON.stringify({ code: 11150, msg: "no" })}` });
-    const result = await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: fn });
+    const result = await verified({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: fn });
     expect(result.dropped.map((d) => d.id)).toContain("broken");
     expect(result.models.map((m) => m.id)).not.toContain("broken");
   });
@@ -265,10 +270,12 @@ describe("codebuddy 11150 self-healing", () => {
       if (url.endsWith("/v3/config")) return { ok: true, status: 200, json: async () => payload(table), text: async () => "" };
       return chatReply(JSON.parse(opts.body).model);
     };
-    const first = await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: ok });
+    const first = await verified({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: ok });
     expect(first.models.map((m) => m.id)).toContain("minimax-m2.5");
 
     markModelUnusable("codebuddy-cn", "minimax-m2.5", "retired upstream");
+    // No probe needed: the report is itself the verdict, so even a client poll that must
+    // not block drops the id on the very next call.
     const second = await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: ok });
     expect(second.models.map((m) => m.id)).not.toContain("minimax-m2.5");
     expect(second.dropped).toEqual([{ id: "minimax-m2.5", reason: "retired upstream" }]);
@@ -311,7 +318,7 @@ describe("codebuddy executor effort injection", () => {
     const res = { status: 400 };
     executor.parseError(res, JSON.stringify({ code: 11102, msg: "model [kimi-k2-thinking] service info not found" }));
     // Recorded as unusable, so the next refresh drops it without waiting for the TTL.
-    const refreshed = await resolveCodeBuddyModels({
+    const refreshed = await verified({
       providerId: "codebuddy-cn",
       accessToken: "T",
       fetchFn: async (url, opts = {}) => (url.endsWith("/v3/config")
@@ -349,7 +356,7 @@ describe("codebuddy probe tiering (model-call budget)", () => {
       if (!url.endsWith("/v3/config")) calls.push(JSON.parse(opts.body).model);
       return fn(url, opts);
     };
-    const result = await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: spy });
+    const result = await verified({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: spy });
     expect(calls).not.toContain("glm-5.3");
     expect(calls).not.toContain("space-bunny");
     expect(calls).toContain("minimax-m2.5");
@@ -361,10 +368,29 @@ describe("codebuddy probe tiering (model-call budget)", () => {
 
   it("lets a live 11102 override the agent-listed trust", async () => {
     // Warm the cache first, so glm-5.3 holds a positive agent-listed verdict.
-    await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: fn });
+    await verified({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: fn });
     markModelUnusable("codebuddy-cn", "glm-5.3", "retired upstream");
     const result = await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: fn });
     expect(result.models.map((m) => m.id)).not.toContain("glm-5.3");
+  });
+
+  it("answers a client poll from the table and proves the rest in the background", async () => {
+    // /v1/models is polled by SDKs, so a cold verification pass may not hold it open for
+    // ~20s: the first call returns the optimistically-pruned list, and once the pass has
+    // settled the very next poll gets the pruned one.
+    const cold = await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: fn });
+    expect(cold.models.map((m) => m.id)).toContain("minimax-m2.5");
+    expect(cold.dropped).toEqual([]);          // nothing was known yet, so nothing was claimed
+
+    // The pass is real async I/O even against the stub, so give it the ticks it needs
+    // rather than pretending one await is enough.
+    let settled = cold;
+    for (let i = 0; i < 50 && !settled.dropped.length; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      settled = await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: fn });
+    }
+    expect(settled.dropped.map((d) => d.id)).toEqual(["minimax-m2.5"]);
+    expect(settled.models.map((m) => m.id)).not.toContain("minimax-m2.5");
   });
 });
 
@@ -396,7 +422,7 @@ describe("codebuddy-intl parity", () => {
       if (!body.reasoning_effort) return { ok: false, status: 400, json: async () => ({}), text: async () => `data: ${JSON.stringify({ code: 11150, msg: "no effort" })}` };
       return chatReply(body.model);
     };
-    const result = await resolveCodeBuddyModels({ providerId: "codebuddy-intl", accessToken: "T", fetchFn });
+    const result = await verified({ providerId: "codebuddy-intl", accessToken: "T", fetchFn });
     expect(result.models.map((m) => m.id)).toContain("gpt-6-sol");
 
     const out = intl.transformRequest("gpt-6-sol", { model: "gpt-6-sol", messages: [{ role: "user", content: "hi" }] }, true, {});
@@ -406,7 +432,7 @@ describe("codebuddy-intl parity", () => {
 
   it("keeps verdicts per provider instead of leaking them across the gateway family", async () => {
     markModelUnusable("codebuddy-intl", "gpt-5.6-sol", "retired upstream");
-    const cn = await resolveCodeBuddyModels({
+    const cn = await verified({
       providerId: "codebuddy-cn",
       accessToken: "T",
       fetchFn: async (url, opts = {}) => (url.endsWith("/v3/config")
@@ -428,7 +454,8 @@ describe("codebuddy-intl parity", () => {
         return { ok: true, status: 200, json: async () => ({ code: 0, data }), text: async () => "" };
       },
     });
-    // Agent-listed trust would keep it; the recorded 11102 has to win.
+    // Agent-listed trust would keep it; the recorded 11102 has to win — and it wins on a
+    // poll, which does not probe anything it can decide from a report.
     expect(result.models.map((m) => m.id)).not.toContain("gpt-6-astra");
   });
 });
@@ -451,8 +478,8 @@ describe("codebuddy final-review fixes", () => {
       return chatReply(body.model);
     };
     const [a, b] = await Promise.all([
-      resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: slow }),
-      resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: slow }),
+      verified({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: slow }),
+      verified({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: slow }),
     ]);
     expect(a.models.map((m) => m.id)).toEqual(b.models.map((m) => m.id));
     // 1 ambiguous id × 2 shapes (bare + effort) + 4 routers, once — not twice.
@@ -470,7 +497,7 @@ describe("codebuddy final-review fixes", () => {
         text: async () => `data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: "hmm" } }] })}\n\n`,
       };
     };
-    const first = await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: fn });
+    const first = await verified({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: fn });
     expect(first.models.map((m) => m.id)).toContain("think-only");
     let secondCalls = 0;
     const counting = async (url, opts) => { if (!url.endsWith("/v3/config")) secondCalls++; return fn(url, opts); };
@@ -489,5 +516,61 @@ describe("codebuddy final-review fixes", () => {
     expect(models.find((m) => m.id === "kimi-k2.8-preview").contextLength).toBe(1000000);
     expect(models.find((m) => m.id === "hy4free").contextLength).toBe(960000);
     expect(models.find((m) => m.id === "narrow").contextLength).toBe(96000);
+  });
+});
+
+// The point of the overlay: what /v1/models advertises and what the chat path believes
+// must be the same numbers. Before it, the router read the static tables for a live-only
+// id and got DEFAULT_CAPABILITIES — measured against the account table, 31 of 33 chat ids
+// disagreed, mostly on maxOutput (262144 believed, 32000 real).
+import { clearLiveCapabilities } from "open-sse/providers/liveCapabilities.js";
+
+describe("live capability overlay reaches the router", () => {
+  beforeEach(() => { clearCodeBuddyCatalogCache(); clearLiveCapabilities(); });
+
+  it("publishes the verified rows so getCapabilitiesForModel uses them", async () => {
+    const table = [
+      row({ id: "hunyuan-chat", supportsReasoning: false, supportsImages: false, maxInputTokens: 200000, maxOutputTokens: 8192 }),
+      row({ id: "step-5-preview", supportsImages: true, maxInputTokens: 1000000, maxOutputTokens: 64000 }),
+    ];
+    const fetchFn = async (url, opts = {}) => {
+      if (url.endsWith("/v3/config")) return { ok: true, status: 200, json: async () => ({ code: 0, data: { models: table, agents: [] } }), text: async () => "" };
+      return chatReply(JSON.parse(opts.body).model);
+    };
+    const before = getCapabilitiesForModel("codebuddy-cn", "hunyuan-chat");
+    expect(before.reasoning).toBe(true);        // heuristic guess
+    expect(before.maxOutput).not.toBe(8192);
+
+    await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn });
+
+    const after = getCapabilitiesForModel("codebuddy-cn", "hunyuan-chat");
+    expect(after.reasoning).toBe(false);        // the table's own answer
+    expect(after.maxOutput).toBe(8192);
+    expect(getCapabilitiesForModel("codebuddy-cn", "step-5-preview").contextWindow).toBe(1000000);
+    expect(getCapabilitiesForModel("codebuddy-cn", "step-5-preview").vision).toBe(true);
+  });
+
+  it("does not leak the overlay onto another provider", async () => {
+    const fetchFn = async (url, opts = {}) => {
+      if (url.endsWith("/v3/config")) return { ok: true, status: 200, json: async () => ({ code: 0, data: { models: [row({ id: "glm-5.3", maxOutputTokens: 64000 })], agents: [] } }), text: async () => "" };
+      return chatReply(JSON.parse(opts.body).model);
+    };
+    await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn });
+    expect(getCapabilitiesForModel("codebuddy-cn", "glm-5.3").maxOutput).toBe(64000);
+    expect(getCapabilitiesForModel("some-other-provider", "glm-5.3").maxOutput).not.toBe(64000);
+  });
+
+  it("answers the same way for the wire alias the chat path uses", async () => {
+    // cbcn/… is what a client sends and what /api/models passes to this function; the
+    // overlay is keyed by provider id. A miss here would advertise the table's numbers
+    // and route with the heuristic ones — the exact split brain the overlay closes.
+    const fetchFn = async (url, opts = {}) => {
+      if (url.endsWith("/v3/config")) return { ok: true, status: 200, json: async () => ({ code: 0, data: { models: [row({ id: "glm-5.3", maxOutputTokens: 64000, supportsToolCall: false })], agents: [] } }), text: async () => "" };
+      return chatReply(JSON.parse(opts.body).model);
+    };
+    await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn });
+    expect(getCapabilitiesForModel("cbcn", "glm-5.3").maxOutput).toBe(64000);
+    expect(getCapabilitiesForModel("cbcn", "glm-5.3").tools).toBe(false);
+    expect(getCapabilitiesForModel("cbcn", "cbcn/glm-5.3").maxOutput).toBe(64000);
   });
 });

@@ -28,8 +28,9 @@
 //     403 / 429 / a timeout say nothing about the model — during development one un-paced
 //     sweep returned 401 for sixteen ids that answered 200 minutes apart. Those keep the
 //     model (fail-open); only 11102 / 11103 / 11150 drop it.
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { PROVIDERS } from "../providers/index.js";
+import { setLiveCapabilities } from "../providers/liveCapabilities.js";
 import { getModelsByProviderId } from "../config/providerModels.js";
 import { getCapabilitiesForModel } from "../providers/capabilities.js";
 import { stripThinkingSuffix } from "../translator/concerns/thinkingUnified.js";
@@ -58,16 +59,36 @@ const DEAD_CODES = {
 // full pass costs ~37 requests, so re-running it on every dashboard mount is waste.
 const VERDICT_TTL_MS = 24 * 60 * 60 * 1000;
 const CONFIG_TTL_MS = 6 * 60 * 60 * 1000;
-const verdicts = new Map(); // providerId → { id: { usable, reason, at } }
-const catalogs = new Map(); // providerId → { models, at }
+// Keyed by account, not just provider: /v3/config is an account-scoped table (a plan
+// account sees ids a personal one does not), so two connections of the same provider must
+// not serve each other's catalog or verdicts.
+const accountKey = (providerId, accessToken) => `${providerId}|${createHash("sha256").update(String(accessToken)).digest("hex").slice(0, 16)}`;
+const verdicts = new Map(); // accountKey → Map(modelId → verdict)
+const catalogs = new Map(); // accountKey → { models, at }
+// Two provider-scoped facts the executors report without holding a token: a retirement
+// seen in real traffic, and an id that refuses a request carrying no reasoning_effort.
+// Both are statements about the model on this gateway rather than about one account's
+// plan, so sharing them across connections is the point, not a leak.
+const reportedDead = new Map(); // providerId → Map(modelId → { reason, at })
+const reasoningRequired = new Map(); // providerId → Set(modelId)
+const verifying = new Map(); // accountKey → in-flight verification promise
 // Two tabs opening the same provider page must not each run a probe pass: the second
-// caller joins the first one's promise instead of spending another 18 completions.
-const inFlight = new Map(); // providerId → Promise<result>
+// caller joins the first one's promise instead of spending another 18 completions. Keyed
+// by provider + token + mode, so a waiter never joins a poller's half-answer.
+const inFlight = new Map(); // providerId|token|mode → Promise<result>
 
 export function clearCodeBuddyCatalogCache() {
   verdicts.clear();
   catalogs.clear();
+  reportedDead.clear();
+  reasoningRequired.clear();
+  verifying.clear();
   inFlight.clear();
+}
+
+function reportedUnusable(providerId, modelId) {
+  const hit = reportedDead.get(providerId)?.get(modelId);
+  return hit && Date.now() - hit.at < VERDICT_TTL_MS ? hit : null;
 }
 
 function configUrl(baseUrl) {
@@ -139,10 +160,17 @@ export function normalizeCodeBuddyModels(data, providerId) {
     if (Number.isFinite(maxOutput) && maxOutput > 0) row.maxOutputTokens = maxOutput;
     const rate = parseRate(model.credits);
     if (rate !== null) row.rateMultiplier = rate;
+    // Canonical capability keys, because this object is what the router reads (via the
+    // live overlay) — not just what the dashboard prints. Measured against the account
+    // table, the pattern heuristics disagree on 31 of 33 chat ids, mostly by over-promising
+    // maxOutput (262144 where the model gives 32000) and by guessing reasoning/vision on
+    // ids the table says cannot do either.
     row.capabilities = {
       vision: model.supportsImages === true,
       tools: model.supportsToolCall === true,
       reasoning: model.supportsReasoning === true,
+      ...(context ? { contextWindow: context } : {}),
+      ...(Number.isFinite(maxOutput) && maxOutput > 0 ? { maxOutput } : {}),
     };
     const description = model.descriptionZh || model.descriptionEn || model.summary;
     if (description) row.description = String(description).slice(0, 200);
@@ -200,38 +228,71 @@ async function probeModel(baseUrl, headers, token, id, fetchFn, timeoutMs, effor
 }
 
 /**
- * Keep only the models the gateway will actually answer. Cached verdicts make a refresh
- * cheap; `forceRefresh` re-probes everything.
+ * Split the table by what is already known about each id. This is the cheap half of a
+ * refresh — it never touches the chat endpoint — so it can run inline on a request path.
+ *
+ * Three tiers, and the ordering between them is the point:
+ *   - `forceRefresh` (an explicit "refresh" click) re-verifies everything, including ids
+ *     another connection reported retired — a model that comes back has to be able to
+ *     come back.
+ *   - otherwise a retirement seen in live traffic outranks every other signal, including
+ *     the agent-listed trust below — that is the whole point of recording it.
+ *   - otherwise a cached verdict answers outright; ids with none do NOT: they stay in
+ *     `kept` (fail-open) and land in `pending` for the probe half.
+ *
+ * `pending` is also where an inconclusive id stays, since only a real verdict is cached.
+ * Verdicts are per id, not per pass: a model the server published since the last refresh
+ * has none at all and must be probed even when everything around it is still cached.
  */
-async function applyProbePass(providerId, models, { token, baseUrl, headers, fetchFn, forceRefresh, log, probeTimeoutMs, probeConcurrency }) {
-  const store = verdicts.get(providerId) || new Map();
-  const now = Date.now();
-
-  // Verdicts are per id, not per pass: a model the server published since the last
-  // refresh has no verdict at all and must be probed even when everything around it is
-  // still cached.
-  //
-  // Two tiers, so a refresh does not spend 37 real completions:
-  //   - agent-listed ids are trusted (that set contained no retired id when probed) and
-  //     get a positive verdict without a call — unless a live 11102 already recorded the
-  //     opposite, which is how a retirement between refreshes still sticks.
-  //   - everything else (the ambiguous tail of the table, plus the routers, which are
-  //     listed nowhere) is probed.
+function splitByVerdicts(providerId, store, models, { forceRefresh = false, now = Date.now() } = {}) {
+  const kept = [];
+  const dropped = [];
   const pending = [];
+
   for (const model of models) {
-    const known = store.get(model.id);
-    const fresh = known && now - known.at < VERDICT_TTL_MS;
-    if (model.agentListed && (!fresh || known.usable !== false)) {
-      if (!fresh) store.set(model.id, { usable: true, reason: "", agentListed: true, at: now });
+    if (forceRefresh) {
+      pending.push(model);
+      kept.push(model);
       continue;
     }
-    if (forceRefresh || !fresh) pending.push(model);
+    const reported = reportedUnusable(providerId, model.id);
+    if (reported) {
+      store.set(model.id, { usable: false, reason: reported.reason, at: reported.at });
+      dropped.push({ id: model.id, reason: reported.reason });
+      continue;
+    }
+    const known = store.get(model.id);
+    if (known && now - known.at < VERDICT_TTL_MS) {
+      if (known.usable === false) dropped.push({ id: model.id, reason: known.reason });
+      else kept.push(model);
+      continue;
+    }
+    // The agent set is a one-way guarantee: probed 2026-11-06, all 20 listed ids answer
+    // and none of the six retired ids appears in it — so membership is trusted without a
+    // call. But 7 usable ids are absent from it too, so non-membership proves nothing.
+    // That asymmetry is what saves ~20 real chat calls per pass.
+    if (model.agentListed) {
+      store.set(model.id, { usable: true, reason: "", agentListed: true, at: now });
+      kept.push(model);
+      continue;
+    }
+    pending.push(model);
+    kept.push(model);
   }
+  return { kept, dropped, pending };
+}
 
+/**
+ * Verify the ids splitByVerdicts could not decide, with bounded parallelism and no
+ * caching of anything the gateway did not state. `store` is mutated in place so a caller
+ * watching the verdicts sees each id land as it is answered.
+ */
+async function probePending(providerId, store, pending, { token, baseUrl, headers, fetchFn, log, probeTimeoutMs, probeConcurrency }) {
   const probeOne = async (model) => {
     const probe = await probeModel(baseUrl, headers, token, model.id, fetchFn, probeTimeoutMs);
     if (probe.answered) {
       store.set(model.id, { usable: true, reason: "", at: Date.now() });
+      reportedDead.get(providerId)?.delete(model.id);
     } else if (probe.code === "11150") {
       // 11150 is not a retirement: the id rejects a request that carries no
       // reasoning_effort. Retry once with "low" — the level probed safe on glm-5.1 and
@@ -239,6 +300,7 @@ async function applyProbePass(providerId, models, { token, baseUrl, headers, fet
       const retry = await probeModel(baseUrl, headers, token, model.id, fetchFn, probeTimeoutMs, "low");
       if (retry.answered) {
         store.set(model.id, { usable: true, reason: "", thinkingRequired: true, at: Date.now() });
+        markReasoningRequired(providerId, model.id);
         log?.warn?.("CODEBUDDY-MODELS", `keep ${model.id}: needs reasoning_effort, injected on the way out`);
       } else {
         store.set(model.id, { usable: false, reason: DEAD_CODES["11150"], code: "11150", at: Date.now() });
@@ -256,22 +318,12 @@ async function applyProbePass(providerId, models, { token, baseUrl, headers, fet
 
   // Bounded parallelism, not a serial loop: the gateway handles 6-way concurrency in
   // ~8s wall (measured 2026-11-06), while a serial pass over ~37 ids took 137s and stalls
-  // the dashboard request that triggered it.
+  // the request that triggered it.
   let cursor = 0;
   const worker = async () => {
     while (cursor < pending.length) await probeOne(pending[cursor++]);
   };
   await Promise.all(Array.from({ length: Math.max(1, Math.min(probeConcurrency, pending.length)) }, worker));
-  verdicts.set(providerId, store);
-
-  const kept = [];
-  const dropped = [];
-  for (const model of models) {
-    const verdict = store.get(model.id);
-    if (verdict && verdict.usable === false) dropped.push({ id: model.id, reason: verdict.reason });
-    else kept.push(model);
-  }
-  return { kept, dropped };
 }
 
 /**
@@ -282,9 +334,9 @@ async function applyProbePass(providerId, models, { token, baseUrl, headers, fet
  */
 export function markModelUnusable(providerId, modelId, reason = "retired upstream") {
   if (!providerId || !modelId) return;
-  const store = verdicts.get(providerId) || new Map();
-  store.set(modelId, { usable: false, reason, at: Date.now() });
-  verdicts.set(providerId, store);
+  const store = reportedDead.get(providerId) || new Map();
+  store.set(modelId, { reason, at: Date.now() });
+  reportedDead.set(providerId, store);
 }
 
 /**
@@ -292,7 +344,13 @@ export function markModelUnusable(providerId, modelId, reason = "retired upstrea
  * either the probe had to inject one, or real traffic hit 11150.
  */
 export function requiresReasoningEffort(providerId, modelId) {
-  return verdicts.get(providerId)?.get(modelId)?.thinkingRequired === true;
+  return reasoningRequired.get(providerId)?.has(modelId) === true;
+}
+
+function markReasoningRequired(providerId, modelId) {
+  const set = reasoningRequired.get(providerId) || new Set();
+  set.add(modelId);
+  reasoningRequired.set(providerId, set);
 }
 
 /**
@@ -335,11 +393,24 @@ export function recordRetirement(providerId, data) {
  * Returns `{ models, dropped, warning }`; an empty `models` means "use the static list".
  * Concurrent callers for the same provider share one pass — a probe costs real
  * completions, so two tabs must not each pay for it.
+ *
+ * Verification never blocks a caller that did not ask for it: ids with a known verdict
+ * are pruned inline (no model call), ids without one are returned optimistically while a
+ * background pass probes them. `wait: true` joins that pass and returns the settled list;
+ * `forceRefresh` re-probes everything and waits, because the user clicked refresh to get
+ * the verified answer.
  */
 export async function resolveCodeBuddyModels(options = {}) {
   const providerId = options.providerId;
   if (!providerId) return { models: [], dropped: [], warning: "no providerId" };
-  const key = `${providerId}|${options.forceRefresh ? "force" : "cached"}`;
+  // Three modes, because three callers want three different answers and only one of them
+  // may block. `poll` (a client hitting /v1/models) takes the optimistic list, `wait` (the
+  // dashboard page a human is watching) joins the pass and gets the verified one, `force`
+  // (the refresh button) re-probes from scratch. Sharing one promise per mode is what
+  // stops two tabs each paying for a pass; the probe itself is shared across modes through
+  // `verifying`, so a poll that started it does not make the waiter pay twice.
+  const mode = options.forceRefresh ? "force" : options.wait ? "wait" : "poll";
+  const key = `${providerId}|${options.accessToken || ""}|${mode}`;
   const running = inFlight.get(key);
   if (running) return running;
   const task = resolveCatalog(options).finally(() => inFlight.delete(key));
@@ -351,6 +422,7 @@ async function resolveCatalog({
   providerId,
   accessToken,
   forceRefresh = false,
+  wait = false,
   log = null,
   fetchFn = globalThis.fetch,
   probe = true,
@@ -362,7 +434,8 @@ async function resolveCatalog({
   if (!accessToken) return { models: [], dropped: [], warning: `${providerId}: no token` };
 
   const headers = { ...(transport.headers || {}) };
-  const cached = catalogs.get(providerId);
+  const account = accountKey(providerId, accessToken);
+  const cached = catalogs.get(account);
   let models = null;
 
   if (!forceRefresh && cached && Date.now() - cached.at < CONFIG_TTL_MS) {
@@ -390,22 +463,87 @@ async function resolveCatalog({
     }
     models = normalizeCodeBuddyModels(data, providerId);
     if (!models.length) return { models: [], dropped: [], warning: `${providerId} catalog empty` };
-    catalogs.set(providerId, { models, at: Date.now() });
+    catalogs.set(account, { models, at: Date.now() });
   }
 
-  if (!probe) return { models, dropped: [] };
+  const publish = (rows) => {
+    setLiveCapabilities(providerId, rows.map((row) => ({
+      id: row.id,
+      capabilities: {
+        ...(row.capabilities || {}),
+        // Discovered by the probe, not in the table: the id refuses a request with no
+        // reasoning_effort, and capabilities.thinkingRequired is what makes the executor
+        // inject one. Without this the routing layer would keep sending a rejected shape.
+        ...(requiresReasoningEffort(providerId, row.id) ? { thinkingRequired: true } : {}),
+      },
+    })));
+  };
 
-  const { kept, dropped } = await applyProbePass(providerId, models, {
-    token: accessToken,
-    baseUrl: transport.baseUrl,
-    headers,
-    fetchFn,
-    forceRefresh,
-    log,
-    probeTimeoutMs,
-    probeConcurrency,
-  });
-  return { models: kept, dropped };
+  if (!probe) {
+    publish(models);
+    return { models, dropped: [] };
+  }
+
+  let store = verdicts.get(account);
+  if (!store) {
+    store = new Map();
+    verdicts.set(account, store);
+  }
+
+  // Capabilities are the table's own words — publish them before verifying anything, so
+  // the router stops guessing (31 of 33 ids wrong) without waiting on a single completion.
+  const now = Date.now();
+  const split = splitByVerdicts(providerId, store, models, { forceRefresh, now });
+  publish(split.kept);
+
+  const verify = async () => {
+    await probePending(providerId, store, split.pending, {
+      token: accessToken,
+      baseUrl: transport.baseUrl,
+      headers,
+      fetchFn,
+      log,
+      probeTimeoutMs,
+      probeConcurrency,
+    });
+    // Re-split rather than reuse `split`: the ids just probed now have verdicts, so this
+    // pass is what turns "the gateway refuses it" into a pruned list.
+    const done = splitByVerdicts(providerId, store, models, { now: Date.now() });
+    publish(done.kept);
+    return { models: done.kept, dropped: done.dropped };
+  };
+
+  // Nothing to prove: the cached verdicts are the answer, and this caller gets them
+  // inline instead of on the next request.
+  if (!split.pending.length) return { models: split.kept, dropped: split.dropped };
+
+  // An explicit refresh re-verifies everything and waits: the user clicked "refresh" to
+  // get the verified list, including the ids a cached verdict already says are dead.
+  if (forceRefresh) return verify();
+
+  // Start the pass for the ids nobody has a verdict for — once per account, however many
+  // callers arrive while it runs.
+  let task = verifying.get(account);
+  if (!task) {
+    task = verify().catch(() => {}).finally(() => verifying.delete(account));
+    verifying.set(account, task);
+  }
+
+  // A client-facing poll must not block: /v1/models is what an SDK hits on startup, and a
+  // cold pass costs ~20s of real completions. Serve the optimistically-pruned table (ids
+  // already known dead are out, unknown ids stay in) and let the pass settle behind it, so
+  // the next caller gets the verified list.
+  if (!wait) return { models: split.kept, dropped: split.dropped };
+
+  // A request the user is watching waits instead — joining the pass that is already
+  // running, so waiting never costs a second set of calls.
+  const settled = await task;
+  if (settled) return settled;
+  // Either this caller joined another's pass or the probe threw: decide from whatever
+  // verdicts exist. Nothing was proven against the ids still lacking one, so they stay in.
+  const done = splitByVerdicts(providerId, store, models, { now: Date.now() });
+  publish(done.kept);
+  return { models: done.kept, dropped: done.dropped };
 }
 
 export default resolveCodeBuddyModels;

@@ -148,18 +148,15 @@ const buildOAuthResolver = ({ refreshFn, fetchFn, parseFn, errorLabel }) => asyn
 
 // CodeBuddy's catalog needs a bearer, and verifying it costs one small chat request per
 // model, so the pass runs through the service (which caches verdicts for a day) instead of
-// the credential-free generic resolver. A 401/403 refreshes and persists like every other
-// OAuth lane, then retries once.
+// the credential-free generic resolver. `wait` is what makes this endpoint the *verified*
+// list: a dashboard page is a human looking at it, so it can afford the ~20s cold pass
+// that a client's /v1/models poll must never block on. A 401/403 refreshes and persists
+// like every other OAuth lane, then retries once.
 const buildCodeBuddyResolver = (providerId, refreshFn) => async (connection) => {
   if (!connection?.accessToken) return { error: "No valid token found", status: 401 };
-  const run = (token, forceRefresh) => resolveCodeBuddyModels({
-    providerId,
-    accessToken: token,
-    forceRefresh,
-    log: console,
-  });
+  const run = (token) => resolveCodeBuddyModels({ providerId, accessToken: token, wait: true, log: console });
 
-  let result = await run(connection.accessToken, false);
+  let result = await run(connection.accessToken);
   if (!result.models.length && /HTTP 40[13]/.test(result.warning || "")) {
     const refreshed = await refreshFn(connection.refreshToken, console).catch(() => null);
     if (refreshed?.accessToken) {
@@ -170,7 +167,7 @@ const buildCodeBuddyResolver = (providerId, refreshFn) => async (connection) => 
       });
       connection.accessToken = refreshed.accessToken;
       if (refreshed.refreshToken) connection.refreshToken = refreshed.refreshToken;
-      result = await run(refreshed.accessToken, false);
+      result = await run(refreshed.accessToken);
     }
   }
 

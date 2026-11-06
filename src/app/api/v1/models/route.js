@@ -12,6 +12,7 @@ import { getProviderConnections, getCombos, getCustomModels, getModelAliases } f
 import { getDisabledModels } from "@/lib/disabledModelsDb";
 import { getKeyAccessContext, filterModelsListForKey } from "@/sse/services/keyAccess.js";
 import { resolveKiroModels } from "open-sse/services/kiroModels.js";
+import { resolveCodeBuddyModels } from "open-sse/services/codebuddyModels.js";
 import { resolveKimchiModels } from "open-sse/services/kimchiModels.js";
 import { resolveQoderModels, routableQoderModels } from "open-sse/services/qoderModels.js";
 import { resolveCopilotModels } from "open-sse/services/copilotModels.js";
@@ -47,6 +48,16 @@ async function resolveQoderLiveModels(conn, provider) {
   return { models: models.map((m) => ({ id: m.id, name: m.name })) };
 }
 
+// CodeBuddy's account catalog needs a bearer, so it goes through its own service rather
+// than the credential-free transport path. Poll mode: this endpoint is what an SDK hits on
+// startup, and a verification pass costs ~20s of real completions, so ids with no verdict
+// yet are advertised while a background pass proves them. The service also publishes the
+// catalog into the live capability overlay, so the chat path uses the same numbers.
+async function resolveCodeBuddyLiveModels(providerId, conn) {
+  const result = await resolveCodeBuddyModels({ providerId, accessToken: conn.accessToken || conn.apiKey });
+  return result.models.length ? { models: result.models } : null;
+}
+
 // Combo seats use UI aliases; the model registry also has transport aliases.
 // Capability overrides and catalog limits are keyed by provider id.
 const ALIAS_TO_PROVIDER_ID = {
@@ -67,6 +78,10 @@ function comboSeatCapabilities(seat) {
 // returns { models: [{ id, name? }, ...] } | null on failure.
 // Adding a provider here makes /v1/models prefer the live catalog for it.
 const LIVE_MODEL_RESOLVERS = {
+  // CodeBuddy's account catalog carries per-model truth (window, output ceiling,
+  // vision/tools/reasoning) that the name heuristics get wrong for 31 of 33 ids.
+  "codebuddy-cn": (conn) => resolveCodeBuddyLiveModels("codebuddy-cn", conn),
+  "codebuddy-intl": (conn) => resolveCodeBuddyLiveModels("codebuddy-intl", conn),
   kiro: async (conn) => {
     const result = await resolveKiroModels({
       accessToken: conn.accessToken,
