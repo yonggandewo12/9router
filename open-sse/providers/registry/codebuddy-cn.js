@@ -51,8 +51,16 @@ export default {
     { id: "glm-5.2", name: "GLM-5.2" },
     { id: "glm-5.1", name: "GLM-5.1" },
     { id: "minimax-m3", name: "MiniMax-M3" },
-    // Catalog mirrors the server's product-config payload (the plugin fetches
-    // it from copilot.tencent.com). Models the server no longer publishes are
+    // Catalog mirrors the server's product-config payload. That payload has a
+    // real address — GET {baseUrl}/console/enterprises/{enterpriseId}/config/models,
+    // which the plugin's own logs call "product configuration" — but it is
+    // gated: it needs a token whose `enterprise_id` JWT claim is populated
+    // (an ultimate/team account). A personal account's token carries an empty
+    // claim and the call answers 403 not_authorized, and the web console's own
+    // session cookies do not authorize the path either (401 from the APISIX
+    // front, while /console/account on the same cookies returns 200). So this
+    // list cannot be refreshed automatically for personal accounts and stays
+    // manual. Models the server no longer publishes are
     // removed even when the chat endpoint still answers them — the published
     // list is the contract. Drop log: glm-5.0 / glm-4.7 and hy4-preview-x
     // (endpoint returns 11102 "model service info not found"), plus

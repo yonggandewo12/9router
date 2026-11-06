@@ -89,11 +89,14 @@ async function getCodeBuddyUsage(providerId, accessToken, apiKey, providerSpecif
     const REFILL_GAP_MS = 2 * 24 * 60 * 60 * 1000;
     const isRefill = (acc) => {
       const ce = cycleEndMs(acc);
-      // Same parser as CycleEndTime: the billing payload has been seen carrying
-      // both epoch numbers and ISO strings for these fields, and Number() of an
-      // ISO string is NaN — which silently read as "not a refill" and labelled
-      // a recurring 基础体验包 as a one-shot Bonus Pack (wrong numbers, wrong
-      // "Expires in" instead of "Resets in").
+      // parseResetTime on both sides, not Number() for this one. Measured on 37
+      // live packs: CycleEndTime/CycleStartTime arrive as ISO strings
+      // ("2026-11-07 15:16:31") while DeductionEndTime/DeductionStartTime are
+      // epoch-milliseconds integers, so Number() was not wrong here — but the
+      // two fields are not the same type, and reading each with a parser that
+      // accepts both costs nothing and stops the next reader from having to
+      // know which is which. Verified equivalent: same instant for the integer
+      // form, and every one of the 37 packs classifies the same way.
       const deMs = parseResetTime(acc.DeductionEndTime);
       const de = deMs ? new Date(deMs).getTime() : Number.NaN;
       return Number.isFinite(ce) && Number.isFinite(de) && de - ce > REFILL_GAP_MS;
