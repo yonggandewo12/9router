@@ -1,4 +1,5 @@
 import { DefaultExecutor } from "./default.js";
+import { refreshCodebuddyIntlToken } from "../services/tokenRefresh/providers.js";
 
 /**
  * CodeBuddyIntlExecutor — talks to https://www.codebuddy.ai/v2/chat/completions
@@ -11,6 +12,13 @@ import { DefaultExecutor } from "./default.js";
 export class CodeBuddyIntlExecutor extends DefaultExecutor {
   constructor() {
     super("codebuddy-intl");
+  }
+
+  // See CodeBuddyExecutor: without this a 401 could not refresh at all,
+  // because DefaultExecutor's refresher table knows neither CodeBuddy host.
+  async refreshCredentials(credentials, log, proxyOptions = null) {
+    if (!credentials?.refreshToken) return false;
+    return refreshCodebuddyIntlToken(credentials.refreshToken, log, proxyOptions);
   }
 
   transformRequest(model, body, stream, credentials) {

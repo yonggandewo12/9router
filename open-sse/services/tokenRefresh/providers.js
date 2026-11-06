@@ -512,11 +512,11 @@ export async function refreshCopilotToken(githubAccessToken, log) {
 // CodeBuddy (Tencent) refresh — POST /v2/plugin/auth/token/refresh with the
 // refresh token carried in the X-Refresh-Token header (not a form body),
 // matching the official CodeBuddy CLI. Response: { code: 0, data: <token> }.
-export async function refreshCodebuddyToken(refreshToken, log) {
+export async function refreshCodebuddyToken(refreshToken, log, proxyOptions = null) {
   if (!refreshToken) return null;
   return dedupRefresh("codebuddy-cn", refreshToken, async () => {
     const oauth = PROVIDER_OAUTH["codebuddy-cn"] || {};
-    const response = await fetch(oauth.refreshUrl, {
+    const response = await proxyAwareFetch(oauth.refreshUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -529,7 +529,7 @@ export async function refreshCodebuddyToken(refreshToken, log) {
         "X-Product": "SaaS",
       },
       body: "{}",
-    });
+    }, proxyOptions);
 
     if (!response.ok) {
       const errorText = await response.text();
@@ -563,11 +563,11 @@ export async function refreshCodebuddyToken(refreshToken, log) {
   }, log);
 }
 
-export async function refreshCodebuddyIntlToken(refreshToken, log) {
+export async function refreshCodebuddyIntlToken(refreshToken, log, proxyOptions = null) {
   if (!refreshToken) return null;
   return dedupRefresh("codebuddy-intl", refreshToken, async () => {
     const oauth = PROVIDER_OAUTH["codebuddy-intl"] || {};
-    const response = await fetch(oauth.refreshUrl, {
+    const response = await proxyAwareFetch(oauth.refreshUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -580,7 +580,7 @@ export async function refreshCodebuddyIntlToken(refreshToken, log) {
         "X-Product": "SaaS",
       },
       body: "{}",
-    });
+    }, proxyOptions);
 
     if (!response.ok) {
       const errorText = await response.text();

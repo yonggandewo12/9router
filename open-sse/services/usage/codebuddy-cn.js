@@ -1,8 +1,9 @@
 /**
- * CodeBuddy CN usage handler
+ * CodeBuddy usage handler (CN + intl)
  *
- * Scoped to the "codebuddy-cn" provider specifically — a future "codebuddy-intl"
- * variant would get its own handler/endpoint, so keep this CN-only.
+ * Shared by both CodeBuddy gateways: getCodeBuddyUsage takes the providerId,
+ * and every message and endpoint lookup goes through it, so an intl row never
+ * reports itself as "CodeBuddy CN".
  *
  * Quota lives behind a Tencent billing endpoint (POST, payload wrapped twice
  * under data.Response.Data). It mixes two credit types that must NOT be merged:
@@ -62,21 +63,21 @@ async function getCodeBuddyUsage(providerId, accessToken, apiKey, providerSpecif
     }, proxyOptions);
 
     if (response.status === 401 || response.status === 403) {
-      return { message: "CodeBuddy CN credential invalid or expired." };
+      return { message: `CodeBuddy (${providerId}) credential invalid or expired.` };
     }
     if (!response.ok) {
-      return { message: `CodeBuddy CN quota API error (${response.status}).` };
+      return { message: `CodeBuddy (${providerId}) quota API error (${response.status}).` };
     }
 
     const json = await response.json();
     if (json?.code !== 0) {
-      return { message: `CodeBuddy CN quota error: ${json?.msg || "unknown"}` };
+      return { message: `CodeBuddy (${providerId}) quota error: ${json?.msg || "unknown"}` };
     }
 
     const data = json?.data?.Response?.Data || {};
     const accounts = Array.isArray(data.Accounts) ? data.Accounts : [];
     if (accounts.length === 0) {
-      return { message: "CodeBuddy CN connected. No credit package found." };
+      return { message: `CodeBuddy (${providerId}) connected. No credit package found.` };
     }
 
     const cycleEndMs = (acc) => {
@@ -88,7 +89,13 @@ async function getCodeBuddyUsage(providerId, accessToken, apiKey, providerSpecif
     const REFILL_GAP_MS = 2 * 24 * 60 * 60 * 1000;
     const isRefill = (acc) => {
       const ce = cycleEndMs(acc);
-      const de = Number(acc.DeductionEndTime);
+      // Same parser as CycleEndTime: the billing payload has been seen carrying
+      // both epoch numbers and ISO strings for these fields, and Number() of an
+      // ISO string is NaN — which silently read as "not a refill" and labelled
+      // a recurring 基础体验包 as a one-shot Bonus Pack (wrong numbers, wrong
+      // "Expires in" instead of "Resets in").
+      const deMs = parseResetTime(acc.DeductionEndTime);
+      const de = deMs ? new Date(deMs).getTime() : Number.NaN;
       return Number.isFinite(ce) && Number.isFinite(de) && de - ce > REFILL_GAP_MS;
     };
     const byExpiry = (a, b) => cycleEndMs(a) - cycleEndMs(b);

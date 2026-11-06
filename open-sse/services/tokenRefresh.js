@@ -138,6 +138,20 @@ function vertexRefreshHandler(c, log) {
   return refreshVertexToken(saJson, log);
 }
 
+// A refresh POST has to leave by the same egress the chat request uses: a
+// connection configured as proxy-only (strictProxy) must not have its token
+// minted over the direct path it is set up never to take. The four fields are
+// exactly what chatCore assembles for the request path, so they are read the
+// same way here.
+function connectionProxyOptions(c) {
+  return {
+    connectionProxyEnabled: c?.providerSpecificData?.connectionProxyEnabled === true,
+    connectionProxyUrl: c?.providerSpecificData?.connectionProxyUrl || "",
+    connectionNoProxy: c?.providerSpecificData?.connectionNoProxy || "",
+    vercelRelayUrl: c?.providerSpecificData?.vercelRelayUrl || "",
+  };
+}
+
 const REFRESH_HANDLERS = {
   "gemini-cli": (c, log) => refreshGoogleToken(c.refreshToken, PROVIDERS["gemini-cli"].clientId, PROVIDERS["gemini-cli"].clientSecret, log),
   antigravity: (c, log) => refreshGoogleToken(c.refreshToken, PROVIDERS.antigravity.clientId, PROVIDERS.antigravity.clientSecret, log),
@@ -150,30 +164,14 @@ const REFRESH_HANDLERS = {
   // Grok CLI shares xAI OAuth client + token endpoint (device-code tokens refresh the same way)
   "grok-cli": (c, log) => refreshXaiToken(c.refreshToken, log),
   gcli: (c, log) => refreshXaiToken(c.refreshToken, log),
-  "codebuddy-cn": (c, log) => refreshCodebuddyToken(c.refreshToken, log),
-  "codebuddy-intl": (c, log) => refreshCodebuddyIntlToken(c.refreshToken, log),
+  "codebuddy-cn": (c, log) => refreshCodebuddyToken(c.refreshToken, log, connectionProxyOptions(c)),
+  "codebuddy-intl": (c, log) => refreshCodebuddyIntlToken(c.refreshToken, log, connectionProxyOptions(c)),
   // CodeArts mints a temporary Huawei AK/SK, not a bearer token: the DPoP proof
   // and x-agent-user-account it needs live with the stored credentials. The
   // refresh POST rides the connection proxy when one is configured (same field
   // mapping chatCore builds for the request path).
-  codearts: (c, log) => refreshCodeartsFromCredentials(c, {
-    log,
-    proxyOptions: {
-      connectionProxyEnabled: c?.providerSpecificData?.connectionProxyEnabled === true,
-      connectionProxyUrl: c?.providerSpecificData?.connectionProxyUrl || "",
-      connectionNoProxy: c?.providerSpecificData?.connectionNoProxy || "",
-      vercelRelayUrl: c?.providerSpecificData?.vercelRelayUrl || "",
-    },
-  }),
-  deveco: (c, log) => refreshDevecoFromCredentials(c, {
-    log,
-    proxyOptions: {
-      connectionProxyEnabled: c?.providerSpecificData?.connectionProxyEnabled === true,
-      connectionProxyUrl: c?.providerSpecificData?.connectionProxyUrl || "",
-      connectionNoProxy: c?.providerSpecificData?.connectionNoProxy || "",
-      vercelRelayUrl: c?.providerSpecificData?.vercelRelayUrl || "",
-    },
-  }),
+  codearts: (c, log) => refreshCodeartsFromCredentials(c, { log, proxyOptions: connectionProxyOptions(c) }),
+  deveco: (c, log) => refreshDevecoFromCredentials(c, { log, proxyOptions: connectionProxyOptions(c) }),
   trae: (c, log) => refreshTraeToken(c.refreshToken, c, log, "trae"),
   "trae-enterprise": (c, log) => refreshTraeToken(c.refreshToken, c, log, "trae-enterprise"),
   cline: (c, log) => refreshClineToken(c.refreshToken, log),

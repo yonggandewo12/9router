@@ -1,4 +1,5 @@
 import { DefaultExecutor } from "./default.js";
+import { refreshCodebuddyToken } from "../services/tokenRefresh/providers.js";
 
 /**
  * CodeBuddyExecutor — talks to https://copilot.tencent.com/v2/chat/completions
@@ -12,6 +13,17 @@ import { DefaultExecutor } from "./default.js";
 export class CodeBuddyExecutor extends DefaultExecutor {
   constructor() {
     super("codebuddy-cn");
+  }
+
+  // DefaultExecutor's refresher table does not know this provider, so without
+  // this override a 401 answered "cannot refresh" and the request failed even
+  // though the working refresh implementation (and its de-dup lock) already
+  // existed one module away. The proactive path went through
+  // services/tokenRefresh.js REFRESH_HANDLERS, so only an early server-side
+  // invalidation — or a lead window that missed — ever hit this.
+  async refreshCredentials(credentials, log, proxyOptions = null) {
+    if (!credentials?.refreshToken) return false;
+    return refreshCodebuddyToken(credentials.refreshToken, log, proxyOptions);
   }
 
   transformRequest(model, body, stream, credentials) {
