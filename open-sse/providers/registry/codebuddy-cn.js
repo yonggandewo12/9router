@@ -49,7 +49,10 @@ export default {
   },
   models: [
     { id: "glm-5.2", name: "GLM-5.2" },
-    { id: "glm-5.1", name: "GLM-5.1" },
+    // glm-5.1 dropped 2026-11-06: it is absent from the account's /v3/config table and a
+    // bare request 400s with code 11150 ("the reasoning effort value is not supported by
+    // the current model") — it only answers once reasoning_effort is sent, which a plain
+    // OpenAI client never does. Keeping it published meant a selectable id that 400'd.
     { id: "minimax-m3", name: "MiniMax-M3" },
     // Catalog mirrors the server's product-config payload. That payload has a
     // real address — GET {baseUrl}/console/enterprises/{enterpriseId}/config/models,
@@ -82,14 +85,18 @@ export default {
     { id: "deepseek-v4.1-flash", name: "DeepSeek-V4.1-Flash" },
     // Gateway-side routers, not fixed models: the server picks the backend per
     // request and echoes it in the streamed `model` field — and the pick is not
-    // stable across calls. Typical answers, probed 2026-10 on copilot.tencent.com
-    // and www.workbuddy.cn (one gateway, one credit pool): auto → hy4-preview-f,
-    // default → glm-5.3, and the WorkBuddy picker tiers (快速/均衡/极致)
-    // fast-model → deepseek-v4.1-flash, balanced-model → hy4-preview-f,
-    // deep-model → kimi-k3 (x0.35 credit; the other four bill x0.00). All five
-    // answer image parts and take tools. The gateway types tool_choice as a
-    // string, so the forced-object form is downgraded for them in
-    // executors/codebuddy-cn.js.
+    // stable across calls. Typical answers, re-probed 2026-11-06 on
+    // copilot.tencent.com: auto → glm-5.3-flash, default → glm-5.3-flash,
+    // fast-model → deepseek-v4.1-flash, balanced-model → glm-5.3, deep-model →
+    // kimi-k3. Credit multipliers come from the account's /v3/config rows and are
+    // NOT what an earlier note here claimed (fast x0.15, balanced x0.50, deep
+    // x1.00; hy4-preview-x x0.29, glm-5.3 x0.69, glm-5.2 x0.79, kimi-k3-2 x1.62
+    // region, deepseek-v4.1-flash x0.11, space-bunny x0.08). All routers answer
+    // image parts and take tools. None of the five appears in the published table
+    // or in `agents[].models`, so services/codebuddyModels.js carries them through
+    // ROUTER_IDS instead of dropping them with the unpublished ids. The gateway
+    // types tool_choice as a string, so the forced-object form is downgraded for
+    // them in executors/codebuddy-cn.js.
     { id: "auto", name: "Auto" },
     { id: "default", name: "Default" },
     { id: "fast-model", name: "Fast" },

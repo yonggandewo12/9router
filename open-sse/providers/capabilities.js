@@ -448,7 +448,8 @@ export const PROVIDER_CAPABILITIES = {
   // below; it is NOT the inverse of onlyReasoning.
   "codebuddy-cn": {
     "glm-5.2":            { vision: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: true, contextWindow: 1000000, maxOutput: 131072 },
-    "glm-5.1":            { vision: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false, contextWindow: 200000, maxOutput: 48000 },
+    // glm-5.1 removed 2026-11-06 with the registry id: unpublished in /v3/config and
+    // 400 code 11150 on a bare request (it needs an explicit reasoning_effort).
     // table (the old 38000 had no source and truncated output).
     "minimax-m3":         { vision: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false, contextWindow: 512000, maxOutput: 524288 },
     // Per-model values mirror the server's product-config payload (the plugin

@@ -15,6 +15,8 @@ import { resolveZedModels } from "open-sse/shared/zedAuth.js";
 import { resolveTraeEnterpriseModels } from "open-sse/shared/trae/enterprise.js";
 import { resolveCodeartsModels } from "open-sse/shared/codearts/api.js";
 import { resolveClineModels, resolveClinepassModels } from "open-sse/services/clinepassModels.js";
+import { resolveCodeBuddyModels } from "open-sse/services/codebuddyModels.js";
+import { refreshCodebuddyToken, refreshCodebuddyIntlToken } from "open-sse/services/tokenRefresh/providers.js";
 import { NOUS_MODELS_URL, normalizeNousModels } from "open-sse/services/nous.js";
 import codexProvider from "open-sse/providers/registry/codex.js";
 
@@ -142,6 +144,48 @@ const buildOAuthResolver = ({ refreshFn, fetchFn, parseFn, errorLabel }) => asyn
     console.log(`${errorLabel} (falling back to static):`, error.message);
   }
   return { models: [], warning };
+};
+
+// CodeBuddy's catalog needs a bearer, and verifying it costs one small chat request per
+// model, so the pass runs through the service (which caches verdicts for a day) instead of
+// the credential-free generic resolver. A 401/403 refreshes and persists like every other
+// OAuth lane, then retries once.
+const buildCodeBuddyResolver = (providerId, refreshFn) => async (connection) => {
+  if (!connection?.accessToken) return { error: "No valid token found", status: 401 };
+  const run = (token, forceRefresh) => resolveCodeBuddyModels({
+    providerId,
+    accessToken: token,
+    forceRefresh,
+    log: console,
+  });
+
+  let result = await run(connection.accessToken, false);
+  if (!result.models.length && /HTTP 40[13]/.test(result.warning || "")) {
+    const refreshed = await refreshFn(connection.refreshToken, console).catch(() => null);
+    if (refreshed?.accessToken) {
+      await updateProviderCredentials(connection.id, {
+        accessToken: refreshed.accessToken,
+        refreshToken: refreshed.refreshToken || connection.refreshToken,
+        expiresIn: refreshed.expiresIn,
+      });
+      connection.accessToken = refreshed.accessToken;
+      if (refreshed.refreshToken) connection.refreshToken = refreshed.refreshToken;
+      result = await run(refreshed.accessToken, false);
+    }
+  }
+
+  if (result.models.length) {
+    return {
+      models: result.models,
+      warning: result.dropped?.length
+        ? `Dropped ${result.dropped.length} published-but-unanswered id(s): ${result.dropped.map((d) => `${d.id} (${d.reason})`).join(", ")}`
+        : undefined,
+    };
+  }
+  return {
+    models: getStaticProviderModels(providerId),
+    warning: result.warning || "CodeBuddy returned no live models; falling back to static catalog.",
+  };
 };
 
 // Qoder shares one resolver across intl (qoder) and CN (qoder-cn); the
@@ -488,6 +532,15 @@ export const PROVIDER_MODELS_CONFIG = {
   },
   qoder: buildQoderModelsResolver("qoder"),
   "qoder-cn": buildQoderModelsResolver("qoder-cn"),
+  // CodeBuddy publishes an account-scoped catalog at GET {origin}/v3/config, answers 200
+  // with `models: null` when unauthenticated, and still lists ids it has retired (7 of 37
+  // 400 on chat, probed 2026-11-06) — so this needs the bearer AND a verification pass.
+  "codebuddy-cn": {
+    customResolver: buildCodeBuddyResolver("codebuddy-cn", refreshCodebuddyToken)
+  },
+  "codebuddy-intl": {
+    customResolver: buildCodeBuddyResolver("codebuddy-intl", refreshCodebuddyIntlToken)
+  },
   // Trae Enterprise publishes a per-tenant catalog (admins add their own
   // models), so the static registry list is only a fallback.
   "trae-enterprise": {
