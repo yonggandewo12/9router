@@ -328,3 +328,103 @@ describe("codebuddy executor effort injection", () => {
     expect(refreshed.models.map((m) => m.id)).not.toContain("kimi-k2-thinking");
   });
 });
+
+describe("codebuddy probe tiering (model-call budget)", () => {
+  beforeEach(() => clearCodeBuddyCatalogCache());
+
+  const table = [
+    row({ id: "glm-5.3" }),          // agent-listed → trusted, never probed
+    row({ id: "space-bunny" }),      // agent-listed
+    row({ id: "minimax-m2.5" }),     // not listed, retired → probed and dropped
+    row({ id: "glm-5.0-turbo" }),    // not listed, needs effort → probed, kept
+  ];
+
+  const fn = async (url, opts = {}) => {
+    if (url.endsWith("/v3/config")) {
+      const data = { models: table, agents: [{ name: "cli", models: ["glm-5.3", "space-bunny"] }] };
+      return { ok: true, status: 200, json: async () => ({ code: 0, data }), text: async () => "" };
+    }
+    const body = JSON.parse(opts.body);
+    if (body.model === "minimax-m2.5") return { ok: false, status: 400, json: async () => ({}), text: async () => `data: ${JSON.stringify({ code: 11102, msg: "model [minimax-m2.5] service info not found" })}` };
+    if (body.model === "glm-5.0-turbo" && !body.reasoning_effort) return { ok: false, status: 400, json: async () => ({}), text: async () => `data: ${JSON.stringify({ code: 11150, msg: "no effort" })}` };
+    return chatReply(body.model);
+  };
+
+  it("only probes the ambiguous tail, not the whole table", async () => {
+    const calls = [];
+    const spy = async (url, opts = {}) => {
+      if (!url.endsWith("/v3/config")) calls.push(JSON.parse(opts.body).model);
+      return fn(url, opts);
+    };
+    const result = await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: spy });
+    expect(calls).not.toContain("glm-5.3");
+    expect(calls).not.toContain("space-bunny");
+    expect(calls).toContain("minimax-m2.5");
+    expect(result.models.map((m) => m.id)).toContain("glm-5.3");
+    expect(result.dropped.map((d) => d.id)).toEqual(["minimax-m2.5"]);
+    // 4 routers + 2 ambiguous ids, not 4 routers + 30 table ids.
+    expect(calls.filter((c) => !["auto", "fast-model", "balanced-model", "deep-model"].includes(c)).length).toBeLessThanOrEqual(3);
+  });
+
+  it("lets a live 11102 override the agent-listed trust", async () => {
+    // Warm the cache first, so glm-5.3 holds a positive agent-listed verdict.
+    await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: fn });
+    markModelUnusable("codebuddy-cn", "glm-5.3", "retired upstream");
+    const result = await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: fn });
+    expect(result.models.map((m) => m.id)).not.toContain("glm-5.3");
+  });
+});
+
+describe("codebuddy-intl parity", () => {
+  beforeEach(() => clearCodeBuddyCatalogCache());
+
+  it("learns its own thinkingRequired verdict and injects for it", async () => {
+    const { CodeBuddyIntlExecutor } = await import("open-sse/executors/codebuddy-intl.js");
+    const intl = new CodeBuddyIntlExecutor();
+    // An intl id that refuses a bare request: the refresh must discover it and the intl
+    // executor must then inject, using the same helper as codebuddy-cn.
+    const fetchFn = async (url, opts = {}) => {
+      if (url.endsWith("/v3/config")) {
+        const data = { models: [row({ id: "gpt-6-sol" })], agents: [] };
+        return { ok: true, status: 200, json: async () => ({ code: 0, data }), text: async () => "" };
+      }
+      const body = JSON.parse(opts.body);
+      if (!body.reasoning_effort) return { ok: false, status: 400, json: async () => ({}), text: async () => `data: ${JSON.stringify({ code: 11150, msg: "no effort" })}` };
+      return chatReply(body.model);
+    };
+    const result = await resolveCodeBuddyModels({ providerId: "codebuddy-intl", accessToken: "T", fetchFn });
+    expect(result.models.map((m) => m.id)).toContain("gpt-6-sol");
+
+    const out = intl.transformRequest("gpt-6-sol", { model: "gpt-6-sol", messages: [{ role: "user", content: "hi" }] }, true, {});
+    expect(out.stream).toBe(true);
+    expect(out.reasoning_effort).toBe("low");
+  });
+
+  it("keeps verdicts per provider instead of leaking them across the gateway family", async () => {
+    markModelUnusable("codebuddy-intl", "gpt-5.6-sol", "retired upstream");
+    const cn = await resolveCodeBuddyModels({
+      providerId: "codebuddy-cn",
+      accessToken: "T",
+      fetchFn: async (url, opts = {}) => (url.endsWith("/v3/config")
+        ? { ok: true, status: 200, json: async () => payload([row({ id: "gpt-5.6-sol" })]), text: async () => "" }
+        : chatReply(JSON.parse(opts.body).model)),
+    });
+    expect(cn.models.map((m) => m.id)).toContain("gpt-5.6-sol");
+  });
+
+  it("records a retirement named in the intl error text", async () => {
+    const { CodeBuddyIntlExecutor } = await import("open-sse/executors/codebuddy-intl.js");
+    const intl = new CodeBuddyIntlExecutor();
+    intl.parseError({ status: 400 }, JSON.stringify({ code: 11102, msg: "model [gpt-6-astra] service info not found" }));
+    const result = await resolveCodeBuddyModels({
+      providerId: "codebuddy-intl",
+      accessToken: "T",
+      fetchFn: async (url) => {
+        const data = { models: [row({ id: "gpt-6-astra" })], agents: [{ name: "cli", models: ["gpt-6-astra"] }] };
+        return { ok: true, status: 200, json: async () => ({ code: 0, data }), text: async () => "" };
+      },
+    });
+    // Agent-listed trust would keep it; the recorded 11102 has to win.
+    expect(result.models.map((m) => m.id)).not.toContain("gpt-6-astra");
+  });
+});

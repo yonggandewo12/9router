@@ -1,5 +1,8 @@
 import { DefaultExecutor } from "./default.js";
 import { refreshCodebuddyIntlToken } from "../services/tokenRefresh/providers.js";
+import { applyReasoningFloor, recordRetirement } from "../services/codebuddyModels.js";
+
+const PROVIDER_ID = "codebuddy-intl";
 
 /**
  * CodeBuddyIntlExecutor — talks to https://www.codebuddy.ai/v2/chat/completions
@@ -31,6 +34,9 @@ export class CodeBuddyIntlExecutor extends DefaultExecutor {
     } else if (eff) {
       transformed.reasoning_summary = "auto";
     }
+    // Same gateway family as codebuddy-cn: ids that refuse a request carrying no
+    // reasoning_effort would otherwise be dead ends for plain clients.
+    applyReasoningFloor(PROVIDER_ID, model, transformed);
 
     // CodeBuddy rejects plain OpenAI shape (11101 invalid request): needs a
     // leading system prompt + user content as typed blocks, not a bare string.
@@ -52,6 +58,10 @@ export class CodeBuddyIntlExecutor extends DefaultExecutor {
       try {
         const data = JSON.parse(bodyText);
         const msg = data?.msg || data?.message || data?.error?.message || "";
+        // Same retirement learning as codebuddy-cn — the gateway names the model in the
+        // error text, and the intl catalog is a different table, so the verdict has to be
+        // recorded under this provider's own id.
+        recordRetirement(PROVIDER_ID, data);
         if (data?.code === 6004 || /超出频率限制|frequency limit|限额/i.test(msg)) {
           let resetsAtMs = null;
           const match = msg.match(/(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})(?:\s*UTC\+?([0-9:]+))?/i);

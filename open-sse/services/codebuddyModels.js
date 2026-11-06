@@ -28,14 +28,24 @@
 //     403 / 429 / a timeout say nothing about the model — during development one un-paced
 //     sweep returned 401 for sixteen ids that answered 200 minutes apart. Those keep the
 //     model (fail-open); only 11102 / 11103 / 11150 drop it.
+import { randomUUID } from "node:crypto";
 import { PROVIDERS } from "../providers/index.js";
 import { getModelsByProviderId } from "../config/providerModels.js";
+import { getCapabilitiesForModel } from "../providers/capabilities.js";
+import { stripThinkingSuffix } from "../translator/concerns/thinkingUnified.js";
 
 // Gateway-side router aliases: never published in the table, verified answering.
 const ROUTER_IDS = ["auto", "fast-model", "balanced-model", "deep-model"];
 
 // Non-chat backends announce themselves through tags; 11103 is what they return on chat.
 const MEDIA_TAG_RE = /^(text-to-image|image-to-image|text-to-video|image-to-video|text-to-speech|speech-to-text|embedding)$/i;
+
+// Codes that say the id is gone from this channel (11150 is not one of them: it means
+// "send me an effort", which applyReasoningFloor fixes rather than dropping the model).
+const RETIRED_CODES = {
+  "11102": "retired upstream",
+  "11103": "backend not served on the chat endpoint",
+};
 
 // Upstream codes that are a verdict about the model itself, not about this call.
 const DEAD_CODES = {
@@ -84,11 +94,17 @@ function contextLength(model) {
 }
 
 export function normalizeCodeBuddyModels(data, providerId) {
-  const rows = Array.isArray(data?.data?.models)
-    ? data.data.models
-    : Array.isArray(data?.models)
-      ? data.models
-      : [];
+  const root = data?.data ?? data;
+  const rows = Array.isArray(root?.models) ? root.models : [];
+  // Every id any agent surface references. Membership is a one-way guarantee: probed
+  // 2026-11-06, all 20 agent-listed ids answer, and none of the six retired ids appears
+  // here — but 7 usable ids are also absent, so the set proves usability and never
+  // disproves it. That is what lets the verification pass skip 20 real chat calls.
+  const agentListed = new Set();
+  for (const agent of Array.isArray(root?.agents) ? root.agents : []) {
+    for (const id of Array.isArray(agent?.models) ? agent.models : []) agentListed.add(id);
+  }
+
   const out = [];
   const seen = new Set();
 
@@ -97,6 +113,7 @@ export function normalizeCodeBuddyModels(data, providerId) {
     if (!id || seen.has(id) || isMediaModel(model)) continue;
     seen.add(id);
     const row = { id, name: model.name || id };
+    if (agentListed.has(id)) row.agentListed = true;
     if (model.upstreamModelId && model.upstreamModelId !== id) row.upstreamModelId = model.upstreamModelId;
     const context = contextLength(model);
     if (context) row.contextLength = context;
@@ -172,10 +189,23 @@ async function applyProbePass(providerId, models, { token, baseUrl, headers, fet
   // Verdicts are per id, not per pass: a model the server published since the last
   // refresh has no verdict at all and must be probed even when everything around it is
   // still cached.
-  const pending = models.filter((model) => {
+  //
+  // Two tiers, so a refresh does not spend 37 real completions:
+  //   - agent-listed ids are trusted (that set contained no retired id when probed) and
+  //     get a positive verdict without a call — unless a live 11102 already recorded the
+  //     opposite, which is how a retirement between refreshes still sticks.
+  //   - everything else (the ambiguous tail of the table, plus the routers, which are
+  //     listed nowhere) is probed.
+  const pending = [];
+  for (const model of models) {
     const known = store.get(model.id);
-    return forceRefresh || !known || now - known.at >= VERDICT_TTL_MS;
-  });
+    const fresh = known && now - known.at < VERDICT_TTL_MS;
+    if (model.agentListed && (!fresh || known.usable !== false)) {
+      if (!fresh) store.set(model.id, { usable: true, reason: "", agentListed: true, at: now });
+      continue;
+    }
+    if (forceRefresh || !fresh) pending.push(model);
+  }
 
   const probeOne = async (model) => {
     const probe = await probeModel(baseUrl, headers, token, model.id, fetchFn, probeTimeoutMs);
@@ -245,6 +275,41 @@ export function requiresReasoningEffort(providerId, modelId) {
 }
 
 /**
+ * The floor both CodeBuddy executors apply on the way out: some ids 400 with code 11150
+ * unless the request carries a reasoning_effort, so a client that asked for nothing would
+ * get a hard failure. "low" is the level probed safe (glm-5.1: 200 + 461 chars of
+ * reasoning; glm-5.0-turbo: 200 + 489). `reasoning_summary` is deliberately NOT set —
+ * that pairing is what #2071's content filter trips.
+ *
+ * Lives here rather than in one executor because codebuddy-cn and codebuddy-intl are two
+ * classes over the same gateway family; a rule learned about the gateway belongs to the
+ * gateway, not to the class that happened to notice it.
+ */
+export function applyReasoningFloor(providerId, model, body) {
+  if (!body || body.reasoning_effort) return body;
+  const clean = stripThinkingSuffix(typeof model === "string" ? model : body.model);
+  if (getCapabilitiesForModel(providerId, clean).thinkingRequired === true || requiresReasoningEffort(providerId, clean)) {
+    body.reasoning_effort = "low";
+  }
+  return body;
+}
+
+/**
+ * Feed a parsed gateway error back into the catalog. The retired codes name the model in
+ * their own message ("model [x] service info not found"), so one user's failed request
+ * becomes a verdict the next refresh honours instead of a 24h stale entry. Takes the
+ * object the caller already parsed — this runs on the error path, not a second JSON.parse.
+ */
+export function recordRetirement(providerId, data) {
+  if (!data || typeof data !== "object") return;
+  const code = String(data.code ?? "");
+  const reason = RETIRED_CODES[code];
+  if (!reason) return;
+  const named = /model\s*\[([^\]]+)\]/i.exec(String(data?.msg || data?.message || ""));
+  if (named) markModelUnusable(providerId, named[1].trim(), reason);
+}
+
+/**
  * Fetch, merge and verify the account's live catalog.
  * Returns `{ models, dropped, warning }`; an empty `models` means "use the static list".
  */
@@ -259,8 +324,8 @@ export async function resolveCodeBuddyModels({
   probeConcurrency = 4,
 } = {}) {
   const transport = PROVIDERS[providerId];
-  if (!transport?.baseUrl) return { models: [], warning: `${providerId} has no transport baseUrl` };
-  if (!accessToken) return { models: [], warning: `${providerId}: no token` };
+  if (!transport?.baseUrl) return { models: [], dropped: [], warning: `${providerId} has no transport baseUrl` };
+  if (!accessToken) return { models: [], dropped: [], warning: `${providerId}: no token` };
 
   const headers = { ...(transport.headers || {}) };
   const cached = catalogs.get(providerId);
@@ -273,24 +338,24 @@ export async function resolveCodeBuddyModels({
     try {
       res = await fetchFn(configUrl(transport.baseUrl), {
         method: "GET",
-        headers: { ...headers, Authorization: `Bearer ${accessToken}`, Accept: "application/json", "X-Request-ID": crypto.randomUUID() },
+        headers: { ...headers, Authorization: `Bearer ${accessToken}`, Accept: "application/json", "X-Request-ID": randomUUID() },
         signal: AbortSignal.timeout(20000),
       });
     } catch (error) {
-      return { models: [], warning: `${providerId} catalog fetch failed: ${error?.message || error}` };
+      return { models: [], dropped: [], warning: `${providerId} catalog fetch failed: ${error?.message || error}` };
     }
     if (!res.ok) {
       const detail = await res.text().catch(() => "");
-      return { models: [], warning: `${providerId} catalog HTTP ${res.status}: ${detail.slice(0, 120)}` };
+      return { models: [], dropped: [], warning: `${providerId} catalog HTTP ${res.status}: ${detail.slice(0, 120)}` };
     }
     let data = null;
     try {
       data = await res.json();
     } catch {
-      return { models: [], warning: `${providerId} catalog returned invalid JSON` };
+      return { models: [], dropped: [], warning: `${providerId} catalog returned invalid JSON` };
     }
     models = normalizeCodeBuddyModels(data, providerId);
-    if (!models.length) return { models: [], warning: `${providerId} catalog empty` };
+    if (!models.length) return { models: [], dropped: [], warning: `${providerId} catalog empty` };
     catalogs.set(providerId, { models, at: Date.now() });
   }
 
