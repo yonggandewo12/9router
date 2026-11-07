@@ -111,6 +111,14 @@ function chatCompletionToResponses(responseBody, customToolNames = null) {
 /**
  * Parse OpenAI-style SSE text into a single chat completion JSON.
  * Used when provider forces streaming but client wants non-streaming.
+ *
+ * Handles both frame shapes a lane can put behind `data:`: incremental
+ * `choices[].delta` frames (concatenated) and a complete `choices[].message`
+ * frame. The second is not hypothetical — CodeArts answers a request whose
+ * `stream` flag it ignores with one frame carrying the finished message, and
+ * reading only deltas there produced a well-formed `chat.completion` with
+ * `content: ""` and no reasoning: a silent empty answer, with usage and
+ * finish_reason intact, so nothing downstream noticed.
  */
 export function parseSSEToOpenAIResponse(rawSSE, fallbackModel) {
   const chunks = [];
@@ -135,6 +143,9 @@ export function parseSSEToOpenAIResponse(rawSSE, fallbackModel) {
   const contentParts = [];
   const reasoningParts = [];
   const toolCallMap = new Map(); // index -> { id, type, function: { name, arguments } }
+  // A frame may carry the finished message instead of a delta (see the note on
+  // this function); kept aside so delta accumulation still wins when it happened.
+  let finalMessage = null;
   let finishReason = "stop";
   let usage = null;
 
@@ -163,13 +174,19 @@ export function parseSSEToOpenAIResponse(rawSSE, fallbackModel) {
         if (tc.function?.arguments) existing.function.arguments += tc.function.arguments;
       }
     }
+
+    if (choice?.message && typeof choice.message === "object") finalMessage = choice.message;
   }
 
-  const message = { role: "assistant", content: contentParts.join("") || (toolCallMap.size > 0 ? null : "") };
-  if (reasoningParts.length > 0) message.reasoning_content = reasoningParts.join("");
-  if (toolCallMap.size > 0) {
-    message.tool_calls = [...toolCallMap.entries()].sort((a, b) => a[0] - b[0]).map(([, tc]) => tc);
-  }
+  const contentText = contentParts.join("") || (typeof finalMessage?.content === "string" ? finalMessage.content : "");
+  const reasoningOut = reasoningParts.join("") || extractReasoningText(finalMessage || {});
+  const toolCallsOut = toolCallMap.size > 0
+    ? [...toolCallMap.entries()].sort((a, b) => a[0] - b[0]).map(([, tc]) => tc)
+    : (Array.isArray(finalMessage?.tool_calls) ? finalMessage.tool_calls : []);
+
+  const message = { role: finalMessage?.role || "assistant", content: contentText || (toolCallsOut.length > 0 ? null : "") };
+  if (reasoningOut.length > 0) message.reasoning_content = reasoningOut;
+  if (toolCallsOut.length > 0) message.tool_calls = toolCallsOut;
 
   const result = {
     id: first.id || `chatcmpl-${Date.now()}`,

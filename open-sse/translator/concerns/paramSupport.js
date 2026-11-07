@@ -69,8 +69,7 @@ function clampNumber(body, key, ceiling) {
 }
 
 // Remove unsupported params from body in place; returns body.
-export function stripUnsupportedParams(provider, model, body) {
-  if (!model || !body || typeof body !== "object") return body;
+export function stripUnsupportedParams(provider, model, body) {  if (!model || !body || typeof body !== "object") return body;
   for (const rule of STRIP_RULES) {
     if (rule.provider && rule.provider !== provider) continue;
     if (!matches(rule, model)) continue;
@@ -128,4 +127,33 @@ export function stripUnsupportedParams(provider, model, body) {
     }
   }
   return body;
+}
+
+// Every spelling a client (or a provider-level setting) can use to ask for
+// thinking on the OpenAI/Claude wires.
+const THINKING_PARAMS = ["thinking", "reasoning_effort", "reasoning", "include_reasoning", "thinking_budget"];
+
+/**
+ * True when a strip rule deletes every thinking param for this provider/model —
+ * the wire carries no thinking control, whatever the capability tables claim.
+ *
+ * The level picker and the request log consult this so neither can advertise a
+ * choice that is deleted before signing. CodeArts was the case that proved the
+ * need: `providerThinking.codearts.mode` was "high", chatCore injected
+ * `reasoning_effort: "high"`, the log line printed `THINK:high`, and the
+ * executor's strip rule removed it — a setting, a log and a UI selector all
+ * agreeing about a value the gateway never saw.
+ *
+ * @param {string} provider - canonical provider id (the strip table's own spelling)
+ * @param {string} model - bare or prefixed model id
+ */
+export function stripsThinkingParams(provider, model) {
+  if (!provider) return false;
+  const dropped = new Set();
+  for (const rule of STRIP_RULES) {
+    if (rule.provider && rule.provider !== provider) continue;
+    if (!matches(rule, model)) continue;
+    for (const key of rule.drop || []) dropped.add(key);
+  }
+  return THINKING_PARAMS.every((key) => dropped.has(key));
 }

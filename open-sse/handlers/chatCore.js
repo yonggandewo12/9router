@@ -1,6 +1,7 @@
 import { detectFormat, getTargetFormat, resolveTransport, isCompatibleProvider } from "../services/provider.js";
 import { translateRequest } from "../translator/index.js";
 import { applyThinking, extractThinking, stripThinkingSuffix } from "../translator/concerns/thinkingUnified.js";
+import { stripsThinkingParams } from "../translator/concerns/paramSupport.js";
 import { FORMATS } from "../translator/formats.js";
 import { normalizeClaudePassthrough, anchorClaudeCache } from "../translator/formats/claude.js";
 import { createStreamController } from "../utils/streamHandler.js";
@@ -277,7 +278,12 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     const msgN = translatedBody.messages?.length || translatedBody.input?.length || translatedBody.contents?.length || body.messages?.length || body.input?.length || 0;
     const toolN = translatedBody.tools?.length || body.tools?.length || 0;
     const fmtStr = passthrough ? `FMT: ${sourceFormat} (passthrough)` : `FMT: ${sourceFormat}→${targetFormat}`;
-    const showThinking = provider !== "grok-cli" || supportsGrokCliReasoningEffort(model);
+    // `showThinking` asks the strip table itself rather than the body: a provider
+    // that deletes every thinking param cannot carry a level, and printing
+    // THINK:high for a request whose reasoning_effort is removed before signing
+    // turns the log into a claim nobody can act on (CodeArts + providerThinking).
+    const showThinking = !stripsThinkingParams(provider, model)
+      && (provider !== "grok-cli" || supportsGrokCliReasoningEffort(model));
     const think = showThinking ? log.fmtThink?.(extractThinking(translatedBody)) : null;
     const acc = credentials?.connectionName || credentials?.connectionId?.slice(0, 8) || "-";
     const parts = [

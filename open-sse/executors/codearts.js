@@ -12,14 +12,18 @@
 import crypto from "node:crypto";
 import { DefaultExecutor } from "./default.js";
 import { HTTP_STATUS } from "../config/runtimeConfig.js";
+import { getCapabilitiesForModel } from "../providers/capabilities.js";
 import { withCredentialRefreshLock } from "../services/oauthCredentialManager.js";
 import { signHuaweiRequest } from "../shared/codearts/signer.js";
-import { isSessionCapExceeded, capRetryDelayMs, isModelQueued, queueRetryDelayMs, sendUntilAdmitted } from "../shared/codearts/sessionCap.js";
+import { isSessionCapExceeded, isEntitlementExhausted, capRetryDelayMs, isModelQueued, queueRetryDelayMs, sendUntilAdmitted } from "../shared/codearts/sessionCap.js";
 import { CODEARTS_USER_AGENT, refreshCodeartsFromCredentials } from "../shared/codearts/auth.js";
 
-// The gateway treats max_tokens as mandatory-ish; this is what the CLI sends
-// when the caller does not care (model ceiling is 131072 for every listed model).
-const DEFAULT_MAX_TOKENS = 32000;
+// The gateway treats max_tokens as mandatory-ish, so a caller that expresses no
+// preference still gets a number — but the number is the model's own published
+// ceiling (`model_parameters.max_tokens`, 65536 across the live catalog), not the
+// CLI's 32000. Billing counts generated tokens, not the declared ceiling, and a
+// 32000 default silently truncated long agent outputs at half the room the model
+// has. An id nothing has published yet lands on the capability floor (64000).
 const MAX_TOKEN_KEYS = ["max_tokens", "max_completion_tokens", "max_output_tokens"];
 // Risk-control hint the CLI attaches: last user prompt, flattened, 500 chars.
 const USER_PROMPT_LIMIT = 500;
@@ -89,14 +93,21 @@ function lastUserPrompt(body) {
 
 // Rebuild a Response after its body was drained for inspection, keeping the rest
 // of the executor result (url, headers, transformedBody) for the caller's logs.
-function withBody(result, text) {
+// The header set is only copied when a marker has to be added, so the 400/429
+// replay path stays exactly what it was.
+function withBody(result, text, extraHeaders = null) {
   const { response } = result;
+  let headers = response.headers;
+  if (extraHeaders) {
+    headers = new Headers(headers);
+    for (const [name, value] of Object.entries(extraHeaders)) headers.set(name, value);
+  }
   return {
     ...result,
     response: new Response(text, {
       status: response.status,
       statusText: response.statusText,
-      headers: response.headers,
+      headers,
     }),
   };
 }
@@ -104,15 +115,20 @@ function withBody(result, text) {
 // Both gateway refusals report themselves in the response only, and reading that
 // body consumes the stream — so every refused 400/429 comes back replayable.
 // `round` feeds the session-cap backoff; a queued turn waits out the gateway's own
-// Retry-After instead.
+// Retry-After instead. A 403 is read for the same reason: when it is the
+// entitlement rejection rather than a signature failure, marking it
+// X-Auth-Refresh-Skip keeps chatCore from spending an STS rotation on a quota
+// answer (rotating also invalidates the refresh token the old one carried).
 async function classifyRejection(result, round) {
   const response = result?.response;
   const status = response?.status;
-  if (status !== HTTP_STATUS.BAD_REQUEST && status !== HTTP_STATUS.RATE_LIMITED) {
+  if (status !== HTTP_STATUS.BAD_REQUEST && status !== HTTP_STATUS.RATE_LIMITED && status !== HTTP_STATUS.FORBIDDEN) {
     return { result };
   }
   const text = await response.text().catch(() => "");
-  const replayed = withBody(result, text);
+  if (status === HTTP_STATUS.FORBIDDEN && !isEntitlementExhausted(text)) return { result: withBody(result, text) };
+  const skipAuthRefresh = status === HTTP_STATUS.FORBIDDEN ? { "x-auth-refresh-skip": "1" } : null;
+  const replayed = withBody(result, text, skipAuthRefresh);
   if (isSessionCapExceeded(text)) return { retryInMs: capRetryDelayMs(round), result: replayed };
   if (status === HTTP_STATUS.RATE_LIMITED && isModelQueued(response)) {
     return { retryInMs: queueRetryDelayMs(response), result: replayed };
@@ -143,7 +159,18 @@ export class CodeartsExecutor extends DefaultExecutor {
     out.model = bareModel(out.model || model);
     // Streamed tool-call deltas are opt-in on this gateway.
     if (out.tool_stream === undefined) out.tool_stream = true;
-    if (!MAX_TOKEN_KEYS.some((key) => out[key] != null)) out.max_tokens = DEFAULT_MAX_TOKENS;
+    // The translator drops `stream` from an OpenAI-shaped body, and this gateway
+    // reads an absent flag as "stream anyway": measured 2026-11-08, the same body
+    // without `stream` answers `text/event-stream` while `stream:false` answers
+    // `application/json`. Worse, that SSE carries ONE frame holding a complete
+    // `choices[0].message` (not deltas), which the JSON conversion path used to
+    // read as an empty completion — every non-streaming client got a 200 with no
+    // answer. Say what the client asked for. A streaming client is left exactly
+    // as it was, because that path already works.
+    if (stream !== true && out.stream === undefined) out.stream = false;
+    if (!MAX_TOKEN_KEYS.some((key) => out[key] != null)) {
+      out.max_tokens = getCapabilitiesForModel(this.provider, out.model).maxOutput;
+    }
     if (out.user_prompt === undefined) {
       const prompt = lastUserPrompt(body);
       if (prompt) out.user_prompt = prompt;
@@ -205,6 +232,6 @@ export class CodeartsExecutor extends DefaultExecutor {
   }
 }
 
-export const __test__ = { bareModel, lastUserPrompt, DEFAULT_MAX_TOKENS };
+export const __test__ = { bareModel, lastUserPrompt };
 
 export default CodeartsExecutor;

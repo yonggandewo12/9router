@@ -7,11 +7,14 @@ import http from "node:http";
 
 import { PROVIDERS, PROVIDER_MODELS, PROVIDER_OAUTH } from "open-sse/providers/index.js";
 import { getCapabilitiesForModel } from "open-sse/providers/capabilities.js";
+import { clearLiveCapabilities } from "open-sse/providers/liveCapabilities.js";
+import { getThinkingLevels } from "open-sse/providers/thinkingLevels.js";
 import { getExecutor } from "open-sse/executors/index.js";
-import { stripUnsupportedParams } from "open-sse/translator/concerns/paramSupport.js";
+import { stripUnsupportedParams, stripsThinkingParams } from "open-sse/translator/concerns/paramSupport.js";
 import { canonicalUri, canonicalQuery, formatSdkDate, signHuaweiRequest, uriEncode } from "open-sse/shared/codearts/signer.js";
-import { capRetryDelayMs, isSessionCapExceeded, isModelQueued, queueRetryDelayMs, sendUntilAdmitted, sleep } from "open-sse/shared/codearts/sessionCap.js";
+import { capRetryDelayMs, isSessionCapExceeded, isEntitlementExhausted, isModelQueued, queueRetryDelayMs, sendUntilAdmitted, sleep } from "open-sse/shared/codearts/sessionCap.js";
 import { mapCodeartsModel, resolveCodeartsModels, codeartsKeys } from "open-sse/shared/codearts/api.js";
+import { parseSSEToOpenAIResponse } from "open-sse/handlers/chatCore/sseToJsonHandler.js";
 import {
   buildAuthorizeUrl,
   buildDpopProof,
@@ -166,8 +169,17 @@ describe("CodeartsExecutor request shape", () => {
     }, true, credentials);
     expect(out.model).toBe("GLM-5.2");
     expect(out.tool_stream).toBe(true);
-    expect(out.max_tokens).toBe(32000);
+    // The default is the model's own published ceiling, not the CLI's 32000: a
+    // 32000 default silently truncated long agent outputs at half the room the
+    // model has, and billing counts generated tokens rather than the ceiling.
+    expect(out.max_tokens).toBe(getCapabilitiesForModel("codearts", "GLM-5.2").maxOutput);
     expect(out.user_prompt).toBe("hi there  ");
+  });
+
+  it("defaults an unpublished id to the capability floor, not to 32000", () => {
+    const out = exec.transformRequest("brand-new-model", { messages: [] }, false, credentials);
+    expect(out.max_tokens).toBe(getCapabilitiesForModel("codearts", "brand-new-model").maxOutput);
+    expect(out.max_tokens).toBeGreaterThan(32000);
   });
 
   it("leaves a caller-supplied output limit alone", () => {
@@ -263,6 +275,39 @@ describe("CodeartsExecutor request shape", () => {
     expect(body.reasoning_effort).toBeUndefined();
     expect(body.max_tokens).toBeGreaterThan(0);
     expect(body.max_tokens).toBeLessThanOrEqual(getCapabilitiesForModel("codearts", "GLM-5.2").maxOutput);
+  });
+
+  it("reports no thinking control for a lane that deletes every thinking param", () => {
+    // The picker and the request log consult this. Without it the lane can claim
+    // a level it never sends: providerThinking.codearts was {mode:"high"},
+    // chatCore injected reasoning_effort, the log printed THINK:high, and this
+    // rule deleted the field before the body was signed.
+    expect(stripsThinkingParams("codearts", "GLM-5.2")).toBe(true);
+    expect(stripsThinkingParams("codearts", "speed")).toBe(true);
+    // A provider that takes thinking keeps its levels.
+    expect(stripsThinkingParams("claude", "claude-opus-5-5")).toBe(false);
+    // So does one whose strip rule covers only some params.
+    expect(stripsThinkingParams("github", "gpt-5.4")).toBe(false);
+    // An empty provider must not match every provider-scoped rule at once.
+    expect(stripsThinkingParams("", "GLM-5.2")).toBe(false);
+  });
+
+  it("leaves the provider page with no thinking level to offer", () => {
+    // Mirrors `providerThinkingLevels` in the provider page: that dropdown
+    // renders only when the union is non-empty, so an empty union here is what
+    // hides it — and `resolveThinkingSuffix`, which builds the "(high)" copied
+    // model name, bails on the same predicate.
+    const ids = [...PROVIDER_MODELS.ca.map((m) => m.id), "speed", "glm-5.3", "kimi-k3", "deepseek-v4.1-flash"];
+    const levels = new Set();
+    for (const id of ids) {
+      if (stripsThinkingParams("codearts", id)) continue;
+      const lv = getThinkingLevels("codearts", id);
+      if (lv) lv.forEach((l) => { if (l !== "none") levels.add(l); });
+    }
+    expect(levels.size).toBe(0);
+    // The ids do carry levels when the predicate is not consulted, so the
+    // emptiness comes from the strip rule rather than a broken level lookup.
+    expect(getThinkingLevels("codearts", "GLM-5.2")).toContain("high");
   });
 });
 
@@ -384,6 +429,47 @@ describe("CodeArts gateway refusals (session cap + model queue)", () => {
     }
   });
 
+  // Live shape, measured 2026-11-07 on `ca/GLM-5.2`: the signature was accepted
+  // and the gateway refused for lack of entitlement, naming the models the
+  // account can still use.
+  const ENTITLEMENT_BODY = '{"error_code":"TM.000010051","error_msg":"多模态功能或当前所选模型的使用权益已耗尽，可选择如下模型: [GLM-5.2-ArkTS-SPARK, OpenPangu-2.0-Pro, OpenPangu-2.0-Flash]。"}';
+
+  it("recognises the entitlement refusal in the gateway body", () => {
+    expect(isEntitlementExhausted(ENTITLEMENT_BODY)).toBe(true);
+    expect(isEntitlementExhausted('{"error_msg":"signature do not match"}')).toBe(false);
+    expect(isEntitlementExhausted(undefined)).toBe(false);
+  });
+
+  it("marks an entitlement 403 so a healthy token is not rotated for it", async () => {
+    const gw = await startGateway({ chat: () => ({ status: 403, body: ENTITLEMENT_BODY }) });
+    try {
+      const result = await call(gw.baseUrl);
+      expect(result.response.status).toBe(403);
+      // chatCore refreshes on 401/403 unless the response carries this marker.
+      // Rotating here would burn an STS round trip, invalidate the refresh token
+      // the login handed us, and still be told the entitlement is gone.
+      expect(result.response.headers.get("x-auth-refresh-skip")).toBe("1");
+      expect(await result.response.json()).toMatchObject({ error_code: "TM.000010051" });
+      // Not a refusal either: one chat, no resend window.
+      expect(gw.chats.length).toBe(1);
+    } finally {
+      await gw.close();
+    }
+  });
+
+  it("does not mark a 403 that really is an auth failure", async () => {
+    const gw = await startGateway({ chat: () => ({ status: 403, body: '{"error_msg":"signature do not match"}' }) });
+    try {
+      const result = await call(gw.baseUrl);
+      expect(result.response.status).toBe(403);
+      expect(result.response.headers.get("x-auth-refresh-skip")).toBeNull();
+      // The body was still drained and replayed, so chatCore can read it.
+      expect(await result.response.text()).toContain("signature do not match");
+    } finally {
+      await gw.close();
+    }
+  });
+
   it("reads the queue headers case-insensitively and defaults the wait", () => {
     const headers = (entries) => ({ get: (k) => entries[String(k).toLowerCase()] ?? null });
     expect(isModelQueued({ headers: headers({ "queue-status": "QUEUED" }) })).toBe(true);
@@ -422,6 +508,48 @@ describe("CodeArts gateway refusals (session cap + model queue)", () => {
     expect(capRetryDelayMs(5)).toBeLessThanOrEqual(10000);
     // Jitter keeps parallel conversations from retrying in lockstep.
     expect(new Set(Array.from({ length: 20 }, () => capRetryDelayMs(2))).size).toBeGreaterThan(1);
+  });
+});
+
+describe("CodeArts non-streaming answer", () => {
+  const exec = getExecutor("codearts");
+  const credentials = {
+    accessToken: "ST",
+    providerSpecificData: { accessKeyId: "AK", secretAccessKey: "SK", securityToken: "ST" },
+  };
+
+  it("tells the gateway the client did not ask for a stream", () => {
+    // The translator drops `stream` from an OpenAI-shaped body, and this gateway
+    // reads an absent flag as "stream anyway": measured 2026-11-08, the same body
+    // without `stream` answers text/event-stream, `stream:false` answers
+    // application/json. The SSE answer arrives as ONE frame holding a complete
+    // `choices[0].message`, which the delta-only reader turned into `content: ""`
+    // — a 200 with no answer, usage and finish_reason intact.
+    const out = exec.transformRequest("openpangu-2.0-flash", {
+      model: "openpangu-2.0-flash", messages: [{ role: "user", content: "hi" }],
+    }, false, credentials);
+    expect(out.stream).toBe(false);
+
+    // A streaming client is left exactly as it was — that path already worked.
+    const streamed = exec.transformRequest("openpangu-2.0-flash", {
+      model: "openpangu-2.0-flash", messages: [{ role: "user", content: "hi" }],
+    }, true, credentials);
+    expect(streamed.stream).toBeUndefined();
+  });
+
+  it("reads a complete-message frame, not only deltas", () => {
+    const frame = 'data:{"id":"1","object":"chat.completion","created":1,"model":"openpangu-2.0-flash",'
+      + '"choices":[{"index":0,"message":{"role":"assistant","content":"the haiku","reasoning_content":"thought"}}],'
+      + '"usage":{"prompt_tokens":26,"completion_tokens":3,"total_tokens":29}}\n\ndata: [DONE]\n\n';
+    const parsed = parseSSEToOpenAIResponse(frame, "openpangu-2.0-flash");
+    expect(parsed.choices[0].message.content).toBe("the haiku");
+    expect(parsed.choices[0].message.reasoning_content).toBe("thought");
+    expect(parsed.usage.completion_tokens).toBe(3);
+
+    // Deltas still take precedence when a lane really did stream.
+    const deltas = 'data:{"choices":[{"index":0,"delta":{"content":"a"}}]}\n\n'
+      + 'data:{"choices":[{"index":0,"delta":{"content":"b"},"finish_reason":"stop"}]}\n\n';
+    expect(parseSSEToOpenAIResponse(deltas, "m").choices[0].message.content).toBe("ab");
   });
 });
 
@@ -475,6 +603,49 @@ describe("CodeArts agent catalog", () => {
       ],
     },
   };
+
+  it("publishes the catalog numbers to the routing layer, not only to the UI", async () => {
+    // The defect this closes: `mapCodeartsModel` numbers reached the dashboard
+    // while getCapabilitiesForModel kept guessing from the model name, so
+    // `ca/deepseek-v4.1-flash` routed on a 384,000 output ceiling and `ca/speed`
+    // on 200,000 context with reasoning:false — all three wrong against a table
+    // that says 65,536 output, 1,048,576 context and thinking always on.
+    const payload = {
+      gpts: {
+        models: [
+          { model_name: "GLM-5.2", model_parameters: { model_id: "GLM-5.2", context_window: 202752, max_tokens: 65536, supports_images: false } },
+          { model_name: "Speed", model_parameters: { model_id: "speed", context_window: 1048576, max_tokens: 65536, supports_images: false } },
+        ],
+      },
+    };
+    const srv = await startCatalogServer(payload);
+    const creds = { providerSpecificData: { ...credentials.providerSpecificData, accessKeyId: `TESTAK-OVERLAY${Date.now()}` } };
+    try {
+      await resolveCodeartsModels(creds, { baseUrl: srv.baseUrl, forceRefresh: true });
+
+      // A curated id keeps its window and gains the published output ceiling.
+      expect(getCapabilitiesForModel("codearts", "GLM-5.2")).toMatchObject({ contextWindow: 202752, maxOutput: 65536 });
+      // An id the static registry never carried routes on the catalog too.
+      expect(getCapabilitiesForModel("codearts", "speed")).toMatchObject({ contextWindow: 1048576, maxOutput: 65536, reasoning: true });
+      // supports_images:false is the gateway's own answer, so it is published
+      // rather than left to the name heuristic.
+      expect(getCapabilitiesForModel("codearts", "speed").vision).toBe(false);
+    } finally {
+      clearLiveCapabilities("codearts");
+      await srv.close();
+    }
+  });
+
+  it("leaves the static tables in charge when the catalog answers nothing", async () => {
+    const srv = await startCatalogServer({ gpts: { models: [] } });
+    const creds = { providerSpecificData: { ...credentials.providerSpecificData, accessKeyId: `TESTAK-EMPTY${Date.now()}` } };
+    try {
+      expect(await resolveCodeartsModels(creds, { baseUrl: srv.baseUrl, forceRefresh: true })).toBeNull();
+      expect(getCapabilitiesForModel("codearts", "GLM-5.2").maxOutput).toBe(65536);
+    } finally {
+      await srv.close();
+    }
+  });
 
   it("fetches the catalog signed with the headers the gateway demands, and caches", async () => {
     const srv = await startCatalogServer(CATALOG_PAYLOAD);

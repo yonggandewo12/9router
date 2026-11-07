@@ -18,6 +18,13 @@
 // the only request that reports both truthfully, so a refused turn re-issues the
 // chat call until the gateway stops refusing it or the window closes.
 const SESSION_CAP_ERROR_CODE = "TM.00001041";
+// Entitlement exhausted for the chosen model (权益已耗尽). The gateway names the
+// models this account can still use in the same body. It answers HTTP 403, which
+// looks exactly like a dead credential to the caller — it is not: the signature
+// was accepted, so refreshing it only rotates a healthy token and re-pays the
+// round trip. See CodeartsExecutor.classifyRejection, which marks these responses
+// X-Auth-Refresh-Skip so chatCore's 401/403 refresh pass leaves them alone.
+const ENTITLEMENT_EXHAUSTED_CODE = "TM.000010051";
 
 // 9router serves interactive clients, which give up long before the CLI's
 // 12-hour queue budget, so a refused turn waits out a bounded window.
@@ -60,6 +67,16 @@ function abortError(signal) {
 /** True when an upstream error body is the concurrent-session rejection. */
 export function isSessionCapExceeded(text) {
   return typeof text === "string" && text.includes(SESSION_CAP_ERROR_CODE);
+}
+
+/**
+ * True when the gateway refused for lack of entitlement rather than lack of a
+ * valid signature (TM.000010051). Live-measured 2026-11-07 on `ca/GLM-5.2`: 403
+ * with `可选择如下模型: [GLM-5.2-ArkTS-SPARK, OpenPangu-2.0-Pro,
+ * OpenPangu-2.0-Flash]`, while the same credentials listed the catalog 200.
+ */
+export function isEntitlementExhausted(text) {
+  return typeof text === "string" && text.includes(ENTITLEMENT_EXHAUSTED_CODE);
 }
 
 /**

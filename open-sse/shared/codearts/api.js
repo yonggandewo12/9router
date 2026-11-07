@@ -5,6 +5,7 @@
 // from the executor and are reusable from Next.js API routes.
 import { signHuaweiRequest } from "./signer.js";
 import { proxyAwareFetch } from "../../utils/proxyFetch.js";
+import { setLiveCapabilities } from "../../providers/liveCapabilities.js";
 import { CODEARTS_API_BASE, CODEARTS_USER_AGENT, refreshCodeartsFromCredentials } from "./auth.js";
 import { shouldRefreshCredentials, withCredentialRefreshLock } from "../../services/oauthCredentialManager.js";
 
@@ -94,6 +95,41 @@ export function mapCodeartsModel(raw) {
   // always on for every model there, so it is declared in the static table.
   if (params.supports_images === true) model.capabilities = { vision: true };
   return model;
+}
+
+/**
+ * The same rows as a routing-capability overlay.
+ *
+ * `mapCodeartsModel` numbers only reach the dashboard: getCapabilitiesForModel()
+ * never sees them, so a model the catalog publishes but the static registry does
+ * not carry routes on whatever the shared tables guess from its name. Measured on
+ * the live catalog (2026-11-07): `ca/deepseek-v4.1-flash` was routed with a
+ * 384,000-token output ceiling and `ca/speed` with 200,000 context and
+ * reasoning:false, while the gateway's own table says 65,536 output and
+ * 1,048,576 context for both. The overlay makes the advertised numbers the routed
+ * ones, and `supports_images === false` is published rather than dropped, because
+ * it is the gateway's own answer and outranks a name heuristic borrowed from a
+ * different vendor's lane.
+ *
+ * `reasoning: true` is the lane's standing wire fact (this executor has always
+ * carried it): the openPangu rows measured today stream `delta.reasoning_content`
+ * unasked, and the table offers no per-model thinking switch to contradict that —
+ * every row publishes `thinking_type: null` and an empty
+ * `supported_thinking_strengths`.
+ */
+export function liveCapabilitiesFromCatalog(rawModels) {
+  return (rawModels || []).map((raw) => {
+    const params = raw?.model_parameters || {};
+    const id = params.model_id || raw?.model_name;
+    if (!id) return null;
+    return {
+      id,
+      contextWindow: params.context_window,
+      maxOutput: params.max_tokens,
+      vision: params.supports_images,
+      reasoning: true,
+    };
+  }).filter(Boolean);
 }
 
 /**
@@ -224,6 +260,11 @@ export async function resolveCodeartsModels(
 
   const rawModels = Array.isArray(data?.gpts?.models) ? data.gpts.models : [];
   const models = rawModels.map(mapCodeartsModel).filter(Boolean);
+  // Publish the gateway's own limits to the routing layer before the caller
+  // caches the listing, so the first chat after a catalog read is budgeted on
+  // real numbers. An empty catalog clears nothing: the static tables stay in
+  // charge, which is the state before any live fetch.
+  if (models.length) setLiveCapabilities("codearts", liveCapabilitiesFromCatalog(rawModels));
   const result = models.length ? { models, raw: rawModels } : null;
   // Cache under the credential that actually served this fetch, so the next
   // listing (which reads the persisted, renewed pair) finds it.

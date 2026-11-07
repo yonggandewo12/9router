@@ -257,15 +257,19 @@ const DEVIN_CLI_GPT_CAPS = { vision: true, reasoning: true, search: true, thinki
  * Provider-specific capability overrides. Keyed by provider alias/id.
  */
 export const PROVIDER_CAPABILITIES = {
-  // CodeArts (华为云码道) snap-access gateway. Limits read from the live agent
-  // catalog on 2026-09-20 (model_parameters.context_window / max_tokens).
+  // CodeArts (华为云码道) snap-access gateway. Limits are the live agent catalog's
+  // `model_parameters.context_window` / `max_tokens`, re-read 2026-11-07, which
+  // publishes 65536 (65535 on the sft and openPangu rows) — not the 131072 these rows
+  // carried before that check. A hand-written row here short-circuits every later
+  // layer, so it must hold the current number; the live overlay
+  // (shared/codearts/api.js → liveCapabilities.js) republishes it per account.
   // reasoning:true is a wire fact (SSE carries delta.reasoning_content), but the
   // gateway takes no thinking param — see the codearts rules in paramSupport.js.
   "codearts": {
-    "GLM-5.2": { reasoning: true, contextWindow: 202752, maxOutput: 131072 },
-    "glm-5.2-sft-harmony": { reasoning: true, contextWindow: 202752, maxOutput: 131072 },
-    "openpangu-2.0-pro": { reasoning: true, contextWindow: 524288, maxOutput: 131072 },
-    "openpangu-2.0-flash": { reasoning: true, contextWindow: 524288, maxOutput: 131072 },
+    "GLM-5.2": { reasoning: true, contextWindow: 202752, maxOutput: 65536 },
+    "glm-5.2-sft-harmony": { reasoning: true, contextWindow: 202752, maxOutput: 65535 },
+    "openpangu-2.0-pro": { reasoning: true, contextWindow: 524288, maxOutput: 65535 },
+    "openpangu-2.0-flash": { reasoning: true, contextWindow: 524288, maxOutput: 65535 },
   },
   // 妙手 (CatPaw). Live-probed 2026-11-05 with a solid-color PNG through /turn:
   // every catalog model except MiniMax-M3 read the image back correctly, so

@@ -121,10 +121,12 @@ describe("getCapabilitiesForModel", () => {
       expect(getCapabilitiesForModel("ca", model))
         .toEqual(getCapabilitiesForModel("codearts", model));
     }
+    // 65535 is what the live agent catalog publishes for this row
+    // (`model_parameters.max_tokens`), re-read 2026-11-07.
     expect(getCapabilitiesForModel("ca", "openpangu-2.0-flash")).toMatchObject({
       reasoning: true,
       contextWindow: 524288,
-      maxOutput: 131072,
+      maxOutput: 65535,
     });
   });
 });
