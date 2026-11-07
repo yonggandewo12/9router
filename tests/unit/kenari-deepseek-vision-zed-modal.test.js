@@ -42,39 +42,39 @@ describe("deepseek-v4-1-flash capabilities (#4293)", () => {
   });
 });
 
-// ── #4244 LIVE_CATALOG_PROVIDERS includes zed ────────────────────────────
+// ── #4244 + cbcn/hy4free: one live-catalog list for both surfaces ─────────
 // ModelSelectModal.js is JSX so we cannot import it in Vitest without a
-// JSX transform.  Read the source text and verify the constant definition
-// directly — this is reliable and does not require a full React setup.
+// JSX transform.  Read the source text instead, and import the shared constant
+// the picker is required to derive its list from.
 
 import fs from "fs";
-import path from "path";
+import { LIVE_CATALOG_PROVIDERS } from "../../src/shared/constants/providers.js";
 
-describe("ModelSelectModal LIVE_CATALOG_PROVIDERS includes zed (#4244)", () => {
+describe("ModelSelectModal resolves its live catalogs from the shared constant", () => {
   let src;
   beforeAll(() => {
     const fileUrl = new URL("../../src/shared/components/ModelSelectModal.js", import.meta.url);
     src = fs.readFileSync(fileUrl, "utf-8");
   });
 
-  it("includes zed in LIVE_CATALOG_PROVIDERS", () => {
-    // Match the const definition line and verify zed is present
-    const match = src.match(/const LIVE_CATALOG_PROVIDERS\s*=\s*\[([^\]]+)\]/);
-    expect(match).toBeTruthy();
-    const list = match[1];
-    expect(list).toContain('"zed"');
+  it("lists every provider whose account catalog the picker must fetch", () => {
+    // Zed was missing in #4244; CodeBuddy's live-only ids (hy4free, space-bunny,
+    // step-5-preview) were invisible here while the provider page showed them.
+    for (const id of ["cursor", "zed", "codebuddy-cn", "codebuddy-intl"]) {
+      expect([...LIVE_CATALOG_PROVIDERS]).toContain(id);
+    }
   });
 
-  it("still includes cursor, cline, clinepass", () => {
-    const match = src.match(/const LIVE_CATALOG_PROVIDERS\s*=\s*\[([^\]]+)\]/);
-    const list = match[1];
-    expect(list).toContain('"cursor"');
-    expect(list).toContain('"cline"');
-    expect(list).toContain('"clinepass"');
+  it("unions the shared constant instead of forking a provider list", () => {
+    expect(src).toContain("SHARED_LIVE_CATALOG_PROVIDERS");
+    expect(src).toMatch(/const LIVE_CATALOG_PROVIDERS\s*=\s*\[\.\.\.new Set\(\[\.\.\.SHARED_LIVE_CATALOG_PROVIDERS/);
+    // cline/ClinePass have resolvers the shared set does not list yet
+    expect(src).toContain('"cline", "clinepass"');
   });
 
-  it("zedModels hook call is present in the file", () => {
-    expect(src).toContain("zedModels");
-    expect(src).toContain("zedConnectionIds");
+  it("looks the catalog up by provider id, with no per-provider hook or ternary", () => {
+    expect(src).toContain("liveModelsByProvider[providerId]");
+    expect(src).not.toMatch(/providerId === "cursor" \? cursorModels/);
+    expect(src).not.toContain("useLiveProviderModels(");
   });
 });

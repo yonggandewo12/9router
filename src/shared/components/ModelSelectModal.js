@@ -7,7 +7,7 @@ import ProviderIcon from "./ProviderIcon";
 import CapacityBadges from "./CapacityBadges";
 import { useModelCaps } from "@/shared/hooks/useModelCaps";
 import { getModelsByProviderId, getModelKind } from "@/shared/constants/models";
-import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, getProviderAlias, providerSupportsKind, listsProviderCatalog } from "@/shared/constants/providers";
+import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, getProviderAlias, providerSupportsKind, listsProviderCatalog, LIVE_CATALOG_PROVIDERS as SHARED_LIVE_CATALOG_PROVIDERS } from "@/shared/constants/providers";
 import { parseSearchQuery, matchesSearch } from "@/shared/utils/modelSearchFilter";
 import { getDeactivatedProviderIds } from "@/shared/utils/connectionStatus";
 
@@ -22,54 +22,67 @@ const PROVIDER_ORDER = [
 // Providers that need no auth — always show in model selector
 const NO_AUTH_PROVIDER_IDS = Object.keys(FREE_PROVIDERS).filter(id => FREE_PROVIDERS[id].noAuth);
 
-// Providers with per-account live catalogs via /api/providers/[id]/models.
-// Static registry stays as fallback when live fetch fails or is empty.
-// zed added in #4244: its backend customResolver already returns live models
-// but the frontend omitted it, hiding Zed entirely from the Combo picker.
-const LIVE_CATALOG_PROVIDERS = ["cursor", "cline", "clinepass", "zed"];
+// Providers whose picker list comes from the per-account live catalog via
+// /api/providers/[id]/models; the static registry stays as the fallback when the
+// fetch fails or answers empty. Sourced from the shared constant the provider page
+// uses, so a provider with a live resolver cannot show on one list and be missing
+// from the other (#4244 hid Zed, and cbcn/hy4free is hidden the same way today).
+// cline/ClinePass also have resolvers but are absent from the shared set — unioned
+// here rather than forking a second list.
+const LIVE_CATALOG_PROVIDERS = [...new Set([...SHARED_LIVE_CATALOG_PROVIDERS, "cline", "clinepass"])];
 
-// Fetch a provider's account-scoped catalog for every active connection and merge
-// the results. Entries collapse by model id on purpose: two connections of the
-// same provider produce the same picker value (`alias/id`), so keeping the first
-// avoids duplicate rows. There is no per-connection metadata to preserve beyond
-// {id,name}. Empty array means "nothing live" so callers keep the static fallback.
-function useLiveProviderModels(isOpen, connectionIds, label) {
-  const [models, setModels] = useState([]);
-  const idsKey = (connectionIds ?? []).join("|");
+// Fetch every live catalog in one pass, keyed by provider id. Adding a provider is
+// then a single change to the shared constant; a per-provider hook plus a lookup
+// ternary here is exactly what let the lists drift. Entries collapse by model id on
+// purpose: two connections of the same provider produce the same picker value
+// (`alias/id`), so keeping the first avoids duplicate rows. A provider with nothing
+// live is left out of the map so callers keep the static fallback.
+function useLiveCatalogModels(isOpen, connectionIdsByProvider) {
+  const [modelsByProvider, setModelsByProvider] = useState({});
+  const idsKey = useMemo(() => JSON.stringify(connectionIdsByProvider), [connectionIdsByProvider]);
 
   useEffect(() => {
-    const ids = idsKey ? idsKey.split("|") : [];
-    if (!isOpen || ids.length === 0) {
-      setModels([]);
+    if (!isOpen) {
+      setModelsByProvider({});
+      return undefined;
+    }
+
+    const targets = Object.entries(JSON.parse(idsKey)).filter(([, ids]) => ids.length > 0);
+    if (targets.length === 0) {
+      setModelsByProvider({});
       return undefined;
     }
 
     let cancelled = false;
-    Promise.all(ids.map(async (connectionId) => {
-      const response = await fetch(`/api/providers/${connectionId}/models`, { cache: "no-store" });
-      if (!response.ok) return [];
-      const data = await response.json();
-      return Array.isArray(data.models) ? data.models : [];
+    Promise.all(targets.map(async ([providerId, connectionIds]) => {
+      const lists = await Promise.all(connectionIds.map(async (connectionId) => {
+        try {
+          const response = await fetch(`/api/providers/${connectionId}/models`, { cache: "no-store" });
+          if (!response.ok) return [];
+          const data = await response.json();
+          return Array.isArray(data.models) ? data.models : [];
+        } catch (error) {
+          // Do not hide the static fallback when the account catalog is unavailable.
+          console.warn(`Unable to load ${providerId} models for selector:`, error);
+          return [];
+        }
+      }));
+      const seen = new Set();
+      return [providerId, lists.flat().filter((model) => {
+        if (!model?.id || seen.has(model.id)) return false;
+        seen.add(model.id);
+        return true;
+      })];
     }))
-      .then((modelLists) => {
+      .then((entries) => {
         if (cancelled) return;
-        const seen = new Set();
-        setModels(modelLists.flat().filter((model) => {
-          if (!model?.id || seen.has(model.id)) return false;
-          seen.add(model.id);
-          return true;
-        }));
-      })
-      .catch((error) => {
-        // Do not hide the static fallback when the account catalog is unavailable.
-        console.warn(`Unable to load ${label} models for selector:`, error);
-        if (!cancelled) setModels([]);
+        setModelsByProvider(Object.fromEntries(entries.filter(([, models]) => models.length > 0)));
       });
 
     return () => { cancelled = true; };
-  }, [isOpen, idsKey, label]);
+  }, [isOpen, idsKey]);
 
-  return models;
+  return modelsByProvider;
 }
 
 export default function ModelSelectModal({
@@ -135,27 +148,24 @@ export default function ModelSelectModal({
   const [providerNodes, setProviderNodes] = useState([]);
   const [customModels, setCustomModels] = useState([]);
   const [disabledModels, setDisabledModels] = useState({});
-  // Cursor and Cline expose the usable catalog per account, so the static catalog is
-  // kept only as a fallback: it goes stale quickly and entitlements differ per account.
-  // Single map driven by LIVE_CATALOG_PROVIDERS so the constant cannot drift
-  // from the memos below; per-provider arrays stay referentially stable unless
-  // activeProviders itself changes.
+  // One map keyed by LIVE_CATALOG_PROVIDERS so the constant cannot drift from the
+  // fetch below; the connection lists stay referentially stable unless
+  // activeProviders itself changes. Providers that do not list the active kind are
+  // left out because groupedModels ignores their catalog anyway — without this the
+  // media pickers would pay for account catalogs they cannot show.
   const liveConnectionIdsByProvider = useMemo(() => {
-    const map = Object.fromEntries(LIVE_CATALOG_PROVIDERS.map((id) => [id, []]));
+    const map = Object.fromEntries(
+      LIVE_CATALOG_PROVIDERS
+        .filter((id) => listsProviderCatalog(id, kindFilter))
+        .map((id) => [id, []])
+    );
     for (const p of filteredActiveProviders) {
       if (p?.id && Object.prototype.hasOwnProperty.call(map, p.provider)) map[p.provider].push(p.id);
     }
     return map;
-  }, [filteredActiveProviders]);
-  const cursorConnectionIds = liveConnectionIdsByProvider.cursor;
-  const clineConnectionIds = liveConnectionIdsByProvider.cline;
-  const clinepassConnectionIds = liveConnectionIdsByProvider.clinepass;
-  const zedConnectionIds = liveConnectionIdsByProvider.zed;
+  }, [filteredActiveProviders, kindFilter]);
 
-  const cursorModels = useLiveProviderModels(isOpen, cursorConnectionIds, "Cursor");
-  const clineModels = useLiveProviderModels(isOpen, clineConnectionIds, "Cline");
-  const clinepassModels = useLiveProviderModels(isOpen, clinepassConnectionIds, "ClinePass");
-  const zedModels = useLiveProviderModels(isOpen, zedConnectionIds, "Zed");
+  const liveModelsByProvider = useLiveCatalogModels(isOpen, liveConnectionIdsByProvider);
 
   const fetchCombos = async () => {
     try {
@@ -416,7 +426,7 @@ export default function ModelSelectModal({
           hasModels: mergedModels.length > 0,
         };
       } else {
-        const liveModels = providerId === "cursor" ? cursorModels : providerId === "cline" ? clineModels : providerId === "clinepass" ? clinepassModels : providerId === "zed" ? zedModels : [];
+        const liveModels = liveModelsByProvider[providerId] || [];
         const hardcodedModels = !listsKind(providerId)
           ? []
           : liveModels.length > 0
@@ -512,7 +522,7 @@ export default function ModelSelectModal({
     });
 
     return groups;
-  }, [filteredActiveProviders, modelAliases, allProviders, providerNodes, customModels, disabledModels, kindFilter, effectiveConnections, deactivatedProviderIds, cursorModels, clineModels, clinepassModels, zedModels]);
+  }, [filteredActiveProviders, modelAliases, allProviders, providerNodes, customModels, disabledModels, kindFilter, effectiveConnections, deactivatedProviderIds, liveModelsByProvider]);
 
   // Parse search query into structured query (regex, positive tokens, negative tokens)
   const parsedQuery = useMemo(() => parseSearchQuery(searchQuery), [searchQuery]);
