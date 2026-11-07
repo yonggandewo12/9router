@@ -1,3 +1,18 @@
+# v0.6.29 (2026-11-07)
+
+The Combo model picker and the provider page disagreed about which providers read their model list from the account. v0.6.27 moved the provider page onto the shared `LIVE_CATALOG_PROVIDERS` set and left the picker holding its own four-provider list, so every live-only CodeBuddy id — `hy4free` (Hy4) first among them — showed as a usable model yet could not be added to a combo.
+
+## Fixes
+
+- **The picker resolves live catalogs from the shared constant** (`src/shared/components/ModelSelectModal.js`). It now unions `LIVE_CATALOG_PROVIDERS` with `cline`/`clinepass` (both have backend resolvers the shared set still omits) instead of keeping a second list, and the four per-provider hooks plus the `providerId === "cursor" ? … : …` lookup collapse into one keyed fetch — that lookup shape is what let the two lists drift, and #4244 hid Zed exactly this way.
+- **Media pickers stop paying for catalogs they cannot show.** The connection map is filtered by `listsProviderCatalog(id, kindFilter)`, the same predicate `groupedModels` already applied, so opening the Vision/Audio adapter picker issues zero `/api/providers/{id}/models` requests instead of one per live provider.
+
+## Notes
+
+- **Measured**: CodeBuddy CN in the Combo picker goes 5 → 6 entries and `Hy4` is selectable; the Vision adapter picker still lists its 29 models with 0 live-catalog requests. `cbcn/hy4free`, `cbcn/space-bunny` and `cbcn/hy3` were re-probed through the running daemon (20128) and answered 200 with real `usage` — the newly selectable ids route, they are not decoration.
+- **Live replaces static, as the provider page already did**: the account catalog wins when it answers, so the four ids the table does not publish (`glm-5.1`, `hy4-preview`, `minimax-m3`, `kimi-k3-1`) drop out of the picker. They stay routable and reappear once added through the provider page's Add Model; on the audited account all four were already disabled, so the visible set only grew.
+- **Test suite**: 473 files / 5029 passing / 0 failing (15 expected-fail, 93 skipped, 1 todo), 22.2s — same counts as v0.6.28. `kenari-deepseek-vision-zed-modal.test.js` was rewritten to assert the shared-constant invariant in place of the old literal-array grep; ESLint on the changed component reports the same 7 pre-existing problems as before.
+
 # v0.6.28 (2026-11-07)
 
 Two lanes audited end to end — `qoder-cn` and `codebuddy-cn` — and the defects found ship together. The headline is that a Qoder device token now self-heals instead of dying quietly at ~30 days, and the free QoDuck model is finally offered; the CodeBuddy side stops wasting refresh and fetch round-trips on failures that are permanent or already known. Every claim below was re-measured through `npm run dev` (port 20127), not the packaged daemon.
