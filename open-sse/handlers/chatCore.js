@@ -478,8 +478,11 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     return createErrorResult(HTTP_STATUS.BAD_GATEWAY, errMsg);
   }
 
-  // Handle 401/403 - try token refresh (skip for noAuth providers)
-  if (!executor.noAuth && (providerResponse.status === HTTP_STATUS.UNAUTHORIZED || providerResponse.status === HTTP_STATUS.FORBIDDEN)) {
+  // Handle 401/403 - try token refresh (skip for noAuth providers). An executor
+  // can mark a synthesized error response with X-Auth-Refresh-Skip when the status
+  // is a quota/billing block rather than an auth failure (qoder billing 403):
+  // refreshing a healthy token there only burns a rotation and a retry round-trip.
+  if (!executor.noAuth && !providerResponse.headers.get("x-auth-refresh-skip") && (providerResponse.status === HTTP_STATUS.UNAUTHORIZED || providerResponse.status === HTTP_STATUS.FORBIDDEN)) {
     try {
       // Mutate credentials after each successful refresh: rotating refresh_token
       // providers (xAI/grok-cli) issue a new RT on every refresh; without this,

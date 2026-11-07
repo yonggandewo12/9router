@@ -3,8 +3,8 @@
  *
  * Qoder runs two regional sites with parallel endpoint shapes:
  *   intl (qoder)       CN (qoder-cn)
- *   openapi.qoder.sh   openapi.qoder.com.cn   - device flow + userinfo + quota usage
- *   center.qoder.sh    gateway.qoder.com.cn   - token refresh (best-effort, 403 for device tokens)
+ *   openapi.qoder.sh   openapi.qoder.com.cn   - device flow + userinfo + quota usage + token refresh
+ *   center.qoder.sh    gateway.qoder.com.cn   - (legacy; unused)
  *   api3.qoder.sh      gateway.qoder.com.cn   - inference (chat) + model list, requires COSY signing
  *   qoder.com/device   qoder.com.cn/device    - browser landing page for device authorization
  *
@@ -70,8 +70,8 @@ export function qoderUserInfoUrl(region) {
 export function qoderQuotaUsageUrl(region) {
   return `${qoderOpenApiBase(region)}/api/v2/quota/usage`;
 }
-export function qoderRefreshTokenUrl(region) {
-  return `${qoderRegionBases(region).center}/algo/api/v3/user/refresh_token`;
+export function qoderDeviceTokenRefreshUrl(region) {
+  return `${qoderOpenApiBase(region)}/api/v1/deviceToken/refresh`;
 }
 export function qoderLoginUrl(region) {
   return qoderRegionBases(region).login;
@@ -83,7 +83,7 @@ export function qoderWebsiteUrl(region) {
 export const QODER_DEVICE_TOKEN_URL = qoderDeviceTokenUrl(QODER_REGION_INTL);
 export const QODER_USERINFO_URL = qoderUserInfoUrl(QODER_REGION_INTL);
 export const QODER_QUOTA_USAGE_URL = qoderQuotaUsageUrl(QODER_REGION_INTL);
-export const QODER_REFRESH_TOKEN_URL = qoderRefreshTokenUrl(QODER_REGION_INTL);
+export const QODER_DEVICE_TOKEN_REFRESH_URL = qoderDeviceTokenRefreshUrl(QODER_REGION_INTL);
 
 // PAT (Personal Access Token, pt-...) → short-lived job token (jt-...) exchange.
 // PATs cannot sign COSY requests directly — they must be exchanged first.

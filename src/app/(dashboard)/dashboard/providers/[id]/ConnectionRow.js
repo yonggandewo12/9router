@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
-import { getStatusVariant as getConnectionStatusVariant } from "@/shared/utils/connectionStatus";
+import { getStatusVariant as getConnectionStatusVariant, getEffectiveStatus, isConnectionTokenExpired } from "@/shared/utils/connectionStatus";
 import PropTypes from "prop-types";
 import { Badge, Toggle, Tooltip } from "@/shared/components";
 import CooldownTimer from "./CooldownTimer";
@@ -158,10 +158,17 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
     };
   }, [modelLockUntil]);
 
-  // Determine effective status (override unavailable if cooldown expired)
-  const effectiveStatus = (connection.testStatus === "unavailable" && !isCooldown)
-    ? "active"  // Cooldown expired u2192 treat as active
-    : connection.testStatus;
+  // Determine effective status (override unavailable if cooldown expired).
+  // Expiry is checked in an effect to keep Date.now() out of render.
+  const [isTokenExpired, setIsTokenExpired] = useState(false);
+  useEffect(() => {
+    const check = () => setIsTokenExpired(isConnectionTokenExpired(connection));
+    check();
+    const interval = setInterval(check, 60_000);
+    return () => clearInterval(interval);
+  }, [connection.expiresAt]);
+
+  const effectiveStatus = getEffectiveStatus(connection, { isCooldown, isTokenExpired });
 
   const getStatusVariant = () => getConnectionStatusVariant(connection.isActive, effectiveStatus);
 
@@ -338,6 +345,7 @@ ConnectionRow.propTypes = {
     displayName: PropTypes.string,
     modelLockUntil: PropTypes.string,
     testStatus: PropTypes.string,
+    expiresAt: PropTypes.string,
     isActive: PropTypes.bool,
     lastError: PropTypes.string,
     priority: PropTypes.number,

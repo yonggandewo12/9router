@@ -158,6 +158,26 @@ describe("wrapQoderSSE billing detection", () => {
     expect(wrapped.status).toBe(403);
     expect(wrapped.ok).toBe(false);
   });
+
+  it("marks the billing 403 so chatCore skips the token-rotation refresh", async () => {
+    const billingEnv = JSON.stringify({
+      statusCodeValue: 403,
+      body: '{"code":"112","message":"Quota exhausted"}',
+    });
+    const wrapped = await wrapQoderSSE(makeResponse([`data: ${billingEnv}\n\n`]), "qoder-cn/lmodel");
+    expect(wrapped.status).toBe(403);
+    expect(wrapped.headers.get("x-auth-refresh-skip")).toBe("1");
+  });
+
+  it("does not mark a genuine auth error for refresh skip", async () => {
+    const authEnv = JSON.stringify({
+      statusCodeValue: 401,
+      body: '{"code":"401","message":"token expired"}',
+    });
+    const wrapped = await wrapQoderSSE(makeResponse([`data: ${authEnv}\n\n`]), "qoder-cn/lmodel");
+    expect(wrapped.status).toBe(401);
+    expect(wrapped.headers.get("x-auth-refresh-skip")).toBeNull();
+  });
   it("returns 403 response when statusCodeValue is string \"403\" (code 110)", async () => {
     const billingEnv = JSON.stringify({
       statusCodeValue: "403",

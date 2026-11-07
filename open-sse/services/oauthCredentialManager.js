@@ -95,6 +95,13 @@ export function mergeRefreshedCredentials(provider, currentCredentials, refreshe
     next.expiresAt = toExpiresAt(refreshedCredentials.expiresIn, nowMs);
   } else if (refreshedCredentials.expiresAt) {
     next.expiresAt = refreshedCredentials.expiresAt;
+  } else if (next.accessToken) {
+    // A fresh access token with no expiry hint: the old expiresAt describes the
+    // previous token and is usually already past. Inheriting it would make
+    // shouldRefreshCredentials fire on every request forever (a refresh storm).
+    // Clear it and let the reactive 401 path handle the real expiry.
+    next.expiresAt = null;
+    next.expiresIn = null;
   }
 
   if (refreshedCredentials.projectId) next.projectId = refreshedCredentials.projectId;

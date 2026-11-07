@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import { getStatusVariant as getConnectionStatusVariant } from "@/shared/utils/connectionStatus";
+import { getStatusVariant as getConnectionStatusVariant, getEffectiveStatus, isConnectionTokenExpired } from "@/shared/utils/connectionStatus";
 import PropTypes from "prop-types";
 import { Card, Badge, Button, Modal, Select, Toggle, EditConnectionModal, ConfirmModal } from "@/shared/components";
 import WebLoginButton from "./WebLoginButton";
@@ -86,7 +86,15 @@ function ConnectionRow({ connection, proxyPools, isOAuth, isFirst, isLast, onMov
     return () => document.removeEventListener("mousedown", handler);
   }, [showProxyDropdown]);
 
-  const effectiveStatus = connection.testStatus === "unavailable" && !isCooldown ? "active" : connection.testStatus;
+  const [isTokenExpired, setIsTokenExpired] = useState(false);
+  useEffect(() => {
+    const check = () => setIsTokenExpired(isConnectionTokenExpired(connection));
+    check();
+    const interval = setInterval(check, 60_000);
+    return () => clearInterval(interval);
+  }, [connection.expiresAt]);
+
+  const effectiveStatus = getEffectiveStatus(connection, { isCooldown, isTokenExpired });
 
   const getStatusVariant = () => getConnectionStatusVariant(connection.isActive, effectiveStatus);
 
@@ -178,6 +186,7 @@ ConnectionRow.propTypes = {
     email: PropTypes.string,
     displayName: PropTypes.string,
     testStatus: PropTypes.string,
+    expiresAt: PropTypes.string,
     isActive: PropTypes.bool,
     lastError: PropTypes.string,
     priority: PropTypes.number,

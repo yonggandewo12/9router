@@ -23,6 +23,7 @@ import {
 } from "./tokenRefresh/providers.js";
 import { refreshCodeartsFromCredentials } from "../shared/codearts/auth.js";
 import { refreshDevecoFromCredentials } from "../shared/deveco/auth.js";
+import { refreshQoderDeviceToken } from "../shared/qoder/refresh.js";
 
 // Re-export all provider refresh functions (preserves public API for all consumers)
 export {
@@ -187,6 +188,10 @@ const REFRESH_HANDLERS = {
   "minimax-code": (c, log) => refreshMiniMaxCodeToken("minimax-code", c.refreshToken, log),
   "minimax-code-global": (c, log) => refreshMiniMaxCodeToken("minimax-code-global", c.refreshToken, log),
   nous: (c, log) => refreshNousToken(c.refreshToken, log),
+  // Qoder device tokens renew on the openapi host (plain JSON, rotates the RT);
+  // the refresh POST rides the connection proxy like every other lane.
+  qoder: (c, log) => refreshQoderDeviceToken(c, { log, proxyOptions: connectionProxyOptions(c), region: "intl" }),
+  "qoder-cn": (c, log) => refreshQoderDeviceToken(c, { log, proxyOptions: connectionProxyOptions(c), region: "cn" }),
   vertex: vertexRefreshHandler,
   "vertex-partner": vertexRefreshHandler
 };

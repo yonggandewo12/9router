@@ -37,7 +37,8 @@ import {
   getQoderStaticModelConfig,
   qoderInferenceBase,
 } from "../shared/qoder/constants.js";
-import { getQoderModelConfig, resolveQoderModels, isQoderPat, resolveQoderCredentials } from "../services/qoderModels.js";
+import { getQoderModelConfig, resolveQoderModels, isQoderPat, resolveQoderCredentials, QoderAuthError } from "../services/qoderModels.js";
+import { refreshQoderDeviceToken } from "../shared/qoder/refresh.js";
 import { OPENAI_BLOCK, CLAUDE_BLOCK } from "../translator/schema/blocks.js";
 import { encodeDataUri } from "../translator/concerns/image.js";
 import { buildCosyHeaders, deriveMachineId } from "../shared/qoder/cosy.js";
@@ -261,6 +262,14 @@ async function buildQoderRequestBody({ model, body, credentials, log, proxyOptio
       // refusing here would make an available model look broken.
       modelConfig = getQoderStaticModelConfig(qoderKey);
       if (!modelConfig) {
+        // An expired stored token also lands here when the catalog fetch
+        // failed silently (network down, cache cold). Report it as the auth
+        // failure it is — a 400 would be treated as request-scoped and leave
+        // the dead connection showing "active" with no refresh attempt.
+        const expiresMs = credentials?.expiresAt ? Date.parse(credentials.expiresAt) : NaN;
+        if (Number.isFinite(expiresMs) && expiresMs <= Date.now()) {
+          throw new QoderAuthError("qoder: access token expired; re-authorize the connection");
+        }
         throw new Error(
           `qoder: model_config for "${qoderKey}" not yet known (run a model list fetch or check upstream connectivity)`,
         );
@@ -523,7 +532,14 @@ async function wrapQoderSSE(response, model, log = null) {
         ? peek.statusVal : HTTP_STATUS.BAD_GATEWAY;
     return new Response(
       JSON.stringify({ error: { message: peek.message, code: peek.statusVal } }),
-      { status, headers: { "Content-Type": "application/json" } }
+      {
+        status,
+        headers: {
+          "Content-Type": "application/json",
+          // Billing block ≠ auth failure: skip the token-rotation refresh (see execute).
+          ...(peek.isBilling ? { "X-Auth-Refresh-Skip": "1" } : {}),
+        },
+      }
     );
   }
 
@@ -755,9 +771,14 @@ export class QoderExecutor extends BaseExecutor {
     try {
       ({ qoderKey, payload } = await buildQoderRequestBody({ model, body, credentials, log, proxyOptions, signal, region: this.region }));
     } catch (err) {
+      // Auth failures must surface as 401 so chatCore tries a token refresh
+      // and, failing that, locks the connection. A 400 here is request-scoped:
+      // no refresh, no lock, and the dashboard keeps showing a dead token as
+      // "active" behind a misleading "model_config not yet known" message.
+      const status = err?.name === "QoderAuthError" ? HTTP_STATUS.UNAUTHORIZED : HTTP_STATUS.BAD_REQUEST;
       const fakeResp = new Response(
         JSON.stringify({ error: { message: err.message } }),
-        { status: 400, headers: { "Content-Type": "application/json" } },
+        { status, headers: { "Content-Type": "application/json" } },
       );
       return { response: fakeResp, url, headers: {}, transformedBody: body };
     }
@@ -920,7 +941,16 @@ export class QoderExecutor extends BaseExecutor {
           return {
             response: new Response(
               JSON.stringify({ error: { message: peek.message || "qoder upstream error", code: peek.statusVal } }),
-              { status, headers: { "Content-Type": "application/json" } },
+              {
+                status,
+                headers: {
+                  "Content-Type": "application/json",
+                  // A billing block is a healthy token out of quota, not an auth
+                  // failure: tell chatCore not to burn a device-token rotation +
+                  // retry round-trip on it. The 403 still locks the model below.
+                  ...(peek.isBilling ? { "X-Auth-Refresh-Skip": "1" } : {}),
+                },
+              },
             ),
             url: sent.url,
             headers: sent.headers,
@@ -1048,11 +1078,11 @@ export class QoderExecutor extends BaseExecutor {
     }
   }
 
-  // Qoder device tokens don't refresh through OAuth — the upstream returns
-  // 403 for our flow. Surfacing failure via 401-on-chat is enough; the
-  // dashboard tells users to re-login when their token expires (~30 days).
-  async refreshCredentials() {
-    return false;
+  // Device tokens (dt-) renew through the openapi deviceToken/refresh endpoint
+  // (plain JSON, rotates both tokens). PAT/job-token lanes have no stored
+  // refresh material and return false.
+  async refreshCredentials(credentials, log, proxyOptions = null) {
+    return refreshQoderDeviceToken(credentials, { log, proxyOptions, region: this.region });
   }
 
   /**
@@ -1065,10 +1095,6 @@ export class QoderExecutor extends BaseExecutor {
     const retryAfterMs = parseQueueRetryAfterMs(bodyText);
     if (retryAfterMs) base.resetsAtMs = Date.now() + retryAfterMs;
     return base;
-  }
-
-  needsRefresh() {
-    return false;
   }
 }
 

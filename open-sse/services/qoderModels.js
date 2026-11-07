@@ -41,6 +41,19 @@ const CACHE_TTL_MS = 60 * 60 * 1000; // 1h, same as the Kiro catalog
 
 const PAT_PREFIX = "pt-";
 
+/**
+ * The credential itself was rejected (expired login, revoked token). Distinct
+ * from a transport/shape failure: callers map this to a 401 so chatCore's
+ * refresh-on-401 path and the account lock engage, instead of the request-scoped
+ * 400 rule that leaves a dead connection showing "active".
+ */
+export class QoderAuthError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "QoderAuthError";
+  }
+}
+
 // PAT → job-token cache: a job token is short-lived (24h), so we keep it per
 // PAT and re-exchange once it is within 5 minutes of expiry.
 const PAT_REFRESH_BUFFER_MS = 5 * 60 * 1000;
@@ -247,34 +260,54 @@ async function fetchQoderCatalogRaw(credentials, signal, proxyOptions = null, re
     if (signal && abortListener) signal.removeEventListener("abort", abortListener);
   }
 
-  if (!response.ok) return null;
+  if (!response.ok) {
+    if (response.status === 401 || response.status === 403) {
+      // "Login expired" (code 105) and friends: the credential is dead, not the
+      // network. Throw so the chat path surfaces a 401 (refresh / re-login)
+      // rather than the misleading "model_config not yet known" 400.
+      throw new QoderAuthError(`qoder: login rejected by upstream (HTTP ${response.status}); re-authorize the connection`);
+    }
+    return null;
+  }
 
   const body = await response.json().catch(() => null);
-  if (!body || !Array.isArray(body.chat)) return null;
+  if (!body || typeof body !== "object") return null;
+
+  // The catalog is scene-grouped (chat / app / developer / assistant / …) and
+  // the app unions every scene. Some models are published ONLY outside chat —
+  // e.g. the free QoDuck (`lmodel`) lives in `app` — so reading just body.chat
+  // hid them. Union all scenes; `chat` goes first so its metadata wins ties.
+  const scenes = Object.keys(body).filter((k) => Array.isArray(body[k]));
+  if (scenes.length === 0) return null;
+  scenes.sort((a, b) => (a === "chat" ? -1 : b === "chat" ? 1 : 0));
 
   const models = [];
   const rawConfigs = new Map();
-  for (const entry of body.chat) {
-    if (!entry || typeof entry !== "object") continue;
-    const key = entry.key;
-    if (!key) continue;
+  const seen = new Set();
+  for (const scene of scenes) {
+    for (const entry of body[scene]) {
+      if (!entry || typeof entry !== "object") continue;
+      const key = entry.key;
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
 
-    // Always cache the config — chat needs model_config even for UI-hidden
-    // models (enable:false). Upstream still accepts chat for these keys.
-    rawConfigs.set(key, entry);
-    if (entry.enable === false) continue;
+      // Always cache the config — chat needs model_config even for UI-hidden
+      // models (enable:false). Upstream still accepts chat for these keys.
+      rawConfigs.set(key, entry);
+      if (entry.enable === false) continue;
 
-    const display = entry.display_name || key;
-    const ctx = Number(entry.max_input_tokens) || 131_072;
-    models.push({
-      id: key,
-      name: `${display}`,
-      contextLength: ctx,
-      isVL: !!entry.is_vl,
-      isReasoning: !!entry.is_reasoning,
-      maxOutputTokens: Number(entry.max_output_tokens) || 0,
-      description: entry.description || "",
-    });
+      const display = entry.display_name || key;
+      const ctx = Number(entry.max_input_tokens) || 131_072;
+      models.push({
+        id: key,
+        name: `${display}`,
+        contextLength: ctx,
+        isVL: !!entry.is_vl,
+        isReasoning: !!entry.is_reasoning,
+        maxOutputTokens: Number(entry.max_output_tokens) || 0,
+        description: entry.description || "",
+      });
+    }
   }
 
   return { models, rawConfigs };
