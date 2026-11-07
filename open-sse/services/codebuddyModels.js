@@ -36,7 +36,7 @@ import { getCapabilitiesForModel } from "../providers/capabilities.js";
 import { stripThinkingSuffix } from "../translator/concerns/thinkingUnified.js";
 
 // Gateway-side router aliases: never published in the table, verified answering.
-const ROUTER_IDS = ["auto", "fast-model", "balanced-model", "deep-model"];
+const ROUTER_IDS = ["auto", "default", "fast-model", "balanced-model", "deep-model"];
 
 // Non-chat backends announce themselves through tags; 11103 is what they return on chat.
 const MEDIA_TAG_RE = /^(text-to-image|image-to-image|text-to-video|image-to-video|text-to-speech|speech-to-text|embedding)$/i;
@@ -60,6 +60,9 @@ const DEAD_CODES = {
 // it on every dashboard mount is waste.
 const VERDICT_TTL_MS = 24 * 60 * 60 * 1000;
 const CONFIG_TTL_MS = 6 * 60 * 60 * 1000;
+// A failed catalog fetch is cached for this long so client /v1/models polls do
+// not each pay the 20s fetch timeout while a credential or the gateway is down.
+const CONFIG_NEGATIVE_TTL_MS = 60 * 1000;
 // 4-way measured 2026-11-06: the gateway answers 6 concurrent requests in ~8s wall with no
 // throttling errors, while a serial pass over the whole table took 137s. A larger fan-out
 // is what produced the transient-401 sweep, so the concurrency stays modest.
@@ -489,11 +492,24 @@ async function resolveCatalog({
   const account = accountKey(providerId, accessToken);
   if (!catalogs.has(account)) pruneStaleCaches(Date.now());
   const cached = catalogs.get(account);
+  // Hold a failure briefly so a dead credential or a down gateway does not make
+  // every /v1/models poll pay a fresh 20s round-trip. forceRefresh (the dashboard
+  // button) bypasses this below; a success overwrites the negative entry.
+  const fail = (warning) => {
+    catalogs.set(account, { models: [], at: Date.now(), warning });
+    return { models: [], dropped: [], warning };
+  };
   let models = null;
 
-  if (!forceRefresh && cached && Date.now() - cached.at < CONFIG_TTL_MS) {
-    models = cached.models;
-  } else {
+  if (!forceRefresh && cached) {
+    const age = Date.now() - cached.at;
+    if (cached.models.length && age < CONFIG_TTL_MS) {
+      models = cached.models;
+    } else if (!cached.models.length && cached.warning && age < CONFIG_NEGATIVE_TTL_MS) {
+      return { models: [], dropped: [], warning: cached.warning };
+    }
+  }
+  if (!models) {
     let res;
     try {
       res = await fetchFn(configUrl(transport.baseUrl), {
@@ -502,20 +518,20 @@ async function resolveCatalog({
         signal: AbortSignal.timeout(20000),
       });
     } catch (error) {
-      return { models: [], dropped: [], warning: `${providerId} catalog fetch failed: ${error?.message || error}` };
+      return fail(`${providerId} catalog fetch failed: ${error?.message || error}`);
     }
     if (!res.ok) {
       const detail = await res.text().catch(() => "");
-      return { models: [], dropped: [], warning: `${providerId} catalog HTTP ${res.status}: ${detail.slice(0, 120)}` };
+      return fail(`${providerId} catalog HTTP ${res.status}: ${detail.slice(0, 120)}`);
     }
     let data = null;
     try {
       data = await res.json();
     } catch {
-      return { models: [], dropped: [], warning: `${providerId} catalog returned invalid JSON` };
+      return fail(`${providerId} catalog returned invalid JSON`);
     }
     models = normalizeCodeBuddyModels(data, providerId);
-    if (!models.length) return { models: [], dropped: [], warning: `${providerId} catalog empty` };
+    if (!models.length) return fail(`${providerId} catalog empty`);
     catalogs.set(account, { models, at: Date.now() });
   }
 

@@ -529,6 +529,7 @@ export async function refreshCodebuddyToken(refreshToken, log, proxyOptions = nu
         "X-Product": "SaaS",
       },
       body: "{}",
+      signal: AbortSignal.timeout(15000),
     }, proxyOptions);
 
     if (!response.ok) {
@@ -537,6 +538,10 @@ export async function refreshCodebuddyToken(refreshToken, log, proxyOptions = nu
         status: response.status,
         error: errorText,
       });
+      // 401/403 rejects the refresh token itself (probed: a dead RT answers 401
+      // code 12153). That is permanent — surface invalid_grant so the caller
+      // prompts re-auth instead of burning three retries on a corpse.
+      if (response.status === 401 || response.status === 403) return { error: "invalid_grant" };
       return null;
     }
 
@@ -580,6 +585,7 @@ export async function refreshCodebuddyIntlToken(refreshToken, log, proxyOptions 
         "X-Product": "SaaS",
       },
       body: "{}",
+      signal: AbortSignal.timeout(15000),
     }, proxyOptions);
 
     if (!response.ok) {
@@ -588,6 +594,8 @@ export async function refreshCodebuddyIntlToken(refreshToken, log, proxyOptions 
         status: response.status,
         error: errorText,
       });
+      // See refreshCodebuddyToken: 401/403 is a dead refresh token, not a blip.
+      if (response.status === 401 || response.status === 403) return { error: "invalid_grant" };
       return null;
     }
 

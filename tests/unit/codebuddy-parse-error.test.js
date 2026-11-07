@@ -47,4 +47,13 @@ describe("CodeBuddy parseError", () => {
     expect(parsed.message).toBe(bodyText);
     expect(parsed.resetsAtMs).toBeUndefined();
   });
+
+  it("surfaces 11115 (prompt too long) as 413 on both gateways", () => {
+    const bodyText = JSON.stringify({ code: 11115, msg: "prompt is too long" });
+    for (const executor of [new CodeBuddyExecutor(), new CodeBuddyIntlExecutor()]) {
+      const parsed = executor.parseError({ status: 400 }, bodyText);
+      expect(parsed.status).toBe(413);
+      expect(parsed.message).toContain("prompt is too long");
+    }
+  });
 });

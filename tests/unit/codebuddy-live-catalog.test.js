@@ -54,7 +54,7 @@ describe("codebuddy live catalog normalization", () => {
   it("carries the gateway routers even though the table omits them", () => {
     const models = normalizeCodeBuddyModels(payload([row({ id: "glm-5.3" })]), "codebuddy-cn");
     const ids = models.map((m) => m.id);
-    for (const router of ["auto", "fast-model", "balanced-model", "deep-model"]) {
+    for (const router of ["auto", "default", "fast-model", "balanced-model", "deep-model"]) {
       expect(ids).toContain(router);
     }
     expect(models.find((m) => m.id === "auto")).toMatchObject({ router: true });
@@ -157,7 +157,7 @@ describe("codebuddy catalog verification pass", () => {
       "glm-5.0-turbo": { code: "11150" },
     });
     const result = await verified({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: fn });
-    expect(result.models.map((m) => m.id)).toEqual(["glm-5.3", "hunyuan-chat", "auto", "fast-model", "balanced-model", "deep-model"]);
+    expect(result.models.map((m) => m.id)).toEqual(["glm-5.3", "hunyuan-chat", "auto", "default", "fast-model", "balanced-model", "deep-model"]);
     expect(result.dropped).toEqual([
       { id: "glm-4.6", reason: "retired upstream" },
       { id: "glm-5.0-turbo", reason: "rejects a request without reasoning_effort" },
@@ -238,7 +238,7 @@ describe("codebuddy catalog verification pass", () => {
     };
     const result = await verified({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: fn });
     expect(result.dropped).toEqual([]);
-    expect(result.models).toHaveLength(table.length + 4);   // nothing pruned
+    expect(result.models).toHaveLength(table.length + 5);   // nothing pruned
     // An uncapped "ok" is a 127 KB, 10s, x2-rate reply on `default` — measured 2026-11-06.
     expect(bodies.length).toBeGreaterThan(0);
     for (const body of bodies) {
@@ -255,6 +255,37 @@ describe("codebuddy catalog verification pass", () => {
     const noRows = await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: empty.fn });
     expect(noRows.models).toEqual([]);
     expect(noRows.warning).toContain("empty");
+  });
+
+  it("negative-caches a failed catalog so repeated polls do not each pay the fetch", async () => {
+    let configCalls = 0;
+    const fn = async (url) => {
+      if (url.endsWith("/v3/config")) {
+        configCalls++;
+        return { ok: false, status: 401, text: async () => "unauthorized", json: async () => ({}) };
+      }
+      throw new Error("must not probe on a failed catalog");
+    };
+    const a = await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "NEG-401", fetchFn: fn });
+    const b = await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "NEG-401", fetchFn: fn });
+    expect(a.models).toEqual([]);
+    expect(a.warning).toContain("401");
+    expect(b.warning).toContain("401");
+    expect(configCalls).toBe(1);
+  });
+
+  it("forceRefresh bypasses the negative cache", async () => {
+    let configCalls = 0;
+    const fn = async (url) => {
+      if (url.endsWith("/v3/config")) {
+        configCalls++;
+        return { ok: false, status: 500, text: async () => "", json: async () => ({}) };
+      }
+      throw new Error("must not probe");
+    };
+    await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "NEG-FORCE", fetchFn: fn });
+    await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "NEG-FORCE", fetchFn: fn, forceRefresh: true });
+    expect(configCalls).toBe(2);
   });
 });
 
@@ -445,8 +476,8 @@ describe("codebuddy probe tiering (model-call budget)", () => {
     expect(calls).toContain("minimax-m2.5");
     expect(result.models.map((m) => m.id)).toContain("glm-5.3");
     expect(result.dropped.map((d) => d.id)).toEqual(["minimax-m2.5"]);
-    // 4 routers + 2 ambiguous ids, not 4 routers + 30 table ids.
-    expect(calls.filter((c) => !["auto", "fast-model", "balanced-model", "deep-model"].includes(c)).length).toBeLessThanOrEqual(3);
+    // 5 routers + 2 ambiguous ids, not 5 routers + 30 table ids.
+    expect(calls.filter((c) => !["auto", "default", "fast-model", "balanced-model", "deep-model"].includes(c)).length).toBeLessThanOrEqual(3);
   });
 
   it("lets a live 11102 override the agent-listed trust", async () => {
@@ -470,11 +501,11 @@ describe("codebuddy probe tiering (model-call budget)", () => {
     expect(cold.models.map((m) => m.id)).toContain("minimax-m2.5");
 
     // A caller that does wait joins that same pass rather than returning a half-answer,
-    // and sharing is what keeps the budget at one pass (6 ids + 1 effort retry).
+    // and sharing is what keeps the budget at one pass (7 ids + 1 effort retry).
     const settled = await verified({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: spy });
     expect(settled.dropped.map((d) => d.id)).toEqual(["minimax-m2.5"]);
     expect(settled.models.map((m) => m.id)).not.toContain("minimax-m2.5");
-    expect(calls.length).toBeLessThanOrEqual(7);
+    expect(calls.length).toBeLessThanOrEqual(8);
   });
 });
 
@@ -566,8 +597,8 @@ describe("codebuddy final-review fixes", () => {
       verified({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: slow }),
     ]);
     expect(a.models.map((m) => m.id)).toEqual(b.models.map((m) => m.id));
-    // 1 ambiguous id × 2 shapes (bare + effort) + 4 routers, once — not twice.
-    expect(chats).toBeLessThanOrEqual(6);
+    // 1 ambiguous id × 2 shapes (bare + effort) + 5 routers, once — not twice.
+    expect(chats).toBeLessThanOrEqual(7);
   });
 
   it("treats a reasoning-only reply as an answer, not an inconclusive probe", async () => {

@@ -51,6 +51,13 @@ export class CodeBuddyIntlExecutor extends DefaultExecutor {
       }
     }
 
+    // Same gateway family as cn: tool_choice is a plain string on the gateway's
+    // Go struct, so the OpenAI object form is refused (400/11101). Downgrade to
+    // "required" to keep the must-call-a-tool intent (see codebuddy-cn.js).
+    if (transformed.tool_choice && typeof transformed.tool_choice === "object") {
+      transformed.tool_choice = "required";
+    }
+
     return transformed;
   }
   parseError(response, bodyText) {
@@ -62,6 +69,11 @@ export class CodeBuddyIntlExecutor extends DefaultExecutor {
         // error text, and the intl catalog is a different table, so the verdict has to be
         // recorded under this provider's own id.
         recordRetirement(PROVIDER_ID, data);
+        // 11115 = prompt past this model's real ceiling; surface 413 (oversized
+        // request) rather than a generic 400 the client might retry. Mirrors cn.
+        if (String(data?.code ?? "") === "11115") {
+          return { status: 413, message: msg || "CodeBuddy prompt is too long for this model (11115)" };
+        }
         if (data?.code === 6004 || /超出频率限制|frequency limit|限额/i.test(msg)) {
           let resetsAtMs = null;
           const match = msg.match(/(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})(?:\s*UTC\+?([0-9:]+))?/i);

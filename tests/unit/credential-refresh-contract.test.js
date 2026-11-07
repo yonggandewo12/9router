@@ -17,7 +17,7 @@ vi.mock("../../open-sse/utils/proxyFetch.js", () => ({
   ),
 }));
 
-import { refreshWithRetry } from "../../open-sse/services/tokenRefresh.js";
+import { refreshWithRetry, isUnrecoverableRefreshError } from "../../open-sse/services/tokenRefresh.js";
 import { BaseExecutor } from "../../open-sse/executors/base.js";
 import { DefaultExecutor } from "../../open-sse/executors/default.js";
 import { MiaoshouExecutor } from "../../open-sse/executors/miaoshou.js";
@@ -132,5 +132,33 @@ describe("codebuddy reactive refresh", () => {
     const out = await refreshWithRetry(() => executor.refreshCredentials(creds, null), 3, null);
     expect(out).toBeNull();
     expect(Date.now() - t0).toBeLessThan(500);
+  });
+
+  it("surfaces invalid_grant when the gateway rejects the refresh token (401)", async () => {
+    // Probed live: a dead RT answers HTTP 401 { code: 12153, "token format error" }.
+    proxyAwareFetch.mockResolvedValueOnce(new Response(JSON.stringify({ code: 12153, msg: "token format error" }), { status: 401 }));
+    const out = await new CodeBuddyExecutor().refreshCredentials({ refreshToken: "dead-cn-401" }, null);
+    expect(out).toEqual({ error: "invalid_grant" });
+    expect(isUnrecoverableRefreshError(out)).toBe(true);
+  });
+
+  it("does the same for the intl gateway on 403", async () => {
+    proxyAwareFetch.mockResolvedValueOnce(new Response("{}", { status: 403 }));
+    const out = await new CodeBuddyIntlExecutor().refreshCredentials({ refreshToken: "dead-intl-403" }, null);
+    expect(out).toEqual({ error: "invalid_grant" });
+  });
+
+  it("keeps a 5xx refresh failure transient (null, retryable)", async () => {
+    proxyAwareFetch.mockResolvedValueOnce(new Response("busy", { status: 503 }));
+    const out = await new CodeBuddyExecutor().refreshCredentials({ refreshToken: "blip-cn-503" }, null);
+    expect(out).toBeNull();
+  });
+
+  it("stops the retry loop immediately on invalid_grant instead of burning three attempts", async () => {
+    proxyAwareFetch.mockResolvedValueOnce(new Response("{}", { status: 401 }));
+    const executor = new CodeBuddyExecutor();
+    const out = await refreshWithRetry(() => executor.refreshCredentials({ refreshToken: "dead-loop-cn" }, null), 3, null);
+    expect(out).toEqual({ error: "invalid_grant" });
+    expect(proxyAwareFetch).toHaveBeenCalledTimes(1);
   });
 });
