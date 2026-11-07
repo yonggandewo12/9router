@@ -1,3 +1,33 @@
+# v0.6.28 (2026-11-07)
+
+Two lanes audited end to end — `qoder-cn` and `codebuddy-cn` — and the defects found ship together. The headline is that a Qoder device token now self-heals instead of dying quietly at ~30 days, and the free QoDuck model is finally offered; the CodeBuddy side stops wasting refresh and fetch round-trips on failures that are permanent or already known. Every claim below was re-measured through `npm run dev` (port 20127), not the packaged daemon.
+
+## Features
+
+- **Qoder device tokens auto-renew** (`open-sse/shared/qoder/refresh.js`, wired through `tokenRefresh.js` and the executor). The old center-host `/algo/api/v3/user/refresh_token` answers 403 for the device flow — it was never the right endpoint. The real path is `{openapi}/api/v1/deviceToken/refresh`: a plain JSON POST (no COSY signing, no bearer) that rotates both tokens, riding the connection proxy like every other lane. PAT (`pt-`) and job-token (`jt-`) lanes have no stored refresh material and return `false`; a dead refresh token returns `invalid_grant` so the caller prompts re-login. The executor's `needsRefresh() { return false }` override is gone.
+- **The Qoder catalog unions every scene, releasing QoDuck** (`open-sse/services/qoderModels.js`). It read only `body.chat`, but the catalog is scene-grouped (`chat` / `app` / `developer` / `assistant` / …) and the free QoDuck (`lmodel`) is published solely in `app` — so it was hidden. All scenes are now unioned with `chat` first so its metadata wins ties; `qdcn/lmodel` answered 200 with real content through the running proxy.
+
+## Fixes
+
+- **A rejected Qoder credential is a 401, not a misleading 400.** A catalog fetch that answers 401/403 (login expired, code 105) used to fall through to "model_config not yet known" as a request-scoped 400 — so chatCore never refreshed or locked it and the dashboard kept showing a dead token as "active". `QoderAuthError` now maps to 401, engaging refresh-on-401 and the account lock; an already-expired stored token is detected the same way.
+- **The connection badge reads `expiresAt` directly** (`src/shared/utils/connectionStatus.js`, both dashboard rows). `testStatus` is written at login and only updated by request outcomes, so a token that expired while idle showed "active" for weeks. An expired token now shows "expired"; existing error states keep precedence.
+- **A Qoder billing block no longer triggers a token rotation.** Code 110/112 is a healthy token out of quota, not an auth failure, but the synthesized 403 looked like one to chatCore. Both billing-response sites now carry `X-Auth-Refresh-Skip: 1`, which chatCore honours to skip the device-token rotation + retry round-trip. The 403 still locks the model.
+- **A rotation without an expiry hint no longer inherits the old `expiresAt`** (`open-sse/services/oauthCredentialManager.js`). `mergeRefreshedCredentials` left the previous token's (usually already-past) `expiresAt` in place when a fresh access token arrived with no expiry, so `shouldRefreshCredentials` fired on every request forever — a refresh storm. It now clears the stale hint and lets the reactive 401 path handle the real expiry.
+- **CodeBuddy stops retrying a dead refresh token** (`open-sse/services/tokenRefresh/providers.js`, cn + intl). A 401/403 on the refresh POST rejects the refresh token itself (probed: a dead RT answers 401 code 12153), but it returned `null` (transient) and burned three retries on a corpse. It now surfaces `invalid_grant`; 5xx stays transient.
+- **A failed CodeBuddy catalog fetch is negative-cached for 60s** (`open-sse/services/codebuddyModels.js`). Repeated client polls no longer each re-pay the fetch; `forceRefresh` still bypasses the negative cache.
+- **`default` is carried as a gateway router** even though the table does not publish it, and `codebuddy-intl` now mirrors two cn guards: the `tool_choice` object → `"required"` downgrade and 11115 (prompt too long) → 413.
+
+## Performance
+
+- **The error path does less wasted work.** A billing block saves a full device-token rotation + retry round-trip; a failed catalog saves one fetch per poll within the 60s window; a dead CodeBuddy refresh token costs one attempt instead of three sleeps.
+- **No regression on the happy path.** Warm chats through dev 20127: `qdcn/lmodel` 1.2–1.4s (baseline 1.1s), `cbcn/auto` 2.4–3.0s routing to the thinking model `glm-5.3-flash` (baseline 2.2s; the spread is reasoning time, not the fix). All changes sit on error/catalog paths, so a successful chat is untouched.
+
+## Notes
+
+- **Test suite**: 473 files / 5029 passing / 0 failing (15 expected-fail, 93 skipped, 1 todo), 24.1s — up from 471 / 4989 in v0.6.27 (+2 files, +40 cases). New lanes include `qoder-catalog-refresh.test.js` (20 cases: scene union, QoDuck release, 401 semantics, device-refresh tri-state) and `credential-merge-expiry.test.js` (4 cases), plus additions to the billing, refresh-contract, live-catalog, parse-error and tool-choice suites.
+- **Mutation-checked** (each guard reverted, targeted suite run, then restored): removing the `expiresAt` clearing fails 1 test; removing the `X-Auth-Refresh-Skip` header fails 1; reverting `invalid_grant` to `null` fails 3; disabling the negative-cache TTL fails 1. No test passes for the wrong reason.
+- **Deliberately not done**: the Qoder raw-delta passthrough still echoes the upstream `model: "auto"` — rewriting it fights the preserve-upstream-JSON design, so it is left as-is; the badge stays English (`expired` alongside `active`/`unavailable`) because there is no i18n layer to hook. `cbcn/glm-4.6` answers 11102 on a real chat though the table publishes it — the known "published ≠ usable" boundary of the verification pass, not a regression from this release.
+
 # v0.6.27 (2026-11-07)
 
 The CodeBuddy model list is now read from the account's own gateway config and proved before it is offered. This also supersedes v0.6.26's "not done, deliberately": the catalog was not the enterprise-gated `/console/enterprises/{id}/config/models` after all — it is `GET {origin}/v3/config`, which a personal bearer reads fine (without one it answers 200 with `data.models: null`, which is why it could not ride the credential-free transport path).
