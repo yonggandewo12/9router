@@ -271,6 +271,21 @@ export const PROVIDER_CAPABILITIES = {
     "openpangu-2.0-pro": { reasoning: true, contextWindow: 524288, maxOutput: 65535 },
     "openpangu-2.0-flash": { reasoning: true, contextWindow: 524288, maxOutput: 65535 },
   },
+  // DevEco Code (华为 DevEco) MaaS gateway. Without this override the generic
+  // *glm-5* / *qwen*vl* patterns advertise the wrong limits and reasoning flags:
+  // *glm-5.3* would claim ctx 1M / out 128000 and *qwen*vl* ctx 262144 + reasoning,
+  // none of which this lane serves. contextWindow/maxOutput mirror the registry
+  // (registry/deveco.js contextLength/maxOutputTokens, the gateway's own numbers).
+  // Thinking probed live 2026-11-08: GLM-5.1 and GLM-5.3 emit reasoning_content
+  // ONLY with the zai thinking:{type:"enabled"} object — a bare reasoning_effort
+  // (openai shape) is inert on both. GLM-5.3 honours reasoning_effort alongside the
+  // thinking object (thinkingEffortSupported), GLM-5.1 ignores it. Qwen3_VL Instruct
+  // is a plain vision model: no reasoning_content on any prompt, vision verified.
+  "deveco": {
+    "GLM-5.1": { reasoning: true, thinkingFormat: "zai", contextWindow: 170000, maxOutput: 32000 },
+    "GLM-5.3": { reasoning: true, thinkingFormat: "zai", thinkingEffortSupported: true, contextWindow: 170000, maxOutput: 32000 },
+    "Qwen3_VL_235B_A22B_Instruct": { reasoning: false, vision: true, contextWindow: 32768, maxOutput: 8192 },
+  },
   // 妙手 (CatPaw). Live-probed 2026-11-05 with a solid-color PNG through /turn:
   // every catalog model except MiniMax-M3 read the image back correctly, so
   // vision is declared per model rather than inherited from the name heuristics

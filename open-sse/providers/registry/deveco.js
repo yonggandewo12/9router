@@ -68,6 +68,7 @@ export default {
       name: "GLM-5.1 Free",
       contextLength: 170000,
       maxOutputTokens: 32000,
+      reasoning: true,
     },
     {
       id: "GLM-5.3",

@@ -16,6 +16,9 @@ import {
   DEVECO_TOKEN_TTL_MS,
 } from "open-sse/shared/deveco/auth.js";
 import { __internal__ } from "open-sse/executors/deveco.js";
+import { getCapabilitiesForModel } from "open-sse/providers/capabilities.js";
+import { getThinkingLevels } from "open-sse/providers/thinkingLevels.js";
+import { applyThinking } from "open-sse/translator/concerns/thinkingUnified.js";
 
 const { chatIdFor, parseAuthRejection, bareModel, sniffStreamHead, couldOverflow } = __internal__;
 
@@ -405,5 +408,72 @@ describe("DevEco credential persistence", () => {
     expect(patch.providerSpecificData).toMatchObject({ jwtToken: "JWT", authMethod: "oauth" });
     const key = crypto.createHash("sha256").update(JSON.stringify(Object.keys(patch.providerSpecificData).sort())).digest("hex");
     expect(key).toBeTruthy();
+  });
+});
+
+// The capability table is the dashboard's observable truth (/api/models →
+// getCapabilitiesForModel) AND the router's trim/thinking truth. Without a
+// PROVIDER_CAPABILITIES.deveco override the generic *glm-5* / *qwen*vl* patterns
+// win and advertise ctx 1M / 262144 + the wrong reasoning flags. These pin the
+// override to the registry's gateway numbers and the live-probed thinking shape.
+describe("DevEco capability truth (override beats the generic patterns)", () => {
+  const registry = (id) => PROVIDER_MODELS.dv.find((m) => m.id === id);
+
+  it.each([
+    ["GLM-5.1", { reasoning: true, vision: false, thinkingFormat: "zai" }],
+    ["GLM-5.3", { reasoning: true, vision: false, thinkingFormat: "zai" }],
+    ["Qwen3_VL_235B_A22B_Instruct", { reasoning: false, vision: true }],
+  ])("%s caps match the registry window/output and probed flags", (id, flags) => {
+    const caps = getCapabilitiesForModel("deveco", id);
+    const entry = registry(id);
+    expect(caps.contextWindow).toBe(entry.contextLength);
+    expect(caps.maxOutput).toBe(entry.maxOutputTokens);
+    expect(caps).toMatchObject(flags);
+  });
+
+  it("GLM-5.3 honours reasoning_effort, GLM-5.1 ignores it (z.ai 5.2+ convention)", () => {
+    expect(getCapabilitiesForModel("deveco", "GLM-5.3").thinkingEffortSupported).toBe(true);
+    expect(getCapabilitiesForModel("deveco", "GLM-5.1").thinkingEffortSupported).toBeFalsy();
+  });
+
+  it("the dv wire alias resolves the same override (no split brain)", () => {
+    expect(getCapabilitiesForModel("dv", "GLM-5.3")).toEqual(getCapabilitiesForModel("deveco", "GLM-5.3"));
+    expect(getCapabilitiesForModel("dv", "Qwen3_VL_235B_A22B_Instruct").vision).toBe(true);
+  });
+
+  it("GLM picker is the zai binary pair; the vision model offers no levels", () => {
+    expect(getThinkingLevels("deveco", "GLM-5.3")).toEqual(["none", "thinking"]);
+    expect(getThinkingLevels("deveco", "GLM-5.1")).toEqual(["none", "thinking"]);
+    expect(getThinkingLevels("deveco", "Qwen3_VL_235B_A22B_Instruct")).toBeNull();
+  });
+});
+
+describe("DevEco thinking wire shape (zai object activates reasoning)", () => {
+  it("GLM-5.3 sends thinking:enabled + reasoning_effort high (≥ high floor)", () => {
+    const body = { reasoning_effort: "high", messages: [{ role: "user", content: "hi" }] };
+    applyThinking("openai", "GLM-5.3", body, "deveco");
+    expect(body.thinking).toEqual({ type: "enabled" });
+    expect(body.reasoning_effort).toBe("high");
+  });
+
+  it("GLM-5.1 sends thinking:enabled but no reasoning_effort (gateway ignores it)", () => {
+    const body = { reasoning_effort: "high", messages: [] };
+    applyThinking("openai", "GLM-5.1", body, "deveco");
+    expect(body.thinking).toEqual({ type: "enabled" });
+    expect(body.reasoning_effort).toBeUndefined();
+  });
+
+  it("none turns thinking off via enable_thinking:false (zai cannot use thinking.disabled)", () => {
+    const body = { reasoning_effort: "none", messages: [] };
+    applyThinking("openai", "GLM-5.3", body, "deveco");
+    expect(body.enable_thinking).toBe(false);
+    expect(body.thinking).toBeUndefined();
+  });
+
+  it("Qwen3_VL Instruct strips stray thinking fields (no reasoning on this lane)", () => {
+    const body = { reasoning_effort: "high", thinking: { type: "enabled" }, messages: [] };
+    applyThinking("openai", "Qwen3_VL_235B_A22B_Instruct", body, "deveco");
+    expect(body.thinking).toBeUndefined();
+    expect(body.reasoning_effort).toBeUndefined();
   });
 });
