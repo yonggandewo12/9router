@@ -20,7 +20,8 @@ const STRIP_RULES = [
   // CodeArts snap-access: body is the OpenAI subset the CLI sends — thinking is
   // always on (delta.reasoning_content just appears) and controlled by a separate
   // /v1/model/thinking-variants concept, so a client thinking knob must not ride.
-  // Its models also cap output at 131072, and an over-large max_tokens 400s.
+  // An over-large max_tokens 400s, so clamp it to the model's own ceiling (the
+  // live catalog publishes 65536/65535; getCapabilitiesForModel is the source).
   { provider: "codearts", drop: ["thinking", "reasoning_effort", "reasoning", "include_reasoning", "thinking_budget"], clampToModelMaxOutput: true },
   { provider: "volcengine-ark", match: /glm-5/i, clampToModelMaxOutput: true },
   // VolcEngine Ark caps the Kimi family at max_tokens <= 32768, but the model's
@@ -69,7 +70,8 @@ function clampNumber(body, key, ceiling) {
 }
 
 // Remove unsupported params from body in place; returns body.
-export function stripUnsupportedParams(provider, model, body) {  if (!model || !body || typeof body !== "object") return body;
+export function stripUnsupportedParams(provider, model, body) {
+  if (!model || !body || typeof body !== "object") return body;
   for (const rule of STRIP_RULES) {
     if (rule.provider && rule.provider !== provider) continue;
     if (!matches(rule, model)) continue;
