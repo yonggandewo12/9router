@@ -8,7 +8,17 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
-const originalFetch = global.fetch;
+// proxyFetch.js routes every upstream call through the *package* undici's fetch
+// (undici 8 dispatchers are rejected by Node's built-in global fetch), and it
+// overwrites globalThis.fetch at import time — so a global.fetch stub is useless
+// here. Intercept the undici module's fetch export instead. Spread the actual
+// module so proxyFetch still gets the real Agent/ProxyAgent for its dispatchers.
+function mockUndiciFetch(fn) {
+  vi.doMock("undici", async () => {
+    const actual = await vi.importActual("undici");
+    return { ...actual, fetch: fn };
+  });
+}
 
 function mockFetchOnce(payload, { ok = true, status = 200 } = {}) {
   const fn = vi.fn().mockResolvedValue({
@@ -17,13 +27,13 @@ function mockFetchOnce(payload, { ok = true, status = 200 } = {}) {
     json: () => Promise.resolve(payload),
     text: () => Promise.resolve(JSON.stringify(payload)),
   });
-  global.fetch = fn;
+  mockUndiciFetch(fn);
   return fn;
 }
 
 describe("refreshAccessToken — config-driven profiles", () => {
-  beforeEach(() => { vi.clearAllMocks(); vi.resetModules(); global.fetch = originalFetch; });
-  afterEach(() => { global.fetch = originalFetch; });
+  beforeEach(() => { vi.clearAllMocks(); vi.resetModules(); });
+  afterEach(() => { vi.doUnmock("undici"); });
 
   it("iflow: Basic Auth header from clientId:clientSecret, form body keeps client_secret", async () => {
     const fm = mockFetchOnce({ access_token: "if-acc", refresh_token: "if-rot", expires_in: 3600 });
@@ -103,8 +113,8 @@ describe("refreshAccessToken — config-driven profiles", () => {
   });
 });
 describe("Cline refresh", () => {
-  beforeEach(() => { vi.clearAllMocks(); vi.resetModules(); global.fetch = originalFetch; });
-  afterEach(() => { global.fetch = originalFetch; });
+  beforeEach(() => { vi.clearAllMocks(); vi.resetModules(); });
+  afterEach(() => { vi.doUnmock("undici"); });
 
   it("uses the extension JSON refresh contract", async () => {
     const expiresAt = new Date(Date.now() + 3600 * 1000).toISOString();

@@ -9,17 +9,14 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
-const originalFetch = global.fetch;
-
 describe("Codex Refresh Token", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.resetModules();
-    global.fetch = originalFetch;
   });
 
   afterEach(() => {
-    global.fetch = originalFetch;
+    vi.doUnmock("undici");
   });
 
   function mockFetchWithJson(payload) {
@@ -27,7 +24,13 @@ describe("Codex Refresh Token", () => {
       ok: true,
       json: () => Promise.resolve(payload),
     });
-    global.fetch = fetchMock;
+    // proxyFetch.js sends upstream traffic through the package undici's fetch and
+    // replaces globalThis.fetch on import, so stubbing global.fetch is too late.
+    // Replace only undici's fetch export; Agent/ProxyAgent must stay real.
+    vi.doMock("undici", async () => {
+      const actual = await vi.importActual("undici");
+      return { ...actual, fetch: fetchMock };
+    });
     return fetchMock;
   }
 

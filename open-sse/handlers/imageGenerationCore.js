@@ -105,7 +105,7 @@ export async function handleImageGenerationCore({
   const wireModel = getModelUpstreamId(PROVIDER_ID_TO_ALIAS[provider] || provider, model) || model;
 
   try {
-    url = adapter.buildUrl(wireModel, credentials);
+    url = adapter.buildUrl(wireModel, credentials, body);
     requestBody = await adapter.buildBody(wireModel, body);
     headers = adapter.buildHeaders(credentials, requestBody, wireModel, body);
   } catch (error) {
@@ -149,7 +149,7 @@ export async function handleImageGenerationCore({
       try {
         const retryBody = await adapter.buildBody(wireModel, body);
         const retryHeaders = adapter.buildHeaders(credentials, retryBody, wireModel, body);
-        const retryUrl = adapter.buildUrl(wireModel, credentials);
+        const retryUrl = adapter.buildUrl(wireModel, credentials, body);
         const retryResponse = await fetchWithConnectTimeout(retryUrl, {
           method: "POST",
           headers: retryHeaders,

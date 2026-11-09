@@ -125,6 +125,7 @@ export class BaseExecutor {
     let lastError = null;
     let lastStatus = 0;
     const retryAttemptsByUrl = {};
+    const forceFreshSocketByUrl = {};
 
     // Merge default retry config with provider-specific config
     const retryConfig = { ...DEFAULT_RETRY_CONFIG, ...this.config.retry };
@@ -164,6 +165,9 @@ export class BaseExecutor {
         const bodyStr = JSON.stringify(transformedBody);
         const fetchT0 = Date.now();
         dbg("FETCH", `${this.provider.toUpperCase()} → ${url} | body=${bodyStr.length}B | connectTimeout=${timeoutMs}ms`);
+        const effectiveProxyOptions = forceFreshSocketByUrl[urlIndex]
+          ? { ...(proxyOptions || {}), forceFreshSocket: true }
+          : proxyOptions;
         const response = await proxyAwareFetch(url, {
           method: "POST",
           headers,
@@ -172,7 +176,7 @@ export class BaseExecutor {
           // Protocol adapters that need their own transport (opencode's TLS
           // fingerprint) override the direct path; proxies still take priority.
           ...(directFetch ? { directFetch } : {}),
-        }, proxyOptions);
+        }, effectiveProxyOptions);
         // Known gap: the bound ends at headers. A streaming upstream that answers
         // 200 with SSE headers and then sends nothing holds this request, its
         // socket and the account's concurrency slot until the client gives up
@@ -187,7 +191,13 @@ export class BaseExecutor {
 
         // Cancel only once the retry decision is made: computeRetryDelay above may
         // still need to read the response (Retry-After, quota body).
-        if (await tryRetry(urlIndex, response.status, `status ${response.status}`, response)) { discardResponse(response); urlIndex--; continue; }
+        if (await tryRetry(urlIndex, response.status, `status ${response.status}`, response)) {
+          // A 502 from an edge is typically a poisoned keep-alive socket — retry fresh.
+          if (response.status === HTTP_STATUS.BAD_GATEWAY) forceFreshSocketByUrl[urlIndex] = true;
+          discardResponse(response);
+          urlIndex--;
+          continue;
+        }
 
         if (this.shouldRetry(response.status, urlIndex)) {
           log?.debug?.("RETRY", `${response.status} on ${url}, trying fallback ${urlIndex + 1}`);
@@ -207,8 +217,13 @@ export class BaseExecutor {
         // Connect timeout is internal — convert to retryable network error, don't propagate AbortError
         if (error.name === "AbortError" && !isConnectTimeout) throw error;
 
-        // Map network/fetch exceptions to 502 retry config
-        if (await tryRetry(urlIndex, HTTP_STATUS.BAD_GATEWAY, `network "${error.message}"`)) { urlIndex--; continue; }
+        // Map network/fetch exceptions to 502 retry config; force a fresh socket on retry
+        // so a silently-dropped keep-alive socket is never reused from the pool.
+        if (await tryRetry(urlIndex, HTTP_STATUS.BAD_GATEWAY, `network "${error.message}"`)) {
+          forceFreshSocketByUrl[urlIndex] = true;
+          urlIndex--;
+          continue;
+        }
 
         if (urlIndex + 1 < fallbackCount) {
           log?.debug?.("RETRY", `Error on ${url}, trying fallback ${urlIndex + 1}`);

@@ -110,10 +110,22 @@ export function resolvePackageEntry(rootDir, pkg) {
   return pathToFileURL(entry).href;
 }
 
+// Importing a CJS entry via file URL bypasses the exports map, and
+// cjs-module-lexer cannot detect named exports through chained re-exports
+// (`module.exports = require('./coreBundle').inprocess.playwright`), so
+// consumers destructuring `{ chromium }` get undefined. Merge `default`'s
+// own properties as a fallback.
+function unwrapCjsNamespace(mod) {
+  if (mod?.default && typeof mod.default === "object") {
+    return { ...mod.default, ...mod };
+  }
+  return mod;
+}
+
 async function load(pkg) {
   // 1) Resolvable from the app install (dev machine / traced standalone).
   try {
-    return await import(/* webpackIgnore: true */ pkg);
+    return await import(/* webpackIgnore: true */ /* @vite-ignore */ pkg);
   } catch (error) {
     if (!isModuleMissing(error)) throw error;
   }
@@ -125,7 +137,7 @@ async function load(pkg) {
       // webpackIgnore: without it the bundle replaces this with a chunk-map
       // lookup that always throws "Cannot find module '<file url>'" — the
       // runtime dir lives outside the webpack output by design.
-      return await import(/* webpackIgnore: true */ existing);
+      return unwrapCjsNamespace(await import(/* webpackIgnore: true */ existing));
     } catch (error) {
       if (!isModuleMissing(error)) throw error;
     }
@@ -159,7 +171,18 @@ async function load(pkg) {
       `check that the package ships a package.json with main/exports`
     );
   }
-  return import(/* webpackIgnore: true */ installed);
+  try {
+    return unwrapCjsNamespace(await import(/* webpackIgnore: true */ installed));
+  } catch (error) {
+    // The entry resolved but a file inside the package is missing — the other half
+    // of npm's partial-extract symptom. Wipe just this package and retry once.
+    if (!isModuleMissing(error)) throw error;
+    fs.rmSync(path.join(dir, "node_modules", pkg), { recursive: true, force: true });
+    await installIntoRuntime(pkg, version);
+    const retried = resolvePackageEntry(dir, pkg);
+    if (!retried) throw error;
+    return unwrapCjsNamespace(await import(/* webpackIgnore: true */ retried));
+  }
 }
 
 export function loadRuntimeDep(pkg) {

@@ -29,14 +29,22 @@ async function loadExecutor(fetchMock, useProxy = true) {
     vi.stubEnv(key, "");
   }
   if (useProxy) vi.stubEnv("HTTPS_PROXY", "http://proxy.test:3128");
-  // Exercise the real proxyAwareFetch: it captures fetch when imported.
-  vi.stubGlobal("fetch", fetchMock);
+  // Exercise the real proxyAwareFetch, but intercept where it actually leaves the
+  // process: proxyFetch.js calls the *package* undici's fetch (Node's built-in
+  // global fetch rejects undici 8 dispatchers) and overwrites globalThis.fetch at
+  // import time, so stubbing global.fetch would be replaced by the patch. Only
+  // undici's fetch export is mocked — Agent/ProxyAgent stay real so the test still
+  // proves which dispatcher the request was routed through.
+  vi.doMock("undici", async () => {
+    const actual = await vi.importActual("undici");
+    return { ...actual, fetch: fetchMock };
+  });
   const { QoderExecutor } = await import("../../open-sse/executors/qoder.js");
   return new QoderExecutor();
 }
 
 afterEach(() => {
-  vi.unstubAllGlobals();
+  vi.doUnmock("undici");
   vi.unstubAllEnvs();
 });
 

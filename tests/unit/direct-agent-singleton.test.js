@@ -6,7 +6,10 @@
 // the gap between two turns of an agent session.
 //
 // undici is mocked here to count constructions and read back the options; real
-// socket behaviour is pinned by upstream-keepalive.test.js.
+// socket behaviour is pinned by upstream-keepalive.test.js. The mock must export
+// `fetch` too: proxyFetch routes every call through the PACKAGE undici's fetch
+// (Node's built-in one rejects a package-built dispatcher with UND_ERR_INVALID_ARG),
+// so stubbing globalThis.fetch no longer intercepts anything.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 const PROXY_ENV_VARS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy"];
@@ -21,15 +24,14 @@ vi.mock("undici", () => {
     constructor(options) { built.push({ kind: "ProxyAgent", options }); }
     close() {}
   }
-  return { Agent, ProxyAgent };
+  return { Agent, ProxyAgent, fetch: vi.fn(async () => new Response("ok")) };
 });
 
 async function loadProxyFetch() {
   built = [];
   vi.resetModules();
-  // proxyFetch captures globalThis.fetch at import time, so the stub must exist first.
-  vi.stubGlobal("fetch", vi.fn(async () => new Response("ok")));
-  const { proxyAwareFetch } = await import("../../open-sse/utils/proxyFetch.js");
+  const { proxyAwareFetch, resetDirectDispatchersForTests } = await import("../../open-sse/utils/proxyFetch.js");
+  resetDirectDispatchersForTests();
   return proxyAwareFetch;
 }
 

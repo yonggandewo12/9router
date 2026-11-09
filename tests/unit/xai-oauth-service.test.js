@@ -1,10 +1,25 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 describe("xai/oauth service", () => {
+  let fetchMock;
+
   beforeEach(() => {
     vi.resetModules();
     vi.restoreAllMocks();
-    vi.stubGlobal("fetch", vi.fn());
+    fetchMock = vi.fn();
+    // The service calls bare fetch(), which is proxyFetch.js's patchedFetch, and
+    // that forwards to the *package* undici's fetch (Node's built-in fetch rejects
+    // undici 8 dispatchers). Importing the service also overwrites globalThis.fetch,
+    // so a global stub is not the interception point — mock undici's fetch export
+    // and keep the real Agent/ProxyAgent for dispatcher construction.
+    vi.doMock("undici", async () => {
+      const actual = await vi.importActual("undici");
+      return { ...actual, fetch: fetchMock };
+    });
+  });
+
+  afterEach(() => {
+    vi.doUnmock("undici");
   });
 
   it("validates discovered endpoints are https x.ai URLs", async () => {
@@ -22,8 +37,6 @@ describe("xai/oauth service", () => {
   });
 
   it("discovers endpoints without custom user-agent headers", async () => {
-    // Importing the service patches globalThis.fetch; keep a handle on the stub.
-    const fetchMock = fetch;
     fetchMock.mockResolvedValueOnce({
       ok: true,
       json: async () => ({
@@ -66,7 +79,7 @@ describe("xai/oauth service", () => {
   });
 
   it("generates dashboard auth data with CLIProxyAPI PKCE size and discovered endpoints", async () => {
-    fetch.mockResolvedValueOnce({
+    fetchMock.mockResolvedValueOnce({
       ok: true,
       json: async () => ({
         authorization_endpoint: "https://auth.x.ai/oauth2/authorize-from-discovery",
@@ -87,7 +100,6 @@ describe("xai/oauth service", () => {
   });
 
   it("exchanges dashboard codes against the discovered xAI token endpoint", async () => {
-    const fetchMock = fetch;
     fetchMock
       .mockResolvedValueOnce({
         ok: true,
