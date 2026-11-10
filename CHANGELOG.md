@@ -1,3 +1,18 @@
+# v0.6.34 (2026-11-10)
+
+The Command Code lane now matches the official CLI's model picker — including the free models it advertises — and a full-chain review of the lane shipped one streaming fix proven live.
+
+## Features
+
+- **Command Code lists the official CLI's live catalog, free models included** (`open-sse/services/commandcodeModels.js`, `providers/registry/commandcode.js`, `providers/capabilities.js`, `src/app/api/providers/[id]/models/route.js`, `src/app/api/v1/models/route.js`, `src/shared/utils/selectableModels.js`, `src/shared/components/ModelSelectModal.js`). The CLI's public catalog (`GET /provider/v1/models?view=client`, no auth, 15-min TTL, negative cache, in-flight dedupe) now feeds all four consumers live-first with the static 97-model snapshot as fallback. The two visible free models the CLI shows — **Glyph Cluster (免费)** `stealth/glyph-cluster:free` (text-only, 256k/256k) and **Crouton Alpha (免费)** `stealth/crouton-alpha` (vision, 1M/921k) — carry the FREE badge end to end; hidden models are excluded, and the free badge only follows the catalog's own `display.badge:"free"`.
+- **Live proof the free lane actually streams** — `stealth/glyph-cluster:free` completed a real turn through the repo's own executor: HTTP 200, OpenAI SSE chunks, cache-detailed usage, `data: [DONE]`. Live wire capture also confirmed `reasoning-delta` uses the `text` field (the translator was already correct) and that `crouton-alpha` is retired upstream (404 pointing at `openrouter.ai/meta/muse-ember`) yet still catalog-published — it is listed faithfully like the official CLI does, and selecting it surfaces the upstream retirement notice as a clean 404 (combo fallback moves on).
+
+## Fixes
+
+- **CommandCodeExecutor declares `responseFormat:"openai"`** (`open-sse/executors/commandcode.js`): the executor decodes upstream NDJSON into OpenAI chat.completion SSE but never declared it, so chatCore ran a redundant `commandcode→openai` translate hop whose `[DONE]` handling swallowed the stream terminator for OpenAI clients (strict clients could hang). Declaring it routes OpenAI clients through the standard passthrough (terminator forwarded, usage injected, tool-call ids fixed) and other clients through direct `openai→source` translation — matching cursor / miaoshou / opencode-cli — and removes one translation hop per stream.
+
+27 new unit tests cover catalog normalization, the resolver (cache/TTL/overlay by base model), consumer wiring and the responseFormat routing; full suite 5260 passed, 0 failed.
+
 # v0.6.33 (2026-11-09)
 
 This release merges upstream `decolua/9router` v0.5.116 — 29 commits — into the fork line, keeping the fork's package identity (`9router-app` / `9router-proxy`), the 0.6.x version line and this branch's CI pipelines. Ten conflicts were resolved by hand. The post-merge review then caught two defects that ship fixed here: a **blocking `ReferenceError` in the new launcher PID-file path** (introduced by the merge itself) and a **pre-existing Qoder PAT test 500** surfaced by the same undefined-identifier sweep. Everything below was re-measured through `npm run dev` (20127) or an isolated CLI build, not the packaged 20128 daemon, which stayed up throughout.
