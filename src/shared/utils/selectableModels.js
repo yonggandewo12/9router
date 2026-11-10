@@ -35,7 +35,9 @@ export const NO_AUTH_PROVIDER_IDS = Object.keys(FREE_PROVIDERS).filter((id) => F
 // Static registry stays as fallback when live fetch fails or is empty.
 // zed added in #4244: its backend customResolver already returns live models
 // but the frontend omitted it, hiding Zed entirely from the Combo picker.
-export const LIVE_CATALOG_PROVIDERS = ["cursor", "cline", "clinepass", "zed"];
+// commandcode's catalog is public rather than per-account, but rides the same
+// fetch path so its picker list (including the free ids) stays current.
+export const LIVE_CATALOG_PROVIDERS = ["cursor", "cline", "clinepass", "zed", "commandcode"];
 
 export const ALL_PROVIDERS = { ...OAUTH_PROVIDERS, ...FREE_PROVIDERS, ...FREE_TIER_PROVIDERS, ...APIKEY_PROVIDERS };
 
@@ -174,13 +176,18 @@ export function buildModelGroups({
           isCustom: true,
         }));
 
+      // Mirror ModelSelectModal: a passthrough provider with a live catalog (commandcode)
+      // uses it for the picker list; others fall back to the static registry.
+      const liveForProvider = asArray(live[providerId]);
+      const catalogModels = liveForProvider.length > 0 ? liveForProvider : getModelsByProviderId(providerId);
+
       // For typed kinds, only include hardcoded typed models (aliases are typically LLM-only and lack type info)
       let combined = aliasModels;
       if (kindFilter && TYPED_KINDS.has(kindFilter)) {
         const registeredTyped = customRegisteredModels.filter((m) => getModelKind(m) === kindFilter);
         combined = [
           ...registeredTyped,
-          ...getModelsByProviderId(providerId)
+          ...catalogModels
           .filter((m) => getModelKind(m) === kindFilter)
           .map((m) => ({ id: m.id, name: m.name, value: `${alias}/${m.id}`, kind: getModelKind(m) }))
           .filter((m) => !registeredTyped.some((registered) => registered.value === m.value)),
@@ -194,7 +201,7 @@ export function buildModelGroups({
         // LLM/null kind: merge the alias's hardcoded models with user-added ones
         const registeredLlms = customRegisteredModels.filter((m) => !getModelKind(m) || getModelKind(m) === "llm");
         const seen = new Set([...aliasModels, ...registeredLlms].map((m) => m.value));
-        const hardcoded = getModelsByProviderId(providerId)
+        const hardcoded = catalogModels
           .filter((m) => !getModelKind(m) || getModelKind(m) === "llm")
           .map((m) => ({ id: m.id, name: m.name, value: `${alias}/${m.id}`, kind: getModelKind(m) }))
           .filter((m) => !seen.has(m.value));

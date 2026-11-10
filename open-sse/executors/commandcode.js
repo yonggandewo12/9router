@@ -1,5 +1,6 @@
 import { BaseExecutor } from "./base.js";
 import { PROVIDERS } from "../config/providers.js";
+import { FORMATS } from "../translator/formats.js";
 import { buildCommandCodeHeaders } from "../shared/commandCodeHeaders.js";
 import { commandCodeToOpenAIResponse } from "../translator/response/commandcode-to-openai.js";
 import { SSE_DONE } from "../utils/sseConstants.js";
@@ -45,6 +46,8 @@ export class CommandCodeExecutor extends BaseExecutor {
       const result = await super.execute(opts);
       if (!result?.response?.ok || !result.response.body) return result;
 
+      // Body is already OpenAI SSE: declare it so chatCore skips a redundant commandcode→openai hop that drops [DONE].
+      result.responseFormat = FORMATS.OPENAI;
       const wrappedResponse = await inspectAndWrapCommandCodeResponse(result.response, opts.model);
       if (!wrappedResponse.ok && attempt < maxRetries) {
         const isRetryableStatus = wrappedResponse.status === 502 || wrappedResponse.status === 503 || wrappedResponse.status === 504;

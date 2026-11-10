@@ -13,6 +13,7 @@ import { getDisabledModels } from "@/lib/disabledModelsDb";
 import { getKeyAccessContext, filterModelsListForKey } from "@/sse/services/keyAccess.js";
 import { resolveKiroModels } from "open-sse/services/kiroModels.js";
 import { resolveCodeBuddyModels } from "open-sse/services/codebuddyModels.js";
+import { resolveCommandCodeModels } from "open-sse/services/commandcodeModels.js";
 import { resolveKimchiModels } from "open-sse/services/kimchiModels.js";
 import { resolveQoderModels, routableQoderModels } from "open-sse/services/qoderModels.js";
 import { resolveCopilotModels } from "open-sse/services/copilotModels.js";
@@ -82,6 +83,13 @@ const LIVE_MODEL_RESOLVERS = {
   // vision/tools/reasoning) that the name heuristics get wrong for 31 of 33 ids.
   "codebuddy-cn": (conn) => resolveCodeBuddyLiveModels("codebuddy-cn", conn),
   "codebuddy-intl": (conn) => resolveCodeBuddyLiveModels("codebuddy-intl", conn),
+  // Command Code's picker catalog is public and account-independent, so the resolver
+  // needs no credential. It carries the free badge and per-model modalities/limits the
+  // static registry lacked (the two free ids had drifted out of the hand-maintained list).
+  commandcode: async () => {
+    const result = await resolveCommandCodeModels();
+    return result.models.length ? { models: result.models } : null;
+  },
   kiro: async (conn) => {
     const result = await resolveKiroModels({
       accessToken: conn.accessToken,

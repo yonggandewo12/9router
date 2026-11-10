@@ -412,6 +412,12 @@ export const PROVIDER_CAPABILITIES = {
     // for this id (claude-haiku-4-5-20251001 is 200000, so the 1M is per-model, not
     // gateway-wide) — and the synced catalog carries maxOutput 128000.
     "claude-haiku-5-5": { vision: true, reasoning: true, search: true, thinkingFormat: "commandcode", thinkingEffortSupported: true, contextWindow: 1000000, maxOutput: 128000 },
+    // The two visible free ids (display.badge "free" in the ?view=client catalog). Pinned
+    // for the offline fallback; the live resolver publishes the same numbers when online.
+    // Limits/modalities/efforts taken verbatim from the catalog (2026-11-10): glyph-cluster
+    // is text-only 256k/256k, crouton-alpha takes images and is 1M/943718.
+    "glyph-cluster:free": { vision: false, reasoning: true, thinkingFormat: "commandcode", thinkingEffortSupported: true, contextWindow: 256000, maxOutput: 256000 },
+    "crouton-alpha": { vision: true, reasoning: true, thinkingFormat: "commandcode", thinkingEffortSupported: true, contextWindow: 1048576, maxOutput: 943718 },
   },
   "codex": {
     "gpt-6-astra":               { vision: true, reasoning: true, search: true, thinkingFormat: "openai", contextWindow: 272000, maxOutput: 128000 },

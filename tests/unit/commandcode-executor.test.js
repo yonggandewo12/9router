@@ -4,6 +4,9 @@ import {
   inspectAndWrapCommandCodeResponse,
   CommandCodeExecutor,
 } from "../../open-sse/executors/commandcode.js";
+import { BaseExecutor } from "../../open-sse/executors/base.js";
+import { FORMATS } from "../../open-sse/translator/formats.js";
+import { createPassthroughStreamWithLogger } from "../../open-sse/utils/stream.js";
 import { handleComboChat } from "../../open-sse/services/combo.js";
 
 function createNdjsonStream(lines) {
@@ -252,5 +255,47 @@ describe("CommandCode in Combo Fallback", () => {
     expect(handleSingleModel).toHaveBeenCalledTimes(2);
     expect(handleSingleModel).toHaveBeenNthCalledWith(1, expect.anything(), "commandcode/poolside/laguna-s-2.1-free");
     expect(handleSingleModel).toHaveBeenNthCalledWith(2, expect.anything(), "openai/gpt-4o-mini");
+  });
+});
+
+describe("CommandCodeExecutor responseFormat routing", () => {
+  // The executor decodes upstream NDJSON into OpenAI chat.completion SSE, so it
+  // must declare responseFormat:"openai" (like cursor/miaoshou/opencode-cli).
+  // Without it chatCore ran a redundant commandcode→openai translate hop whose
+  // [DONE] handling swallowed the terminator for OpenAI clients.
+  it("declares openai responseFormat and forwards [DONE] through the passthrough path", async () => {
+    const ndjson = createNdjsonStream([
+      JSON.stringify({ type: "start" }) + "\n",
+      JSON.stringify({ type: "text-delta", text: "Hello" }) + "\n",
+      JSON.stringify({ type: "finish-step", finishReason: "stop", usage: { inputTokens: 5, outputTokens: 2 } }) + "\n",
+      JSON.stringify({ type: "finish", finishReason: "stop", totalUsage: { inputTokens: 5, outputTokens: 2 } }) + "\n",
+    ]);
+    const upstream = new Response(ndjson, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+    const spy = vi.spyOn(BaseExecutor.prototype, "execute").mockResolvedValue({
+      response: upstream, url: "https://api.commandcode.ai/alpha/generate", headers: {}, transformedBody: {},
+    });
+
+    try {
+      const executor = new CommandCodeExecutor();
+      const result = await executor.execute({ model: "stealth/glyph-cluster:free", body: {}, stream: true, credentials: { apiKey: "user_test" } });
+      expect(result.responseFormat).toBe(FORMATS.OPENAI);
+      expect(result.response.status).toBe(200);
+
+      // chatCore routes an OpenAI client behind responseFormat:"openai" through
+      // passthrough; the terminator must survive to the client.
+      const transform = createPassthroughStreamWithLogger("commandcode");
+      const reader = result.response.body.pipeThrough(transform).getReader();
+      const decoder = new TextDecoder();
+      let out = "";
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        out += decoder.decode(value, { stream: true });
+      }
+      expect(out).toContain("Hello");
+      expect(out).toContain("data: [DONE]");
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

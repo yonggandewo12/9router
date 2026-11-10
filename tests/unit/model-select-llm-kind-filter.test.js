@@ -121,7 +121,14 @@ describe("ModelSelectModal wires the catalog rule into both grouping branches", 
   });
 
   it("gates the passthrough branch's hardcoded catalog", () => {
-    expect(src).toMatch(/const hardcoded = listsKind\(providerId\)\s*\n?\s*\? getModelsByProviderId\(providerId\)/);
+    expect(src).toMatch(/const hardcoded = listsKind\(providerId\)\s*\n?\s*\? catalogModels/);
+  });
+
+  it("sources the passthrough catalog live-first, registry as fallback", () => {
+    // commandcode rides LIVE_CATALOG_PROVIDERS, so the fetched list must actually be
+    // consumed or the round-trip is dead. Other passthrough providers have no live
+    // catalog and fall back to the static registry.
+    expect(src).toMatch(/const catalogModels = liveModels\.length > 0 \? liveModels : getModelsByProviderId\(providerId\)/);
   });
 
   it("gates the regular branch's hardcoded/live catalog", () => {

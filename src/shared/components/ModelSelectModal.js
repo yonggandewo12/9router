@@ -335,13 +335,19 @@ export default function ModelSelectModal({
             isCustom: true,
           }));
 
+        // A passthrough provider in LIVE_CATALOG_PROVIDERS (commandcode) resolves its picker
+        // list live; without this the fetch above would be paid for and then ignored. Other
+        // passthrough providers have no live catalog, so this falls back to the registry.
+        const liveModels = liveModelsByProvider[providerId] || [];
+        const catalogModels = liveModels.length > 0 ? liveModels : getModelsByProviderId(providerId);
+
         // For typed kinds, only include hardcoded typed models (aliases are typically LLM-only and lack type info)
         let combined = aliasModels;
         if (kindFilter && TYPED_KINDS.has(kindFilter)) {
           const registeredTyped = customRegisteredModels.filter((m) => getModelKind(m) === kindFilter);
           combined = [
             ...registeredTyped,
-            ...getModelsByProviderId(providerId)
+            ...catalogModels
             .filter((m) => getModelKind(m) === kindFilter)
             .map((m) => ({ id: m.id, name: m.name, value: `${alias}/${m.id}`, kind: getModelKind(m) }))
             .filter((m) => !registeredTyped.some((registered) => registered.value === m.value)),
@@ -356,7 +362,7 @@ export default function ModelSelectModal({
           const registeredLlms = customRegisteredModels.filter((m) => !getModelKind(m) || getModelKind(m) === "llm");
           const seen = new Set([...aliasModels, ...registeredLlms].map((m) => m.value));
           const hardcoded = listsKind(providerId)
-            ? getModelsByProviderId(providerId)
+            ? catalogModels
               .filter((m) => !getModelKind(m) || getModelKind(m) === "llm")
               .map((m) => ({ id: m.id, name: m.name, value: `${alias}/${m.id}`, kind: getModelKind(m) }))
               .filter((m) => !seen.has(m.value))

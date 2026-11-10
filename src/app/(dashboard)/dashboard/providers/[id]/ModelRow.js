@@ -36,6 +36,7 @@ export default function ModelRow({ model, fullModel, aliases, copied, onCopy, te
           <code className="w-fit max-w-full break-all rounded bg-sidebar px-1.5 py-0.5 font-mono text-xs text-text-muted sm:max-w-[360px] sm:truncate">{displayModel}</code>
           <span className="flex min-w-0 items-center text-[9px] gap-1 pl-1">
             {model.name && <span className="break-all sm:truncate text-[9px] italic text-text-muted/70">{model.name}</span>}
+            {isFree && <span className="shrink-0 rounded bg-green-500/10 px-1 py-0.5 text-[8px] font-bold text-green-500">FREE</span>}
             <CapacityBadges caps={caps} colorOverride="text-text-muted/70" size={12} />
           </span>
           {aliases?.length > 0 && (

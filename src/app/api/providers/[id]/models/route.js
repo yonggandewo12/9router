@@ -16,6 +16,7 @@ import { resolveTraeEnterpriseModels } from "open-sse/shared/trae/enterprise.js"
 import { resolveCodeartsModels } from "open-sse/shared/codearts/api.js";
 import { resolveClineModels, resolveClinepassModels } from "open-sse/services/clinepassModels.js";
 import { resolveCodeBuddyModels } from "open-sse/services/codebuddyModels.js";
+import { resolveCommandCodeModels } from "open-sse/services/commandcodeModels.js";
 import { refreshCodebuddyToken, refreshCodebuddyIntlToken } from "open-sse/services/tokenRefresh/providers.js";
 import { NOUS_MODELS_URL, normalizeNousModels } from "open-sse/services/nous.js";
 import codexProvider from "open-sse/providers/registry/codex.js";
@@ -537,6 +538,19 @@ export const PROVIDER_MODELS_CONFIG = {
   },
   "codebuddy-intl": {
     customResolver: buildCodeBuddyResolver("codebuddy-intl", refreshCodebuddyIntlToken)
+  },
+  // Command Code publishes a public picker catalog (?view=client) carrying the free badge
+  // and per-model modalities/limits. No credential needed; the dashboard fetch is an explicit
+  // refresh, so bypass the cache. Static registry is the offline fallback.
+  commandcode: {
+    customResolver: async () => {
+      const result = await resolveCommandCodeModels({ forceRefresh: true });
+      if (result.models.length) return { models: result.models };
+      return {
+        models: getStaticProviderModels("commandcode"),
+        warning: result.warning || "Command Code returned no live models; falling back to static catalog.",
+      };
+    },
   },
   // Trae Enterprise publishes a per-tenant catalog (admins add their own
   // models), so the static registry list is only a fallback.
