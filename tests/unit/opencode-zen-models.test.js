@@ -12,7 +12,7 @@ const CHAT_ONLY = ["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v4-flash-vi
   "mimo-v2.6-flash-free", "nemotron-3-ultra-free", "nemotron-3.5-lightning-free",
   "nemotron-3.5-super-vl-free", "glm-5.3-flash-free", "beam-free"];
 // Models that also expose the Anthropic /messages endpoint
-const CLAUDE_CAPABLE = ["claude-fable-5", "claude-fable-5-1", "claude-opus-5",
+const CLAUDE_CAPABLE = ["claude-fable-5", "claude-opus-5",
   "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-opus-4-5",
   "claude-sonnet-5", "claude-sonnet-4-6", "claude-sonnet-4-5",
   "claude-haiku-4-5", "qwen3.6-plus", "qwen3.5-plus"];

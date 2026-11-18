@@ -156,6 +156,9 @@ import p151 from "./nace.js";
 import p152 from "./miaoshou.js";
 // Fork-only lane (not upstream): JoyAgent (京东) web chat.
 import p153 from "./joyagent.js";
+// Upstream's two new providers in this range, next free slots on our side.
+import p154 from "./sensenova-intl.js";
+import p155 from "./synthetic.js";
 export default [
   p0,
   p1,
@@ -306,4 +309,6 @@ export default [
   p151,
   p152,
   p153,
+  p154,
+  p155,
 ];

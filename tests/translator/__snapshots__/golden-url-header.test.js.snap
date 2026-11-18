@@ -1516,7 +1516,45 @@ exports[`GOLDEN buildHeaders (default executor providers) > sensenova → header
 }
 `;
 
+exports[`GOLDEN buildHeaders (default executor providers) > sensenova-intl → headers (apiKey / oauth) 1`] = `
+{
+  "apiKey": {
+    "Accept": "text/event-stream",
+    "Authorization": "Bearer <TOK>",
+    "Content-Type": "application/json",
+  },
+  "nonStream": {
+    "Authorization": "Bearer <TOK>",
+    "Content-Type": "application/json",
+  },
+  "oauth": {
+    "Accept": "text/event-stream",
+    "Authorization": "Bearer <TOK>",
+    "Content-Type": "application/json",
+  },
+}
+`;
+
 exports[`GOLDEN buildHeaders (default executor providers) > siliconflow → headers (apiKey / oauth) 1`] = `
+{
+  "apiKey": {
+    "Accept": "text/event-stream",
+    "Authorization": "Bearer <TOK>",
+    "Content-Type": "application/json",
+  },
+  "nonStream": {
+    "Authorization": "Bearer <TOK>",
+    "Content-Type": "application/json",
+  },
+  "oauth": {
+    "Accept": "text/event-stream",
+    "Authorization": "Bearer <TOK>",
+    "Content-Type": "application/json",
+  },
+}
+`;
+
+exports[`GOLDEN buildHeaders (default executor providers) > synthetic → headers (apiKey / oauth) 1`] = `
 {
   "apiKey": {
     "Accept": "text/event-stream",
@@ -2256,10 +2294,24 @@ exports[`GOLDEN buildUrl (default executor providers) > sensenova → url (strea
 }
 `;
 
+exports[`GOLDEN buildUrl (default executor providers) > sensenova-intl → url (stream + non-stream) 1`] = `
+{
+  "nonStream": "https://token.sensenova.ai/v1/chat/completions",
+  "stream": "https://token.sensenova.ai/v1/chat/completions",
+}
+`;
+
 exports[`GOLDEN buildUrl (default executor providers) > siliconflow → url (stream + non-stream) 1`] = `
 {
   "nonStream": "https://api.siliconflow.com/v1/chat/completions",
   "stream": "https://api.siliconflow.com/v1/chat/completions",
+}
+`;
+
+exports[`GOLDEN buildUrl (default executor providers) > synthetic → url (stream + non-stream) 1`] = `
+{
+  "nonStream": "https://api.synthetic.new/openai/v1/chat/completions",
+  "stream": "https://api.synthetic.new/openai/v1/chat/completions",
 }
 `;
 

@@ -20,8 +20,19 @@ export default {
   transport: {
     baseUrl: "https://integrate.api.nvidia.com/v1/chat/completions",
     validateUrl: "https://integrate.api.nvidia.com/v1/models",
+    timeoutMs: 90000,
+    quirks: {
+      dropClientMetadata: true,
+    },
   },
   models: [
+    { id: "nemotron-3.5-lightning-30b-a3b", upstreamModelId: "nvidia/nemotron-3.5-lightning-30b-a3b", name: "Nemotron 3.5 Lightning" },
+    { id: "nemotron-3.5-bolt-e4b", upstreamModelId: "nvidia/nemotron-3.5-bolt-e4b", name: "Nemotron 3.5 Bolt" },
+    { id: "nemotron-3-nano-omni-30b-a3b-reasoning", upstreamModelId: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning", name: "Nemotron 3 Nano Omni" },
+    { id: "poolside/laguna-xs-2.1", name: "Laguna XS 2.1" },
+    { id: "meta/llama-guard-4-12b", name: "Llama Guard 4 12B" },
+    { id: "riva-translate-4b-instruct-v2", upstreamModelId: "nvidia/riva-translate-4b-instruct-v2", name: "Riva Translate 4B v2" },
+    { id: "meta/llama-3.3-70b-instruct", name: "Llama 3.3 70B Instruct" },
     { id: "minimaxai/minimax-m2.7", name: "MiniMax M2.7" },
     { id: "minimaxai/minimax-m3", name: "MiniMax M3" },
     { id: "z-ai/glm-5.2", name: "GLM 5.2" },

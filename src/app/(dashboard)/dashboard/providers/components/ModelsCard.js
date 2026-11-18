@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useCallback, useEffect, useMemo } from "react";
+import { applyQoderModelNames } from "@/shared/utils/providerCustomModels";
 import PropTypes from "prop-types";
 import { Card, Button, Modal } from "@/shared/components";
 import { getModelsByProviderId, getModelKind } from "@/shared/constants/models";
@@ -218,7 +219,7 @@ export default function ModelsCard({ providerId, kindFilter, providerAliasOverri
       && !builtInModels.some((b) => b.id === m.id)
   );
 
-  const displayModels = builtInModels;
+  const displayModels = applyQoderModelNames(builtInModels, customModels, providerAlias);
 
   const aliasesByModel = useMemo(() => groupAliasesByModel(modelAliases), [modelAliases]);
 

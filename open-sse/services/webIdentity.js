@@ -7,7 +7,7 @@
 // flaky network never flips a healthy connection to "error".
 import { AsyncLocalStorage } from "node:async_hooks";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
-import { extractCookieValue, normalizeSessionCookieHeader } from "../utils/webCookieAuth.js";
+import { extractCookieValue, normalizeSessionCookieHeader, normalizeCookieHeaderInput } from "../utils/webCookieAuth.js";
 import { extractMiaoshouToken } from "../shared/miaoshou/credentials.js";
 import { probeJoyagentCookie } from "../shared/joyagent/credentials.js";
 import { grokTlsFetch, GROK_TLS_USER_AGENT } from "./grokTlsClient.js";
@@ -182,6 +182,11 @@ const PROBES = {
   },
 
   async "muse-web"(credential) {
+    try {
+      credential = normalizeCookieHeaderInput(credential);
+    } catch (error) {
+      return REJECTED(error.message);
+    }
     if (!cookieJar(credential).get("hatch_sess")) return REJECTED("Missing hatch_sess cookie");
     const res = await request("https://muse.ai/api/session", {
       headers: { Cookie: credential, Accept: "application/json", Origin: "https://muse.ai", Referer: "https://muse.ai/thread/new" },

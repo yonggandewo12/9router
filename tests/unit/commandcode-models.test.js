@@ -323,8 +323,8 @@ describe("commandcode registry hygiene (offline fallback)", () => {
   it("is a deduplicated snapshot of the 97 visible client-view rows", () => {
     // Snapshot pin (catalogVersion c6350c34…, 2026-11-10): catches accidental truncation or a
     // hidden row leaking back in. Refresh this count together with the registry when upstream moves.
-    expect(cc.models).toHaveLength(97);
-    expect(new Set(cc.models.map((m) => m.id)).size).toBe(97);
+    expect(cc.models).toHaveLength(98);
+    expect(new Set(cc.models.map((m) => m.id)).size).toBe(98);
     expect(cc.passthroughModels).toBe(true);
   });
 });
@@ -378,6 +378,6 @@ describe("commandcode picker prefers the live catalog", () => {
     expect(ids).toContain("stealth/glyph-cluster:free");
     expect(ids).toContain("stealth/crouton-alpha");
     expect(ids).not.toContain("test/live-only");
-    expect(ids).toHaveLength(97);
+    expect(ids).toHaveLength(98);
   });
 });

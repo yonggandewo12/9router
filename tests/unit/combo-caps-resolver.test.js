@@ -93,8 +93,8 @@ describe("aggregateComboCapabilities: resolveCaps override", () => {
     };
     expect(aggregateComboCapabilities(seats)).toMatchObject({ contextWindow: 1_000_000, thinkingFormat: "claude-adaptive" });
     expect(aggregateComboCapabilities(seats, null, seatCaps).contextWindow).toBe(1_000_000);
-    // The divergence the resolver still guards: a provider with no static row for
-    // this id falls to the pattern, while the fed catalog knows the real limit.
-    expect(getCapabilitiesForModel(null, "claude-haiku-5-5").contextWindow).toBe(200_000);
+    // Upstream's global claude table now carries haiku-5-5, so a seat without a
+    // provider row already reports 1M instead of the old 200k family pattern.
+    expect(getCapabilitiesForModel(null, "claude-haiku-5-5").contextWindow).toBe(1_000_000);
   });
 });

@@ -18,6 +18,7 @@
 //
 // No probing pass: unlike CodeBuddy, this catalog is the CLI's own source of truth for what
 // is listable, and plan gating (minimumPlan) happens upstream at call time, not here.
+import commandcodeProvider from "../providers/registry/commandcode.js";
 import { setLiveCapabilities } from "../providers/liveCapabilities.js";
 
 const CATALOG_URL = "https://api.commandcode.ai/provider/v1/models?view=client";
@@ -68,7 +69,11 @@ export function normalizeCommandCodeModels(data) {
       },
     };
     if (row.display?.badge === "free") model.isFree = true;
+    if (row.display?.description) model.description = row.display.description;
     if (Number.isFinite(context) && context > 0) model.contextLength = context;
+    if (Number.isFinite(maxOutput) && maxOutput > 0) model.maxOutputTokens = maxOutput;
+    model.isVL = model.capabilities.vision;
+    model.isReasoning = reasoning;
     out.push(model);
   }
   return out;
@@ -110,7 +115,8 @@ export async function resolveCommandCodeModels({ forceRefresh = false, fetchFn =
     let res;
     try {
       res = await fetchFn(CATALOG_URL, {
-        headers: { accept: "application/json" },
+        // Same identity the vendor CLI presents for this public document (no auth).
+        headers: { accept: "application/json", ...commandcodeProvider.transport.headers },
         signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
       });
     } catch (error) {

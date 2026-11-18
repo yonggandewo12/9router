@@ -136,6 +136,7 @@ export default {
     { id: "xai/grok-4.5", name: "Grok 4.5" },
     { id: "xai/grok-4.6", name: "Grok 4.6" },
     { id: "xai/grok-4.7", name: "Grok 4.7" },
+    { id: "google/gemini-4-carbon", name: "Gemini 4 Carbon" },
   ],
   passthroughModels: true,
   features: {
