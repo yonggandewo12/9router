@@ -1,3 +1,30 @@
+# v0.6.35 (2026-11-19)
+
+This release merges upstream `decolua/9router` v0.5.116 → v0.5.119 (40 commits) into the fork line, keeping the fork's pipelines, CLI identity and lane overrides. 112 files changed (+3681/−267), 25 conflicts resolved by hand.
+
+## Features (upstream)
+
+- **Synthetic (`syn`)**: OpenAI-compatible upstream on `api.synthetic.new` with the always-on `hf:` models as a static fallback, model passthrough, live discovery, and a usage tracker reading `GET /v2/quotas`. Keys validate through `/v2/quotas` (the public model list answers 200 for any Bearer) and the Test button routes through it.
+- **Claude**: Fable 5.2 ($8/$40) becomes the flagship and Haiku 5.5 ($0.10/$0.50, 1M/128K) is added; Fable 5.1 retires from the claude, Copilot and OpenCode Zen catalogs. The advertised Claude Code version now tracks the latest npm release (floor 2.1.322, pin with `CLAUDE_CLI_VERSION`), and the dashboard lists live Claude models through the OAuth bearer.
+- **SenseNova intl**: new `sensenova-intl` provider on `token.sensenova.ai` with its own scoped capability table (262k window, below the CN 1M), so the two sites never share limits.
+- **ClinePass quota tracker**, **proxy-pool status filter + Shift-click range select**, `/v1/models` publishes `thinking_levels` and opencode settings derive effort variants from them.
+- **Transport fixes**: single framed `[DONE]` sentinel in passthrough streams (plus the unterminated-tail case, #5592), zstd advertised only when the runtime can decode it (#5539), NVIDIA NIM param stripping + `dropClientMetadata` + connect timeout, Codex CLI 0.167.1 identity, GPT Image edits on the native `images/edits` endpoint, STT multipart via undici's FormData, Muse Web accepts Cookie-Editor JSON exports, undici kept on 7.x so Node < 22.19 survives the outbound path.
+
+## Merge decisions (fork wins)
+
+- **Pipelines untouched** (`.github/workflows`: cleanup/npm-publish/test only), CLI identity `9router-proxy` and the 0.6.x version line kept, `engines` floor left as it was.
+- **CommandCode** keeps this fork's live-catalog resolver (capabilities overlay, 15-min TTL, negative cache, in-flight dedupe). Upstream's parallel resolver, its duplicate import and its duplicate route entry were dropped; only its two static ids (`google/gemini-4-carbon`, `claude-fable-5-2`) and the vendor CLI identity headers were merged in. The resolver now also carries `description` and flat `isVL`/`isReasoning`/`maxOutputTokens` for API parity.
+- **Qoder** keeps hiding `enable:false` models from the picker while still caching their configs for explicit chat calls; upstream's display-name sync is kept.
+- **NVIDIA** ids stay bare with `upstreamModelId` (the `/v1/models` prefix strip needs that), now covering the models this merge adds; capability-table keys follow the same bare form so lookup and the registry agree.
+- **Zed tests** stay removed (`e0fdff21`, flaky) — upstream's edit to that file is dropped.
+
+## Verification
+
+- **Tests**: 512 files / 5436 passing / 0 failing (14 expected-fail, 100 skipped, 1 todo), 22s. Failing-for-environment tests were adapted, not weakened: the CommandCode route suite clears the fork's cache between cases, the Muse cookie suite mocks `proxyAwareFetch`, the opencode proxy suite disables the CLI-subprocess lane, and upstream's `node:test` NVIDIA file was converted to vitest so it actually runs.
+- **Build**: `npm run build` green (webpack, 16.x), standalone assets copied.
+- **Lint**: changed production files carry only the pre-existing `react-hooks/set-state-in-effect` findings already present on master (same pattern sites); no new rule violations from the merge.
+- **Cross-platform**: no POSIX-only paths, `chmod` or process assumptions were added by this merge; the new transports stay on node:zlib/node:https/undici, and the Windows-relevant argv caps in the opencode CLI lane are unchanged.
+
 # v0.6.34 (2026-11-10)
 
 The Command Code lane now matches the official CLI's model picker — including the free models it advertises — and a full-chain review of the lane shipped one streaming fix proven live.
