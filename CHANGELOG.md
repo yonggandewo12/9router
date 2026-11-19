@@ -1,3 +1,25 @@
+# v0.6.36 (2026-11-19)
+
+Post-merge deep review of v0.6.35. Three findings fixed, the rest verified unchanged:
+
+## Fixes
+
+- **Provider baseline drift** (`tests/__baseline__/providers-baseline.json`): nvidia's 90s `timeoutMs` (NIM hardening) reached the registry but not the frozen baseline, so `verify-providers.mjs` reported a one-field diff. Recorded; the verifier is byte-for-byte green again.
+- **Single import for the custom-model helpers** (`ModelsCard.js`): the merge left two `import ... from "@/shared/utils/providerCustomModels"` statements in one file. Merged into one.
+- **Accurate live-catalog note** (`ModelSelectModal.js`): the comment claimed the picker's live-catalog set matched the provider page exactly. It is a union (cline/ClinePass on top of the shared set) while the page keeps its explicit import button; the comment now says that.
+
+## Verified, no change
+
+- Passthrough `[DONE]` handling: mutation-tested — removing the unterminated-tail guard fails the upstream sentinel suite, restoring it passes.
+- `verify-providers` / `verify-alias` / `verify-oauth-urls`: byte-for-byte equal (alias: 141 tokens).
+- Repository-wide sweep: no duplicate imports, functions or object keys (config maps included); registry/service modules have no import cycle; the Claude CLI version flows from one constant with the live npm override.
+- undici 7.x compatibility: only `Agent` / `ProxyAgent` / `fetch` are used, and the fork's keep-alive / DPI fixes survive untouched.
+- New provider wiring (synthetic, sensenova-intl, clinepass) checked across registry, routing, usage, validation and image adapters.
+
+Residual risks left as upstream ships them: synthetic inherits family capability patterns (zai/kimi/deepseek thinking shapes, GLM-5.3 vision off) like any aggregator lane, its subscription usage is cost-estimated from token pricing on the dashboard, and its icon falls back to the "SY" monogram (12 of 151 providers have no icon). The provider page does not auto-fetch cline/ClinePass live catalogs (pre-existing; manual import covers it).
+
+Tests: 5436 passing / 0 failing. Build: green.
+
 # v0.6.35 (2026-11-19)
 
 This release merges upstream `decolua/9router` v0.5.116 → v0.5.119 (40 commits) into the fork line, keeping the fork's pipelines, CLI identity and lane overrides. 112 files changed (+3681/−267), 25 conflicts resolved by hand.

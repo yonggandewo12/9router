@@ -1,6 +1,6 @@
 {
   "name": "9router-proxy",
-  "version": "0.6.35",
+  "version": "0.6.36",
   "description": "9Router CLI - Start and manage 9Router server",
   "bin": {
     "9router-proxy": "./cli.js"
