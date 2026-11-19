@@ -24,11 +24,11 @@ const PROVIDER_ORDER = [
 
 // Providers whose picker list comes from the per-account live catalog via
 // /api/providers/[id]/models; the static registry stays as the fallback when the
-// fetch fails or answers empty. Sourced from the shared constant the provider page
-// uses, so a provider with a live resolver cannot show on one list and be missing
-// from the other (#4244 hid Zed, and cbcn/hy4free is hidden the same way today).
-// cline/ClinePass also have resolvers but are absent from the shared set — unioned
-// here rather than forking a second list.
+// fetch fails or answers empty. Sourced from the shared constant so cbcn/cbci and
+// commandcode cannot show on one list and be missing from the other (#4244 hid
+// Zed, and cbcn/hy4free is hidden the same way today). cline/ClinePass have
+// resolvers too but sit outside the shared set — unioned here rather than forking
+// a second list (the provider page keeps its explicit import button instead).
 const LIVE_CATALOG_PROVIDERS = [...new Set([...SHARED_LIVE_CATALOG_PROVIDERS, "cline", "clinepass"])];
 
 // Fetch every live catalog in one pass, keyed by provider id. Adding a provider is

@@ -1,12 +1,11 @@
 "use client";
 
 import { useState, useCallback, useEffect, useMemo } from "react";
-import { applyQoderModelNames } from "@/shared/utils/providerCustomModels";
 import PropTypes from "prop-types";
 import { Card, Button, Modal } from "@/shared/components";
 import { getModelsByProviderId, getModelKind } from "@/shared/constants/models";
 import { getProviderAlias } from "@/shared/constants/providers";
-import { groupAliasesByModel } from "@/shared/utils/providerCustomModels";
+import { applyQoderModelNames, groupAliasesByModel } from "@/shared/utils/providerCustomModels";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 
 // ── ModelRow ───────────────────────────────────────────────────
