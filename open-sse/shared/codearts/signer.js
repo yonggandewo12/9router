@@ -44,9 +44,29 @@ export function formatSdkDate(date = new Date()) {
 }
 
 export function canonicalUri(pathname) {
-  const encoded = String(pathname || "").split("/").map(uriEncode).join("/");
-  if (!encoded) return "/";
-  return encoded.endsWith("/") ? encoded : `${encoded}/`;
+  // URL.pathname arrives percent-encoded for non-ASCII but leaves many ASCII
+  // punctuation chars raw (WHATWG URL does not encode "{", "=", "&", …), so the
+  // signature still has to RFC3986-encode those. Existing `%XY` escapes are
+  // already the on-the-wire form — re-encoding them ("%20" → "%2520") would
+  // break the signature, so they pass through verbatim. "/" is the segment
+  // separator and stays literal. uriEncode iterates by code point, so an astral
+  // character (two UTF-16 code units) encodes as its own 4 UTF-8 bytes.
+  const raw = String(pathname || "");
+  let out = "";
+  for (let i = 0; i < raw.length; ) {
+    const codePoint = raw.codePointAt(i);
+    const char = String.fromCodePoint(codePoint);
+    if (char === "/") { out += "/"; i += 1; continue; }
+    if (char === "%" && /^[0-9A-Fa-f]{2}$/.test(raw.slice(i + 1, i + 3))) {
+      out += raw.slice(i, i + 3);
+      i += 3;
+      continue;
+    }
+    out += uriEncode(char);
+    i += char.length;
+  }
+  if (!out) return "/";
+  return out.endsWith("/") ? out : `${out}/`;
 }
 
 /** Code-point order, the byte order the gateway sorts in — `localeCompare` would

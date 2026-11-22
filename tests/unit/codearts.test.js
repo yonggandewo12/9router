@@ -13,7 +13,7 @@ import { getExecutor } from "open-sse/executors/index.js";
 import { stripUnsupportedParams, stripsThinkingParams } from "open-sse/translator/concerns/paramSupport.js";
 import { canonicalUri, canonicalQuery, formatSdkDate, signHuaweiRequest, uriEncode } from "open-sse/shared/codearts/signer.js";
 import { capRetryDelayMs, isSessionCapExceeded, isEntitlementExhausted, isModelQueued, queueRetryDelayMs, sendUntilAdmitted, sleep } from "open-sse/shared/codearts/sessionCap.js";
-import { mapCodeartsModel, resolveCodeartsModels, codeartsKeys } from "open-sse/shared/codearts/api.js";
+import { mapCodeartsModel, resolveCodeartsModels, codeartsKeys, liveCapabilitiesFromCatalog } from "open-sse/shared/codearts/api.js";
 import { parseSSEToOpenAIResponse } from "open-sse/handlers/chatCore/sseToJsonHandler.js";
 import {
   buildAuthorizeUrl,
@@ -80,6 +80,18 @@ describe("Huawei request signing", () => {
   it("canonical URI always carries the trailing slash the gateway signs", () => {
     expect(canonicalUri("/api/v2/chat/completions")).toBe("/api/v2/chat/completions/");
     expect(canonicalUri("")).toBe("/");
+  });
+
+  it("canonical URI does not double-encode a percent-escaped pathname", () => {
+    // URL.pathname hands over percent-encoded paths; "%20" must not become "%2520",
+    // while WHATWG's unencoded ASCII punctuation ("{", "=", "&", …) still gets RFC
+    // 3986-encoded.
+    expect(canonicalUri(new URL("https://h.example/api/v2/chat%20completions").pathname))
+      .toBe("/api/v2/chat%20completions/");
+    expect(canonicalUri(new URL("https://h.example/模型/x").pathname))
+      .toBe("/%E6%A8%A1%E5%9E%8B/x/");
+    // Astral characters are 4 UTF-8 bytes, not two lone surrogates.
+    expect(canonicalUri("/a/\u{1F600}/x")).toBe("/a/%F0%9F%98%80/x/");
   });
 
   it("canonical query is key-sorted and value-encoded", () => {
@@ -571,6 +583,25 @@ describe("CodeArts agent catalog", () => {
     expect(mapCodeartsModel({})).toBeNull();
     expect(mapCodeartsModel({ model_name: "VL", model_parameters: { supports_images: true } }))
       .toMatchObject({ id: "VL", capabilities: { vision: true } });
+  });
+
+  it("live capability overlay drops unpublished (0) limits instead of overriding the static tables", () => {
+    // A catalog row with max_tokens: 0 means "unpublished", not "zero": the
+    // overlay would otherwise win over the static tables with maxOutput:0 and
+    // CodeartsExecutor.transformRequest would inject max_tokens:0 on the wire.
+    const entries = liveCapabilitiesFromCatalog([
+      { model_parameters: { model_id: "healthy", context_window: 524288, max_tokens: 65535, supports_images: false } },
+      { model_parameters: { model_id: "zero-row", context_window: 0, max_tokens: 0, supports_images: false } },
+      { model_parameters: { model_id: "missing-row", context_window: 131072 } },
+    ]);
+    expect(entries).toHaveLength(3);
+    const byId = Object.fromEntries(entries.map((e) => [e.id, e]));
+    expect(byId.healthy).toMatchObject({ contextWindow: 524288, maxOutput: 65535, vision: false });
+    expect(byId["zero-row"]).not.toHaveProperty("contextWindow");
+    expect(byId["zero-row"]).not.toHaveProperty("maxOutput");
+    expect(byId["zero-row"]).toMatchObject({ vision: false });
+    expect(byId["missing-row"]).not.toHaveProperty("maxOutput");
+    expect(byId["missing-row"]).not.toHaveProperty("vision");
   });
 
   // A signed GET the gateway either accepts or 400s — assert the exact wire

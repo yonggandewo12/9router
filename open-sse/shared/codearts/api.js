@@ -122,11 +122,18 @@ export function liveCapabilitiesFromCatalog(rawModels) {
     const params = raw?.model_parameters || {};
     const id = params.model_id || raw?.model_name;
     if (!id) return null;
+    // 0 is "unpublished", not "nothing": definedOnly() in liveCapabilities.js
+    // keeps a 0 because it is a valid finite number, and a 0 in the overlay
+    // wins over the static tables — CodeartsExecutor.transformRequest would
+    // then inject max_tokens:0 on the wire. mapCodeartsModel already gates the
+    // same fields with > 0; mirror that here. `supports_images` stays published
+    // even when false: it is the gateway's own answer and outranks the name
+    // heuristics (see this function's doc comment above).
     return {
       id,
-      contextWindow: params.context_window,
-      maxOutput: params.max_tokens,
-      vision: params.supports_images,
+      ...(params.context_window > 0 ? { contextWindow: params.context_window } : {}),
+      ...(params.max_tokens > 0 ? { maxOutput: params.max_tokens } : {}),
+      ...(typeof params.supports_images === "boolean" ? { vision: params.supports_images } : {}),
       reasoning: true,
     };
   }).filter(Boolean);

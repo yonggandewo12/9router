@@ -1,3 +1,23 @@
+# v0.6.37 (2026-11-22)
+
+End-to-end deep review of the two Huawei lanes (CodeArts 码道 + DevEco Code): OAuth login, credential refresh, signed inference, live catalog. Two wire-level defects fixed, everything else verified unchanged.
+
+## Fixes
+
+- **CodeArts live catalog: a `0` limit no longer poisons the capability overlay** (`open-sse/shared/codearts/api.js`). `liveCapabilitiesFromCatalog` passed `context_window`/`max_tokens` through unguarded; a catalog row publishing `0` (meaning "unpublished", not "zero") survived `definedOnly()` in the overlay and won over the static tables — `CodeartsExecutor.transformRequest` then injected `max_tokens: 0` on the wire for that model's every turn. The overlay now mirrors `mapCodeartsModel`'s `> 0` gate, while `supports_images` stays published even when `false` (the gateway's own answer outranks name heuristics).
+- **CodeArts signing: `canonicalUri` no longer double-encodes percent escapes** (`open-sse/shared/codearts/signer.js`). `URL.pathname` always arrives percent-encoded, and the old per-segment `uriEncode` turned `%20` into `%2520` — the gateway recomputes the signature over the single-encoded form, so any path with a non-ASCII or escaped segment would 400 with signature mismatch. Existing `%XY` escapes now pass through verbatim, WHATWG's unencoded ASCII punctuation (`{`, `=`, `&`, …) still gets RFC 3986-encoded, and astral characters encode as their own 4 UTF-8 bytes (code-point iteration, not UTF-16 units).
+
+## Verified, no change
+
+- DevEco `sniffStreamHead` timeout race: probe-measured — a chunk landing after the sniff window is handed to the replay stream intact (the pending read is awaited first), nothing lost.
+- Session-cap resend window (45s, abort-aware, jittered exponential backoff), queue Retry-After, entitlement 403 `X-Auth-Refresh-Skip`, catalog credential renewal with 10-min backoff, `withCredentialRefreshLock` re-entrancy via AsyncLocalStorage.
+- Loopback OAuth proxies: CodeArts ignores the attacker-controllable `redirect` param, single-use codes, verifier/DPoP key wiped on completion; DevEco binds callbacks on `code`↔loginState with a 64KB body cap.
+- Capability baselines: providers / alias / OAuth URLs byte-for-byte equal.
+
+## Regression tests
+
+Two new cases in `tests/unit/codearts.test.js` (double-encode guard incl. astral chars; zero-limit overlay dropping), mutation-verified red on the old implementations. Tests: 5438 passing / 0 failing (14 expected-fail per baseline). Build: green. Lint: clean.
+
 # v0.6.36 (2026-11-19)
 
 Post-merge deep review of v0.6.35. Three findings fixed, the rest verified unchanged:
