@@ -1,3 +1,23 @@
+# v0.6.38 (2026-11-22)
+
+End-to-end deep review of the CodeBuddy pair (CN + intl), with CodeArts/DevEco re-verified on top of v0.6.37. One defect fixed, the live behaviors behind the review confirmed.
+
+## Fixes
+
+- **CodeBuddy model listing bypassed the connection proxy** (`src/app/api/providers/[id]/models/route.js`). `resolveCodeBuddyModels` defaults `fetchFn` to bare `globalThis.fetch`, so the dashboard refresh's `/v3/config` GET and every verification probe left over the direct interface — the one thing a strict-proxy connection exists to prevent — while the codearts/grok-cli resolvers on the same file already thread the resolved proxy. The resolver now resolves the connection's proxy config, drives catalog + probes through `proxyAwareFetch`, and passes the same options to the 401/403 refresh (which previously also skipped the proxy).
+
+## Verified, no change
+
+- **Retirement learning end to end, live**: `cbcn/hy4free` answered 400 code 11102 ("model [hy4free] service info not found"); the executor's `parseError` recorded it and the next `/v1/models` no longer advertises the id. One user's failed request prunes the catalog for everyone within the 24h verdict TTL.
+- **Probe outcome when the gateway only says 6004**: the first `wait` pass settles in ~9ms and marks the ids inconclusive; later passes return in 0ms until the 10-minute retry window — a client poll never turns into one completion per id.
+- **Concurrency**: force + wait arriving together cost one full probe pass per mode (no duplicate completions); `dedupRefresh` shares in-flight token refreshes for 10s.
+- **Streaming contract**: non-stream clients get a JSON answer (CN live probe 200, `pong`); the intl live probe was skipped — no connection configured on this box.
+- CodeArts / DevEco: signed inference live (ca/openpangu-2.0-flash 200; dv/GLM-5.3 200), the v0.6.37 fixes hold, and the OAuth/refresh/session-cap paths re-verified without change.
+
+## Regression tests
+
+Full unit suite green on the change: 4938 passing. Providers / alias / OAuth-URL baselines byte-for-byte equal. Build green. Lint clean.
+
 # v0.6.37 (2026-11-22)
 
 End-to-end deep review of the two Huawei lanes (CodeArts 码道 + DevEco Code): OAuth login, credential refresh, signed inference, live catalog. Two wire-level defects fixed, everything else verified unchanged.

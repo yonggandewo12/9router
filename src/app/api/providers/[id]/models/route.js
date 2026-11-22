@@ -155,11 +155,25 @@ const buildOAuthResolver = ({ refreshFn, fetchFn, parseFn, errorLabel }) => asyn
 // like every other OAuth lane, then retries once.
 const buildCodeBuddyResolver = (providerId, refreshFn) => async (connection) => {
   if (!connection?.accessToken) return { error: "No valid token found", status: 401 };
-  const run = (token) => resolveCodeBuddyModels({ providerId, accessToken: token, wait: true, log: console });
+  // resolveCodeBuddyModels defaults fetchFn to bare globalThis.fetch, which
+  // ignores the connection's proxy — on a strict-proxy account the catalog
+  // fetch and every probe would leave over the direct interface. Thread the
+  // resolved proxy through, same shape the codearts resolver already uses.
+  const proxy = await resolveConnectionProxyConfig(connection.providerSpecificData || {});
+  const proxyOptions = {
+    connectionProxyEnabled: proxy.connectionProxyEnabled === true,
+    connectionProxyUrl: proxy.connectionProxyUrl || "",
+    connectionNoProxy: proxy.connectionNoProxy || "",
+    vercelRelayUrl: proxy.vercelRelayUrl || "",
+    strictProxy: proxy.strictProxy === true,
+  };
+  const { proxyAwareFetch } = await import("open-sse/utils/proxyFetch.js");
+  const fetchFn = (url, opts) => proxyAwareFetch(url, opts, proxyOptions);
+  const run = (token) => resolveCodeBuddyModels({ providerId, accessToken: token, wait: true, log: console, fetchFn });
 
   let result = await run(connection.accessToken);
   if (!result.models.length && /HTTP 40[13]/.test(result.warning || "")) {
-    const refreshed = await refreshFn(connection.refreshToken, console).catch(() => null);
+    const refreshed = await refreshFn(connection.refreshToken, console, proxyOptions).catch(() => null);
     if (refreshed?.accessToken) {
       await updateProviderCredentials(connection.id, {
         accessToken: refreshed.accessToken,
