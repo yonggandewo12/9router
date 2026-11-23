@@ -39,6 +39,9 @@ const PASSTHROUGH_OK = new Set(["opencode"]);
 const KNOWN_DEAD_ROWS = {
   commandcode: ["claude-haiku-5-5"],
   "qoder-cn": ["smodel", "cmodel"],
+  // Upstream v0.5.123 caps mistral's legacy/live Large ids (native /v1/models
+  // resolves latest to Large 4); the static registry publishes only -latest.
+  mistral: ["mistral-large-4", "mistral-large-4-0"],
 };
 
 // codebuddy-intl has no per-model table: its limits, vision flags and

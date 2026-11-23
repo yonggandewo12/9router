@@ -99,7 +99,9 @@ export async function handleSystemoneCore({
     targetUrl = targetUrl.replace("{accountId}", accountId);
   }
   if (targetUrl.includes("{model}")) {
-    targetUrl = targetUrl.replace(/\{model\}/g, wireModel);
+    // The URL path segment is the full model id (e.g. Cloudflare's `@cf/cloudflare/clef`);
+    // only the body is rewritten to the short selector below.
+    targetUrl = targetUrl.replace(/\{model\}/g, model);
   }
 
   // Validate input at the trust boundary; field/question schema details are upstream's job.

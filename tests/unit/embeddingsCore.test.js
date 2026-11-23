@@ -770,7 +770,7 @@ describe("handleEmbeddingsCore — input_type", () => {
 
   const nvidiaOptions = (overrides = {}) => makeOptions({
     body: { model: "nvidia/nvidia/nemotron-3.5-embed-8b", input: "Hello world" },
-    modelInfo: { provider: "nvidia", model: "nvidia/nemotron-3.5-embed-8b" },
+    modelInfo: { provider: "nvidia", model: "nemotron-3.5-embed-8b" },
     credentials: { apiKey: "nvapi-test" },
     ...overrides,
   });
@@ -820,7 +820,7 @@ describe("handleEmbeddingsCore — input_type", () => {
 
     await handleEmbeddingsCore(nvidiaOptions({
       body: { model: "nvidia/nvidia/nvclip", input: "Hello world" },
-      modelInfo: { provider: "nvidia", model: "nvidia/nvclip" },
+      modelInfo: { provider: "nvidia", model: "nvclip" },
     }));
 
     expect("input_type" in sentBody()).toBe(false);

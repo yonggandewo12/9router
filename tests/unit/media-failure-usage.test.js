@@ -37,6 +37,7 @@ vi.mock("../../open-sse/handlers/imageGenerationCore.js", () => ({
 }));
 vi.mock("../../open-sse/handlers/systemoneCore.js", () => ({
   handleSystemoneCore: mocks.handleSystemoneCore,
+  validateSystemonePayload: () => null,
 }));
 vi.mock("../../open-sse/services/combo.js", () => ({ handleComboChat: vi.fn() }));
 vi.mock("../../open-sse/utils/error.js", () => ({

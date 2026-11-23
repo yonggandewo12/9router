@@ -44,7 +44,6 @@ export default {
     // form and the wire id is declared explicitly, exactly like poolside's
     // `poolside/laguna-*`.
     { id: "nemotron-3-ultra-550b-a55b", upstreamModelId: "nvidia/nemotron-3-ultra-550b-a55b", name: "Nemotron 3 Ultra" },
-    { id: "nv-embedqa-e5-v5", upstreamModelId: "nvidia/nv-embedqa-e5-v5", name: "NV EmbedQA E5 v5", kind: "embedding" },
     { id: "nemotron-3.5-embed-8b", upstreamModelId: "nvidia/nemotron-3.5-embed-8b", name: "Nemotron 3.5 Embed 8B", dimensions: 4096, params: ["input_type"], kind: "embedding" },
     { id: "nemotron-3.5-embed-1b", upstreamModelId: "nvidia/nemotron-3.5-embed-1b", name: "Nemotron 3.5 Embed 1B", dimensions: 2048, params: ["input_type"], kind: "embedding" },
     { id: "nemotron-3-embed-1b", upstreamModelId: "nvidia/nemotron-3-embed-1b", name: "Nemotron 3 Embed 1B", dimensions: 2048, params: ["input_type"], kind: "embedding" },
