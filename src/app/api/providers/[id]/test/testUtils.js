@@ -6,10 +6,12 @@ import { getDefaultModel } from "open-sse/config/providerModels.js";
 import { traeEnterpriseConfig } from "open-sse/shared/trae/enterprise.js";
 import { fetchCodeartsCurrentUser } from "open-sse/shared/codearts/api.js";
 import { refreshDevecoFromCredentials } from "open-sse/shared/deveco/auth.js";
+import { ANTIGRAVITY_IDE_USER_AGENT } from "open-sse/providers/shared.js";
 import { probeBedrockCredentials } from "open-sse/executors/bedrock.js";
 import { ZCODE_SYSTEM_BLOCKS } from "open-sse/shared/zcode/systemPrompt.js";
 import { resolveOllamaLocalHost, PROVIDERS } from "open-sse/config/providers.js";
 import { proxyAwareFetch } from "open-sse/utils/proxyFetch.js";
+import { buildKiroIdentityHeaders } from "open-sse/shared/kiroIdentity.js";
 import { CODEX_CLI_VERSION } from "open-sse/config/appConstants.js";
 import { isOpenCodeCliAvailable, runOpenCodeCli } from "open-sse/executors/opencode-cli.js";
 import { GROK_CLI_PAGER_USER_AGENT, GROK_CLI_VERSION } from "open-sse/config/grokCli.js";
@@ -282,7 +284,7 @@ function parseProviderErrorMessage(bodyText, fallback) {
 
 async function probeCloudCodeAssistAccess(connection, accessToken, effectiveProxy = null) {
   const userAgent = connection.provider === "antigravity"
-    ? (ANTIGRAVITY_CONFIG.loadCodeAssistUserAgent || "antigravity/hub/2.24.0 darwin/arm64")
+    ? (ANTIGRAVITY_CONFIG.loadCodeAssistUserAgent || ANTIGRAVITY_IDE_USER_AGENT)
     : "google-api-nodejs-client/9.15.1 gemini-cli/0.34.0";
 
   const res = await fetchWithConnectionProxy(CLOUD_CODE_ASSIST_TEST_URL, {
@@ -367,7 +369,7 @@ async function refreshOAuthToken(connection) {
       }
       const response = await fetch(KIRO_CONFIG.socialRefreshUrl, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "User-Agent": "kiro-cli/1.0.0" },
+        headers: { "Content-Type": "application/json", ...buildKiroIdentityHeaders({ refreshToken }) },
         body: JSON.stringify({ refreshToken }),
       });
       if (!response.ok) return null;

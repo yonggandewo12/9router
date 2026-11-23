@@ -12,7 +12,7 @@ import { getModelsByProviderId, getModelKind } from "@/shared/constants/models";
 import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, getProviderAlias, providerSupportsKind, listsProviderCatalog, LIVE_CATALOG_PROVIDERS as SHARED_LIVE_CATALOG_PROVIDERS } from "@/shared/constants/providers";
 import { parseSearchQuery, matchesSearch } from "@/shared/utils/modelSearchFilter";
 import { getDeactivatedProviderIds } from "@/shared/utils/connectionStatus";
-import { NO_AUTH_PROVIDER_IDS } from "@/shared/utils/selectableModels";
+import { NO_AUTH_PROVIDER_IDS, liveModelCaps } from "@/shared/utils/selectableModels";
 
 // Provider order: OAuth first, then Free Tier, then API Key (matches dashboard/providers)
 const PROVIDER_ORDER = [
@@ -29,7 +29,9 @@ const PROVIDER_ORDER = [
 // Zed, and cbcn/hy4free is hidden the same way today). cline/ClinePass have
 // resolvers too but sit outside the shared set — unioned here rather than forking
 // a second list (the provider page keeps its explicit import button instead).
-const LIVE_CATALOG_PROVIDERS = [...new Set([...SHARED_LIVE_CATALOG_PROVIDERS, "cline", "clinepass"])];
+// claude carries a live OAuth catalog (upstream 43bc940e); antigravity stays on the
+// provider page only, matching upstream's split.
+const LIVE_CATALOG_PROVIDERS = [...new Set([...SHARED_LIVE_CATALOG_PROVIDERS, "cline", "clinepass", "claude"])];
 
 // Fetch every live catalog in one pass, keyed by provider id. Adding a provider is
 // then a single change to the shared constant; a per-provider hook plus a lookup
@@ -236,6 +238,8 @@ export default function ModelSelectModal({
   // Group models by provider with priority order
   const groupedModels = useMemo(() => {
     const groups = {};
+    // liveModelsByProvider is the outer map from useLiveCatalogModels (keyed by
+    // provider id), so a provider added to LIVE_CATALOG_PROVIDERS needs no ternary here.
 
     // Kinds where the provider IS the model (no per-model selection needed)
     const PROVIDER_AS_MODEL_KINDS = new Set(["webSearch", "webFetch"]);
@@ -461,7 +465,7 @@ export default function ModelSelectModal({
           .map((m) => ({ id: m.id, name: m.name || m.id, value: `${alias}/${m.id}`, isCustom: true }));
 
         const merged = [
-          ...applyQoderModelNames(hardcodedModels, customModels, alias).map((m) => ({ id: m.id, name: m.name, value: `${alias}/${m.id}`, kind: getModelKind(m) })),
+          ...applyQoderModelNames(hardcodedModels, customModels, alias).map((m) => ({ id: m.id, name: m.name, value: `${alias}/${m.id}`, kind: getModelKind(m), caps: liveModelCaps(m) })),
           ...customAliasModels,
           ...customRegisteredModels,
         ];
