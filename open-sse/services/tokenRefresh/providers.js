@@ -4,6 +4,7 @@ import { proxyAwareFetch } from "../../utils/proxyFetch.js";
 import { dedupRefresh } from "./dedup.js";
 import { buildExternalIdpRefreshParams } from "../../../src/lib/oauth/kiroExternalIdp.js";
 import { buildKiroIdentityHeaders } from "../../shared/kiroIdentity.js";
+import { AWS_REGION_PATTERN } from "../../config/awsConstants.js";
 
 let _xaiServiceSingleton = null;
 export async function refreshXaiToken(refreshToken, log) {
@@ -377,8 +378,13 @@ export async function refreshKiroToken(refreshToken, providerSpecificData, log, 
 
   if (clientId && clientSecret) {
     const isIDC = authMethod === "idc";
-    const endpoint = isIDC && region
-      ? `https://oidc.${region}.amazonaws.com/token`
+    // This endpoint receives the client secret and the refresh token, and the region
+    // comes from unschema'd providerSpecificData — so it is validated before it can
+    // steer the host. A region carrying "/" or "#" would resolve oidc.<attacker> and
+    // ship those credentials there (same class the oauth layer guards, GHSA-6mwv-4mrm-5p3m).
+    const safeRegion = typeof region === "string" && AWS_REGION_PATTERN.test(region) ? region : "";
+    const endpoint = isIDC && safeRegion
+      ? `https://oidc.${safeRegion}.amazonaws.com/token`
       : "https://oidc.us-east-1.amazonaws.com/token";
 
     const response = await proxyAwareFetch(endpoint, {

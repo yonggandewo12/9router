@@ -23,6 +23,7 @@ import { v4 as uuidv4 } from "uuid";
 import { createHash } from "crypto";
 import { refreshKiroToken } from "./tokenRefresh.js";
 import { buildKiroIdentityHeaders } from "../shared/kiroIdentity.js";
+import { AWS_REGION_PATTERN } from "../config/awsConstants.js";
 
 const DEFAULT_REGION = "us-east-1";
 const FETCH_TIMEOUT_MS = 30_000;
@@ -50,8 +51,12 @@ function stripSyntheticSuffixes(id) {
 function regionFromProfileArn(profileArn) {
   if (!profileArn || typeof profileArn !== "string") return DEFAULT_REGION;
   const parts = profileArn.split(":");
-  if (parts.length >= 4 && parts[3]) return parts[3];
-  return DEFAULT_REGION;
+  const region = parts.length >= 4 ? parts[3] : "";
+  // The region is spliced into the hostname that receives the bearer token, and
+  // profileArn is unschema'd providerSpecificData: a segment carrying "/" or "#"
+  // would move the host (q.x.attacker.tld/#.amazonaws.com resolves to
+  // x.attacker.tld) and ship the token there. Only a real region shape passes.
+  return AWS_REGION_PATTERN.test(region) ? region : DEFAULT_REGION;
 }
 
 /**

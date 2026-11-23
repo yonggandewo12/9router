@@ -101,6 +101,10 @@ const PATTERN_THINKING = [
   { provider: "codebuddy-cn", pattern: "hy4-preview",  levels: ["high"] },
   // codebuddy-intl rides the same gateway catalog, so its deepseek levels match.
   { provider: "codebuddy-intl", pattern: "deepseek-v4*", levels: ["low", "high", "xhigh"] },
+  // SenseNova intl accepts none|low|medium|high|max (its registry thinkingConfig
+  // lists exactly that). The "openai" format would also offer minimal/xhigh, which
+  // it rejects — narrow the offered levels only; the wire shape stays "openai".
+  { provider: "sensenova-intl", pattern: "*sensenova*", levels: ["none", "low", "medium", "high", "max"] },
   // MiniMax Code (mcode) — adaptive effort via output_config.effort. M3.1
   // always thinks (no none); M3 is switchable with none/high only, per the
   // magpie static catalog. M2.7 pair falls through to the claude-adaptive

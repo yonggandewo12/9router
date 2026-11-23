@@ -293,7 +293,9 @@ export class KiroExecutor extends BaseExecutor {
     // q/codewhisperer first is safe for every auth method (CLIRO parity).
 
     // Only a covered region reaches the hostname that receives the bearer token.
-    const requestedRegion = (credentials?.providerSpecificData?.region || "us-east-1").trim();
+    // providerSpecificData is unschema'd, so a non-string region must not throw.
+    const rawRegion = credentials?.providerSpecificData?.region;
+    const requestedRegion = typeof rawRegion === "string" ? rawRegion.trim() || "us-east-1" : "us-east-1";
     const regionalize = (u) => {
       if (!u.includes("amazonaws.com")) return u;
       const service = u.match(/\/\/([a-z]+)\.[a-z0-9-]+\.amazonaws\.com/)?.[1];
@@ -414,7 +416,8 @@ export class KiroExecutor extends BaseExecutor {
 
   async executeCreateResponse(args) {
     const { model, body, credentials, signal, log, proxyOptions = null } = args;
-    const region = (credentials?.providerSpecificData?.region || "us-east-1").trim() || "us-east-1";
+    const rawRegion = credentials?.providerSpecificData?.region;
+    const region = typeof rawRegion === "string" ? rawRegion.trim() || "us-east-1" : "us-east-1";
     const url = buildKiroCreateResponseUrl(region);
     const crBody = buildKiroCreateResponseBody({ body, credentials, model });
     const headers = buildKiroCreateResponseHeaders({ credentials, body });

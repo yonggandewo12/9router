@@ -362,7 +362,12 @@ async function getDispatcher(proxyUrl, insecure = false, forceFreshSocket = fals
     return forceFreshSocket ? getFreshRetryDispatcher(insecure) : getDirectDispatcher(insecure);
   }
 
-  const key = `${normalized}::${insecure ? "insecure" : "secure"}`;
+  // A fresh-socket retry must not reuse the pooled proxy agent: the dead socket it
+  // holds is exactly what the retry is trying to escape. Give the fresh variant its
+  // own cache entry and the no-keep-alive TTL, mirroring the direct path's
+  // getFreshRetryDispatcher — without this, forceFreshSocket is a no-op behind a
+  // proxy and the retry reuses the very connection that just died.
+  const key = `${normalized}::${insecure ? "insecure" : "secure"}::${forceFreshSocket ? "fresh" : "pooled"}`;
   if (!proxyDispatchers.has(key)) {
     // Evict oldest entry if max size reached — and actually close it, or its
     // pooled sockets stay open for the life of the process.
@@ -374,7 +379,9 @@ async function getDispatcher(proxyUrl, insecure = false, forceFreshSocket = fals
     const { ProxyAgent } = await import("undici");
     const dispatcher = new ProxyAgent({
       uri: normalized,
-      ...resolveKeepAliveTimeouts(),
+      ...(forceFreshSocket
+        ? { keepAliveTimeout: FRESH_RETRY_KEEPALIVE_TIMEOUT_MS, keepAliveMaxTimeout: FRESH_RETRY_KEEPALIVE_TIMEOUT_MS }
+        : resolveKeepAliveTimeouts()),
       connect: EYEBALLS_CONNECT,
       requestTls: { ecdhCurve: TLS_ECDH_CURVE, ...(insecure ? { rejectUnauthorized: false } : {}) },
     });
@@ -409,7 +416,7 @@ async function fetchWithTlsFallback(url, options, proxyUrl, forceFreshSocket = f
         throw err;
       }
       // ponytail: in-memory insecure agent fallback for self-signed MITM corporate/antivirus certs
-      console.warn(`[ProxyFetch] TLS cert verification failed (${err.cause?.code || err.code}), retrying with insecure TLS: ${url}`);
+      console.warn(`[ProxyFetch] TLS cert verification failed (${err.cause?.code || err.code}), retrying with insecure TLS: ${safeTargetHost(url)}`);
       const insecureDispatcher = await getDispatcher(proxyUrl, true, forceFreshSocket);
       return await rawFetch(url, { ...options, dispatcher: insecureDispatcher });
     }
@@ -429,7 +436,7 @@ async function fetchWithTlsFallback(url, options, proxyUrl, forceFreshSocket = f
       && isFreshSocketReplayEnabled()
       && isStaleSocketError(err)
     ) {
-      dbg("FETCH", `stale keep-alive socket (${err.cause?.code || err.code || err.message}), retrying on fresh socket: ${url}`);
+      dbg("FETCH", `stale keep-alive socket (${err.cause?.code || err.code || err.message}), retrying on fresh socket: ${safeTargetHost(url)}`);
       return await fetchWithTlsFallback(url, options, proxyUrl, true);
     }
     throw err;

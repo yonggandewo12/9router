@@ -99,6 +99,17 @@ export function capabilitiesFromServiceKind(kind) {
  * otherwise mis-match. Only declare deltas vs DEFAULT.
  */
 export const MODEL_CAPABILITIES = {
+  // The CN flagship (token.sensenova.cn) — same 1M window the CN catalog publishes
+  // for the lite row below. Without an entry it fell through to the generic defaults
+  // (reasoning:false, 200k), so a client's thinking params were stripped on the
+  // lane that actually streams thinking.
+  "sensenova-6.8-flash": {
+    vision: true,
+    reasoning: true,
+    thinkingFormat: "openai",
+    contextWindow: 1000000,
+    maxOutput: 131072,
+  },
   "sensenova-6.8-flash-lite": {
     vision: true,
     reasoning: true,
@@ -456,7 +467,6 @@ export const PROVIDER_CAPABILITIES = {
   },
   "codex": {
     "gpt-6-astra":               { vision: true, reasoning: true, search: true, thinkingFormat: "openai", contextWindow: 272000, maxOutput: 128000 },
-    "gpt-6.1-sol":               { vision: true, reasoning: true, search: true, thinkingFormat: "openai", contextWindow: 272000, maxOutput: 128000 },
     "gpt-6-sol":                 { vision: true, reasoning: true, search: true, thinkingFormat: "openai", contextWindow: 272000, maxOutput: 128000 },
     // Without its own entry gpt-6.1-sol fell through to *gpt-6* (1.05M), overstating
     // the Codex window like any unlisted sibling would.
@@ -465,6 +475,15 @@ export const PROVIDER_CAPABILITIES = {
     // (the API model is 1.05M; Codex caps the default window like its siblings).
     "gpt-6.1-terra":             { vision: true, reasoning: true, search: true, thinkingFormat: "openai", contextWindow: 500000, maxOutput: 128000 },
     "gpt-6-luna":                { vision: true, reasoning: true, search: true, thinkingFormat: "openai", contextWindow: 272000, maxOutput: 128000 },
+    // GPT 6.2 (upstream 374e17b8) shipped without rows, so it fell through to the
+    // *gpt-6* pattern exactly like gpt-6.1-sol did — the same 1.05M overstatement
+    // the row above exists to prevent, which budgets history 4x over the real Codex
+    // window and ends the turn in an upstream 400. Codex caps the default window
+    // like its siblings, so they take the 272k default until codex-rs publishes theirs.
+    "gpt-6.2-sol":               { vision: true, reasoning: true, search: true, thinkingFormat: "openai", contextWindow: 272000, maxOutput: 128000 },
+    "gpt-6.2-astra":             { vision: true, reasoning: true, search: true, thinkingFormat: "openai", contextWindow: 272000, maxOutput: 128000 },
+    "gpt-6.2-sol[1m]":           CODEX_EXTENDED_CAPS,
+    "gpt-6.2-astra[1m]":         CODEX_EXTENDED_CAPS,
     "gpt-6-astra[1m]":           CODEX_EXTENDED_CAPS,
     "gpt-6-sol[1m]":             CODEX_EXTENDED_CAPS,
     "gpt-6-luna[1m]":            CODEX_EXTENDED_CAPS,
@@ -580,6 +599,10 @@ export const PROVIDER_CAPABILITIES = {
   },
   // Alibaba Token Plan — same infrastructure as QwenCloud, same model specs.
   "alitp-intl": {
+    // `auto` routes server-side to the account's default model. Without a row it fell
+    // through to the generic defaults (reasoning:false, 200k), which silently strips
+    // a client's thinking params and trims history far below the real window.
+    "auto":               { vision: true, videoInput: true, reasoning: true, thinkingFormat: "qwen", contextWindow: 1000000, maxOutput: 131072 },
     "qwen4-max":         { vision: true, videoInput: true, reasoning: true, thinkingFormat: "qwen", contextWindow: 1000000, maxOutput: 393216 },
     "qwen4-max-preview": { vision: true, videoInput: true, reasoning: true, thinkingFormat: "qwen", contextWindow: 1000000, maxOutput: 393216 },
     "qwen3.8-max":       { vision: true, videoInput: true, reasoning: true, thinkingFormat: "qwen", contextWindow: 1000000, maxOutput: 131072 },
@@ -592,6 +615,9 @@ export const PROVIDER_CAPABILITIES = {
   // Qwen3.8 lines (Qwen4 Max: 393K output, text+image+video in; others: 131K out),
   // while the generic *qwen* patterns cap at 262K/65K.
   "qwencloud": {
+    // `auto` routes server-side to the account's default model — same gap as the
+    // alitp-intl row above: no entry meant reasoning:false and a 200k window.
+    "auto":               { vision: true, videoInput: true, reasoning: true, thinkingFormat: "qwen", contextWindow: 1000000, maxOutput: 131072 },
     "qwen4-max":         { vision: true, videoInput: true, reasoning: true, thinkingFormat: "qwen", contextWindow: 1000000, maxOutput: 393216 },
     "qwen4-max-preview": { vision: true, videoInput: true, reasoning: true, thinkingFormat: "qwen", contextWindow: 1000000, maxOutput: 393216 },
     "qwen3.8-max":       { vision: true, videoInput: true, reasoning: true, thinkingFormat: "qwen", contextWindow: 1000000, maxOutput: 131072 },
