@@ -13,7 +13,7 @@ async function getCliToken() {
   return cachedCliToken;
 }
 
-async function hasValidCliToken(request) {
+export async function hasValidCliToken(request) {
   const token = request.headers.get(CLI_TOKEN_HEADER);
   if (!token) return false;
   return token === await getCliToken();
@@ -90,6 +90,13 @@ const LOCAL_ONLY_PATHS = [
   // them it stays out of ALWAYS_PROTECTED: it is the only way to connect a 妙手
   // account, so it has to work with requireLogin=false (loopback + local Origin).
   "/api/oauth/miaoshou/auto-import",
+  // Same shape as the four above: both read a credential file from the host and put
+  // the live secret in the JSON body (~/.commandcode/auth.json → apiKey; MiMo
+  // auth.json + cookie DB → apiKey + passToken). Not in ALWAYS_PROTECTED so they keep
+  // working in the documented requireLogin=false mode, which the daemon defaults to on
+  // 0.0.0.0 — without this entry a LAN peer could POST here and collect host CLI keys.
+  "/api/oauth/commandcode/auto-import",
+  "/api/oauth/xiaomi-mimo/auto-import",
   "/api/oauth/minimax-code/lease",
   "/api/oauth/minimax-code-global/lease",
   "/api/auth/reset-password",

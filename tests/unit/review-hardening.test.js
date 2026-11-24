@@ -11,11 +11,18 @@
  *  - a fresh-socket retry behind a proxy really gets a new connection;
  *  - the TLS fallback warning does not echo the URL (Gemini lanes carry the key
  *    in the query);
- *  - the capability windows/thinking levels the review restored.
+ *  - the capability windows/thinking levels the review restored;
+ *  - oauth auto-import routes staying behind the loopback-only list, and the CLI token
+ *    being compared rather than merely present.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync, existsSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+
+// What getConsistentMachineId(CLI_TOKEN_SALT) yields on the machine under test; the
+// guard compares against this, so only this exact value may pass.
+const REAL_CLI_TOKEN = "machine-derived-token";
 
 // ─── Kiro: region must not be able to move the bearer-token host ────────────
 
@@ -198,5 +205,58 @@ describe("capability windows the review restored", () => {
   it("the codex table carries gpt-6.1-sol exactly once", () => {
     const src = readFileSync(fileURLToPath(new URL("../../open-sse/providers/capabilities.js", import.meta.url)), "utf8");
     expect((src.match(/"gpt-6\.1-sol":/g) || []).length).toBe(1);
+  });
+});
+
+// ─── Boundary: routes that read host credentials must stay loopback-only ────
+
+describe("host-credential import boundary", () => {
+  function sourceOf(rel) {
+    return readFileSync(fileURLToPath(new URL(rel, import.meta.url)), "utf8");
+  }
+
+  function localOnlyPaths() {
+    const block = sourceOf("../../src/dashboardGuard.js").match(/const LOCAL_ONLY_PATHS = \[([\s\S]*?)\];/)[1];
+    return [...block.matchAll(/"(\/api\/[^"]+)"/g)].map((m) => m[1]);
+  }
+
+  function autoImportRoutes() {
+    const base = fileURLToPath(new URL("../../src/app/api/oauth/", import.meta.url));
+    return readdirSync(base)
+      .filter((p) => existsSync(join(base, p, "auto-import", "route.js")))
+      .map((p) => `/api/oauth/${p}/auto-import`)
+      .sort();
+  }
+
+  it("lists every oauth auto-import route, including ones a merge adds later", () => {
+    // Each of these reads a credential file/keychain from the host and returns the live
+    // secret in the body, so the daemon's default 0.0.0.0 bind would expose it to any LAN
+    // peer in the documented requireLogin=false mode.
+    const listed = localOnlyPaths();
+    const routes = autoImportRoutes();
+    expect(routes.length).toBeGreaterThanOrEqual(6);
+    for (const route of routes) expect(listed).toContain(route);
+  });
+
+  it("rejects a forged x-9r-cli-token instead of trusting its presence", async () => {
+    vi.resetModules();
+    vi.doMock("next/server", () => ({ NextResponse: { json: () => null, next: () => null } }));
+    vi.doMock("@/lib/localDb", () => ({ getSettings: async () => null, validateApiKey: async () => false }));
+    vi.doMock("@/lib/auth/dashboardSession", () => ({ verifyDashboardAuthToken: async () => false }));
+    vi.doMock("@/lib/auth/trustedPeer", () => ({ hasTrustedPeerHeaders: () => false }));
+    vi.doMock("@/shared/utils/machineId", () => ({ getConsistentMachineId: async () => REAL_CLI_TOKEN }));
+
+    const { hasValidCliToken } = await import("../../src/dashboardGuard.js");
+    const requestWith = (value) => ({ headers: { get: () => value } });
+
+    expect(await hasValidCliToken(requestWith(REAL_CLI_TOKEN))).toBe(true);
+    expect(await hasValidCliToken(requestWith("attacker-guess"))).toBe(false);
+    expect(await hasValidCliToken(requestWith(null))).toBe(false);
+  });
+
+  it("the database export route proves the token, not its presence", () => {
+    const src = sourceOf("../../src/app/api/settings/database/route.js");
+    expect(src).not.toContain("x-9r-cli-token");
+    expect(src).toContain("hasValidCliToken(request)");
   });
 });
