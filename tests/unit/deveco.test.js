@@ -330,6 +330,7 @@ describe("DevEco auth chain", () => {
     expect(new URL(url).searchParams.get("tempToken")).toBe("TEMP");
     expect(new URL(url).searchParams.get("appid")).toBe("1008");
     expect(init.method).toBe("GET");
+    expect(init.signal).toBeInstanceOf(AbortSignal);
     expect(proxyOptions).toBeNull();
     vi.restoreAllMocks();
   });

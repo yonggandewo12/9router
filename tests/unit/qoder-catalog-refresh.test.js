@@ -94,6 +94,42 @@ describe("scene-union catalog parsing", () => {
   });
 });
 
+describe("catalog request coalescing", () => {
+  it("exchanges one PAT once for concurrent cold catalog callers", async () => {
+    const pat = `pt-coalesce-${Date.now()}-${Math.random()}`;
+    proxyAwareFetch.mockImplementation(async (url) => {
+      if (String(url).includes("/jobToken/exchange")) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        return jsonResponse({ token: "jt-coalesced", expires_in: 3600 });
+      }
+      if (String(url).includes("/userinfo")) return jsonResponse({ id: "pat-user" });
+      if (String(url).includes("/model/list")) return jsonResponse({ chat: [{ key: "auto", enable: true }] });
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+    const credential = { provider: "qoder", apiKey: pat };
+    const [a, b] = await Promise.all([
+      resolveQoderModels(credential),
+      resolveQoderModels(credential),
+    ]);
+    expect(a).toBe(b);
+    const calls = proxyAwareFetch.mock.calls.map(([url]) => String(url));
+    expect(calls.filter((url) => url.includes("/jobToken/exchange"))).toHaveLength(1);
+    expect(calls.filter((url) => url.includes("/userinfo"))).toHaveLength(1);
+    expect(calls.filter((url) => url.includes("/model/list"))).toHaveLength(1);
+  });
+
+  it("shares one fresh catalog request between concurrent forced refreshes", async () => {
+    proxyAwareFetch.mockResolvedValue(jsonResponse({ chat: [{ key: "auto", enable: true }] }));
+    const credential = creds();
+    await resolveQoderModels(credential);
+    await Promise.all([
+      resolveQoderModels(credential, { forceRefresh: true }),
+      resolveQoderModels(credential, { forceRefresh: true }),
+    ]);
+    expect(proxyAwareFetch.mock.calls.filter(([url]) => String(url).includes("/model/list"))).toHaveLength(2);
+  });
+});
+
 describe("catalog auth failures", () => {
   it.each([401, 403])("throws QoderAuthError on HTTP %i (expired login)", async (status) => {
     proxyAwareFetch.mockResolvedValue(jsonResponse({ code: "105", message: "Login expired" }, status));

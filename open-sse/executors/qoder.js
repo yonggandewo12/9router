@@ -548,6 +548,7 @@ async function wrapQoderSSE(response, model, log = null) {
   const upstreamDrained = peek.upstreamDone === true;
   const encoder = new TextEncoder();
   let doneEmitted = false;
+  let closed = false;
   const coalescer = createQoderSseCoalescer({ model, encoder, sseDone: SSE_DONE });
 
   const syncDone = () => {
@@ -634,34 +635,24 @@ async function wrapQoderSSE(response, model, log = null) {
   };
 
   const stream = new ReadableStream({
-    // Use start()+loop (not pull): a pull that buffers a partial line without
-    // enqueueing would never be re-invoked, hanging consumers like .text().
-    async start(controller) {
+    // Pull-driven: read only when the downstream consumer asks for more. A
+    // start()-loop enqueues the whole generation regardless of client speed,
+    // turning a slow HTTP reader into an unbounded in-memory response buffer.
+    async pull(controller) {
+      if (closed) return;
       try {
-        // Drain whatever the peek already pulled off the socket first.
-        let nlSeed;
-        while ((nlSeed = buffer.indexOf("\n")) !== -1) {
-          const line = buffer.slice(0, nlSeed);
-          buffer = buffer.slice(nlSeed + 1);
-          processLine(line, controller);
-          if (doneEmitted) {
-            await reader.cancel().catch(() => {});
-            controller.close();
-            return;
+        while (!closed && !doneEmitted) {
+          let nl;
+          while ((nl = buffer.indexOf("\n")) !== -1) {
+            const line = buffer.slice(0, nl);
+            buffer = buffer.slice(nl + 1);
+            processLine(line, controller);
+            if (doneEmitted) break;
+            if (controller.desiredSize <= 0) return;
           }
-        }
-        if (upstreamDrained) {
-          // Peek hit end-of-stream: flush any trailing partial line.
-          buffer += decoder.decode();
-          if (buffer.length > 0) {
-            processLine(buffer, controller);
-            buffer = "";
-          }
-        }
+          if (doneEmitted) break;
 
-        while (!doneEmitted && !upstreamDrained) {
-          const { done, value } = await reader.read();
-          if (done) {
+          if (upstreamDrained) {
             buffer += decoder.decode();
             if (buffer.length > 0) {
               processLine(buffer, controller);
@@ -670,34 +661,33 @@ async function wrapQoderSSE(response, model, log = null) {
             break;
           }
 
-          buffer += decoder.decode(value, { stream: true });
-          let nl;
-          while ((nl = buffer.indexOf("\n")) !== -1) {
-            const line = buffer.slice(0, nl);
-            buffer = buffer.slice(nl + 1);
-            processLine(line, controller);
-            if (doneEmitted) {
-              // Terminal frame received — drop upstream keepalive and end.
-              await reader.cancel().catch(() => {});
-              controller.close();
-              return;
-            }
+          const { done, value } = await reader.read();
+          if (done) {
+            upstreamDrained = true;
+            buffer += decoder.decode();
+            continue;
           }
+          buffer += decoder.decode(value, { stream: true });
         }
       } catch {
-        // fall through to terminal [DONE] + close
-      } finally {
-        if (!doneEmitted) {
-          try {
-            coalescer.flush(controller);
-            doneEmitted = true;
-          } catch { /* already closed */ }
-        }
-        try { controller.close(); } catch { /* already closed */ }
+        // Preserve the existing fail-open stream termination: flush whatever
+        // complete content was already decoded, then end the response.
+      }
+
+      if (!doneEmitted) {
+        try {
+          coalescer.flush(controller);
+          doneEmitted = true;
+        } catch { /* already closed */ }
+      }
+      if (doneEmitted && !closed) {
+        closed = true;
         await reader.cancel().catch(() => {});
+        try { controller.close(); } catch { /* already closed */ }
       }
     },
     cancel() {
+      closed = true;
       return reader.cancel().catch(() => {});
     },
   });
@@ -962,9 +952,6 @@ export class QoderExecutor extends BaseExecutor {
         const reconstructed = new Response(
           new ReadableStream({
             start(controller) {
-              // The consumer may close or cancel before we finish pumping (it
-              // stops at the terminal frame), so every controller call has to
-              // be guarded — close() twice throws ERR_INVALID_STATE.
               let closed = false;
               const finish = () => {
                 if (closed) return;
@@ -984,20 +971,19 @@ export class QoderExecutor extends BaseExecutor {
 
               const enc = new TextEncoder();
               if (peek.consumed && !push(enc.encode(peek.consumed))) return;
-              if (peek.upstreamDone) {
-                finish();
-                return;
+              if (peek.upstreamDone) finish();
+            },
+            async pull(controller) {
+              try {
+                const { done, value } = await reader.read();
+                if (done) {
+                  try { controller.close(); } catch { /* already closed */ }
+                  return;
+                }
+                controller.enqueue(value);
+              } catch {
+                try { controller.close(); } catch { /* already closed */ }
               }
-              // Forward the remainder untouched.
-              const pump = () => {
-                if (closed) return;
-                reader.read().then(({ done, value }) => {
-                  if (done) { finish(); return; }
-                  if (!push(value)) return;
-                  pump();
-                }).catch(() => finish());
-              };
-              pump();
             },
             cancel() {
               return reader.cancel().catch(() => {});
@@ -1009,6 +995,10 @@ export class QoderExecutor extends BaseExecutor {
         return { response: wrapped, url: sent.url, headers: sent.headers, transformedBody: sent.transformedBody };
       }
 
+      // The queued response will never be consumed. Release its socket before
+      // polling/sleeping/replaying, otherwise every queue turn leaks one upstream
+      // connection until GC and a long wait holds the pool's slots indefinitely.
+      await reader.cancel().catch(() => {});
       lastQueueInfo = queueInfo;
       const waitedMs = Date.now() - waitStartedAt;
       if (waitedMs >= maxQueueWaitMs) {

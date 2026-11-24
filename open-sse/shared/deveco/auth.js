@@ -14,6 +14,7 @@ export const DEVECO_APP_ID = "1008";
 export const DEVECO_VERSION = "1.0.0";
 export const DEVECO_SITE = "CN";
 export const DEVECO_TOKEN_TTL_MS = 1800000;
+const AUTH_REQUEST_TIMEOUT_MS = 15_000;
 
 const AUTHORIZE_PATH = "console/DevEcoIDE/apply";
 const TEMP_TOKEN_CHECK_PATH = "authrouter/auth/api/temptoken/check";
@@ -34,7 +35,11 @@ async function getText(url, { headers = {}, params = {}, proxyOptions = null } =
   for (const [k, v] of Object.entries(params)) u.searchParams.set(k, v);
   // proxyAwareFetch takes proxyOptions as its THIRD argument (dispatcher objects
   // smuggled into the RequestInit are ignored → the connection proxy pool dies).
-  const res = await proxyAwareFetch(u.toString(), { method: "GET", headers }, proxyOptions);
+  const res = await proxyAwareFetch(u.toString(), {
+    method: "GET",
+    headers,
+    signal: AbortSignal.timeout(AUTH_REQUEST_TIMEOUT_MS),
+  }, proxyOptions);
   const text = await res.text().catch(() => "");
   if (!res.ok) {
     const err = new Error(`DevEco auth error ${res.status}: ${text.slice(0, 200)}`);

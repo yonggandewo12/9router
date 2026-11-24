@@ -13,6 +13,7 @@ import { shouldRefreshCredentials, withCredentialRefreshLock } from "../../servi
 export const CODEARTS_AGENT_ID = "a8bcb36232554267a5142361cc25a393";
 
 const CATALOG_CACHE_TTL_MS = 10 * 60 * 1000;
+const CONTROL_PLANE_TIMEOUT_MS = 20_000;
 // Keyed by the temporary access key id, which rotates hourly, so a stale entry
 // can never outlive its own credentials — but the keys do pile up across logins.
 const catalogCache = new Map();
@@ -44,10 +45,10 @@ export function codeartsKeys(credentials) {
  * Sign and send one CodeArts request. `body` must be the exact string written
  * to the wire — the payload hash covers it.
  */
-export async function codeartsSignedFetch({ credentials, method, url, body = null, headers = {}, proxyOptions = null }) {
+export async function codeartsSignedFetch({ credentials, method, url, body = null, headers = {}, proxyOptions = null, signal = null }) {
   const keys = codeartsKeys(credentials);
   const signed = signHuaweiRequest({ ...keys, method, url, body, headers: { ...headers } });
-  const options = { method, headers: signed };
+  const options = { method, headers: signed, signal: signal || AbortSignal.timeout(CONTROL_PLANE_TIMEOUT_MS) };
   if (body != null) options.body = body;
   return proxyAwareFetch(url, options, proxyOptions);
 }

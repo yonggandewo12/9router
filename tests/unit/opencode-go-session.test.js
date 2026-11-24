@@ -70,6 +70,20 @@ describe("OpenCode Go x-opencode-session", () => {
     expect(prepared._opencodeGoSession).toBe("native-session-a");
   });
 
+  it("does not inspect the request body when a native session is present", () => {
+    const executor = getExecutor("opencode-go");
+    const body = {};
+    Object.defineProperty(body, "messages", {
+      get() { throw new Error("body inspection should be skipped"); },
+    });
+    const prepared = executor.prepareRequestCredentials({
+      body,
+      credentials: makeCredentials({ rawHeaders: { "x-opencode-session": "native-session-a" } }),
+      providerSessionId: "conversation-a",
+    });
+    expect(prepared._opencodeGoSession).toBe("native-session-a");
+  });
+
   it("ignores an oversized native session and uses the translated identity", () => {
     const executor = getExecutor("opencode-go");
     const { prepared } = prepare(executor, {

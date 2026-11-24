@@ -369,6 +369,22 @@ describe("codebuddy 11150 self-healing", () => {
     expect(requiresReasoningEffort("codebuddy-cn", "glm-5.1")).toBe(true);
   });
 
+  it("clears a stale reasoning requirement when a forced bare probe succeeds", async () => {
+    let requireEffort = true;
+    const fn = async (url, opts = {}) => {
+      const body = JSON.parse(opts.body || "{}");
+      if (url.endsWith("/v3/config")) return { ok: true, status: 200, json: async () => payload([row({ id: "dynamic-effort" })]), text: async () => "" };
+      if (requireEffort && !body.reasoning_effort) return { ok: false, status: 400, json: async () => ({}), text: async () => `data: ${JSON.stringify({ code: 11150 })}` };
+      return chatReply(body.model);
+    };
+    await verified({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: fn });
+    expect(requiresReasoningEffort("codebuddy-cn", "dynamic-effort")).toBe(true);
+
+    requireEffort = false;
+    await resolveCodeBuddyModels({ providerId: "codebuddy-cn", accessToken: "T", fetchFn: fn, forceRefresh: true, wait: true });
+    expect(requiresReasoningEffort("codebuddy-cn", "dynamic-effort")).toBe(false);
+  });
+
   it("drops the id when even an effort does not help", async () => {
     const fn = async (url) => (url.endsWith("/v3/config")
       ? { ok: true, status: 200, json: async () => payload([row({ id: "broken" })]), text: async () => "" }

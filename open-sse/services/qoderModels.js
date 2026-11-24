@@ -65,6 +65,7 @@ export function isQoderPat(token) {
 
 /** @type {Map<string, { accessToken: string, userId: string, expiresAt: number }>} */
 const patJobCache = new Map();
+const patJobInflight = new Map();
 
 /** @type {Map<string, { expiresAt: number, models: any[], rawConfigs: Map<string, object>, fetched: boolean }>} */
 const catalogCache = new Map();
@@ -94,7 +95,7 @@ async function exchangeJobToken(pat, proxyOptions = null, signal = null, region 
         "Cosy-ClientType": QODER_CLIENT_TYPE,
       },
       body: JSON.stringify({ personal_token: pat }),
-      signal,
+      signal: signal || AbortSignal.timeout(10_000),
     },
     proxyOptions,
   );
@@ -130,7 +131,7 @@ async function fetchUserIdForJobToken(jobToken, proxyOptions = null, signal = nu
           Accept: "application/json",
           "User-Agent": "qodercli/1.0.0",
         },
-        signal,
+        signal: signal || AbortSignal.timeout(10_000),
       },
       proxyOptions,
     );
@@ -146,15 +147,27 @@ async function fetchUserIdForJobToken(jobToken, proxyOptions = null, signal = nu
  * Resolve a PAT to a job-token credential, cached per-PAT-per-region.
  */
 async function resolvePatCredential(pat, proxyOptions = null, signal = null, region = "intl") {
-  const cacheKey = `${region}:${pat}`;
+  const cacheKey = `${region}:${createHash("sha256").update(pat).digest("hex")}`;
   const cached = patJobCache.get(cacheKey);
   if (cached && cached.expiresAt - Date.now() > PAT_REFRESH_BUFFER_MS) return cached;
+  const running = patJobInflight.get(cacheKey);
+  if (running) return running;
 
-  const { jobToken, expiresAt } = await exchangeJobToken(pat, proxyOptions, signal, region);
-  const userId = await fetchUserIdForJobToken(jobToken, proxyOptions, signal, region);
-  const resolved = { accessToken: jobToken, userId, expiresAt };
-  patJobCache.set(cacheKey, resolved);
-  return resolved;
+  const task = (async () => {
+    const { jobToken, expiresAt } = await exchangeJobToken(pat, proxyOptions, signal, region);
+    const userId = await fetchUserIdForJobToken(jobToken, proxyOptions, signal, region);
+    const resolved = { accessToken: jobToken, userId, expiresAt };
+    const now = Date.now();
+    for (const [key, entry] of patJobCache) {
+      if (entry.expiresAt <= now) patJobCache.delete(key);
+    }
+    patJobCache.set(cacheKey, resolved);
+    return resolved;
+  })().finally(() => {
+    if (patJobInflight.get(cacheKey) === task) patJobInflight.delete(cacheKey);
+  });
+  patJobInflight.set(cacheKey, task);
+  return task;
 }
 
 /**
@@ -358,12 +371,10 @@ export async function resolveQoderModels(credentials, options = {}) {
     }
   }
 
-  // Coalesce concurrent misses on the same credential into one upstream call.
-  // forceRefresh callers still get their own fetch (they wanted fresh data).
+  // Coalesce concurrent misses and explicit refreshes: a second caller asking
+  // for fresh data can share the fresh request already in flight.
   const existing = inflight.get(key);
-  if (existing && !options.forceRefresh) {
-    return existing;
-  }
+  if (existing) return existing;
 
   const fetchPromise = (async () => {
     const fetched = await fetchQoderCatalogRaw(resolved, options.signal, options.proxyOptions, region);
@@ -374,6 +385,10 @@ export async function resolveQoderModels(credentials, options = {}) {
       rawConfigs: fetched.rawConfigs,
       fetched: true,
     };
+    const now = Date.now();
+    for (const [cacheKey, cached] of catalogCache) {
+      if (cached.expiresAt <= now) catalogCache.delete(cacheKey);
+    }
     catalogCache.set(key, entry);
     return entry;
   })();

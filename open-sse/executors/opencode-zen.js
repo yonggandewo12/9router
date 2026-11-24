@@ -202,8 +202,9 @@ function normalizeResponsesTools(body) {
   });
   if (body.tool_choice && typeof body.tool_choice === "object" && !Array.isArray(body.tool_choice)) {
     if (body.tool_choice.type === "function") {
-      const n = typeof body.tool_choice.name === "string" ? body.tool_choice.name.trim() : "";
+      const n = typeof body.tool_choice.name === "string" ? body.tool_choice.name.trim().slice(0, MAX_TOOL_NAME_LEN) : "";
       if (!n || !validNames.has(n)) delete body.tool_choice;
+      else body.tool_choice.name = n;
     }
   }
 }
@@ -251,6 +252,7 @@ export class OpenCodeZenExecutor extends DefaultExecutor {
   prepareRequestCredentials({ body, credentials, providerSessionId, clientTool } = {}) {
     const sourceCredentials = credentials || {};
     const native = nativeSession(sourceCredentials.rawHeaders);
+    if (native) return { ...sourceCredentials, [SESSION_FIELD]: native };
     const resolved = normalizeSession(providerSessionId) || resolveSessionId({
       headers: sourceCredentials.rawHeaders,
       body,
@@ -260,7 +262,7 @@ export class OpenCodeZenExecutor extends DefaultExecutor {
 
     return {
       ...sourceCredentials,
-      [SESSION_FIELD]: native || translatedSession(resolved, clientTool),
+      [SESSION_FIELD]: translatedSession(resolved, clientTool),
     };
   }
 

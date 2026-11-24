@@ -237,7 +237,8 @@ const buildCodeBuddyResolver = (providerId, refreshFn) => async (connection) => 
 // region's catalog endpoint, and the ids keep the provider prefix.
 function buildQoderModelsResolver(providerId) {
   return {
-    customResolver: async (connection) => {
+    customResolver: async (connection, { forceRefresh = false } = {}) => {
+      const proxyOptions = await resolveConnectionProxyConfig(connection.providerSpecificData || {});
       const credentials = {
         provider: providerId,
         accessToken: connection.accessToken,
@@ -249,7 +250,7 @@ function buildQoderModelsResolver(providerId) {
       };
       let warning;
       try {
-        const result = await resolveQoderModels(credentials, { forceRefresh: true });
+        const result = await resolveQoderModels(credentials, { forceRefresh, proxyOptions });
         if (result?.models?.length) {
           return {
             models: result.models.map((m) => ({
@@ -622,10 +623,10 @@ export const PROVIDER_MODELS_CONFIG = {
   // Trae Enterprise publishes a per-tenant catalog (admins add their own
   // models), so the static registry list is only a fallback.
   "trae-enterprise": {
-    customResolver: async (connection) => {
+    customResolver: async (connection, { forceRefresh = false } = {}) => {
       // Explicit dashboard refresh: bypass the catalog cache so a model an admin
       // just published shows up in this click.
-      const result = await resolveTraeEnterpriseModels({ accessToken: connection.accessToken }, { forceRefresh: true });
+      const result = await resolveTraeEnterpriseModels({ accessToken: connection.accessToken }, { forceRefresh });
       if (result?.models?.length) return { models: result.models };
       return {
         models: getStaticProviderModels("trae-enterprise"),
@@ -634,14 +635,13 @@ export const PROVIDER_MODELS_CONFIG = {
     },
   },
   codearts: {
-    customResolver: async (connection) => {
+    customResolver: async (connection, { forceRefresh = false } = {}) => {
       const proxy = await resolveConnectionProxyConfig(connection.providerSpecificData || {});
       let result = null;
       try {
-        // The dashboard button is an explicit refresh: skip the catalog cache so
-        // a model Huawei just granted this account appears in this click.
+        // Only the explicit dashboard refresh bypasses the 10-minute catalog cache.
         result = await resolveCodeartsModels(connection, {
-          forceRefresh: true,
+          forceRefresh,
           log: console,
           proxyOptions: {
             connectionProxyEnabled: proxy.connectionProxyEnabled === true,
@@ -738,6 +738,7 @@ export const PROVIDER_MODELS_CONFIG = {
 export async function GET(request, { params }) {
   try {
     const { id } = await params;
+    const forceRefresh = new URL(request.url).searchParams.get("forceRefresh") === "1";
     const connection = await getProviderConnectionById(id);
 
     if (!connection) {
@@ -828,7 +829,7 @@ export async function GET(request, { params }) {
 
     // Config-driven custom resolver path (OAuth refresh, non-OpenAI shape, etc.)
     if (typeof config.customResolver === "function") {
-      const result = await config.customResolver(connection);
+      const result = await config.customResolver(connection, { forceRefresh });
       if (result.error) {
         return NextResponse.json({ error: result.error }, { status: result.status || 500 });
       }

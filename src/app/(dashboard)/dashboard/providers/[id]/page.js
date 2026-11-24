@@ -655,7 +655,7 @@ export default function ProviderDetailPage() {
 
     setImportingLiveModels(true);
     try {
-      const res = await fetch(`/api/providers/${activeConnection.id}/models`);
+      const res = await fetch(`/api/providers/${activeConnection.id}/models?forceRefresh=1`);
       const data = await res.json();
       if (!res.ok) {
         alert(data.error || translate("Failed to fetch models"));
@@ -734,7 +734,7 @@ export default function ProviderDetailPage() {
     }
     setImportingClineModels(true);
     try {
-      const res = await fetch(`/api/providers/${activeConnection.id}/models`);
+      const res = await fetch(`/api/providers/${activeConnection.id}/models?forceRefresh=1`);
       const data = await res.json();
       if (!res.ok) {
         alert(data.error || translate("Failed to fetch models"));

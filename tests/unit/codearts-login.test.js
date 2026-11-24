@@ -21,6 +21,7 @@ function mockFetch(handler) {
         method: options.method || "GET",
         headers: Object.fromEntries(new Headers(options.headers || {}).entries()),
         body: typeof options.body === "string" ? options.body : null,
+        hasSignal: options.signal instanceof AbortSignal,
       };
       calls.push(record);
       return handler(record, calls.length);
@@ -100,6 +101,7 @@ describe("CodeArts token exchange", () => {
 
     const exchange = calls.find((c) => c.url.endsWith("/v1/oauth2/tokens"));
     expect(exchange.method).toBe("POST");
+    expect(exchange.hasSignal).toBe(true);
     expect(exchange.headers["content-type"]).toBe("application/x-www-form-urlencoded");
     expect(Object.fromEntries(new URLSearchParams(exchange.body))).toEqual({
       client_id: "CodeArts_Tui",
@@ -117,6 +119,7 @@ describe("CodeArts token exchange", () => {
     // Identity lookup is signed with the fresh AK/SK.
     const whoami = calls.find((c) => c.url.endsWith("/snap-manager/v1/current/user"));
     expect(whoami.headers.authorization).toMatch(/^SDK-HMAC-SHA256 Access=AK, /);
+    expect(whoami.hasSignal).toBe(true);
 
     expect(tokens.accessToken).toBe("ST");
     expect(tokens.refreshToken).toBe("REFRESH-JWT");

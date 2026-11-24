@@ -25,6 +25,7 @@ import { resolveZedModels } from "open-sse/shared/zedAuth.js";
 import { resolveTraeEnterpriseModels } from "open-sse/shared/trae/enterprise.js";
 import { resolveCodeartsModels } from "open-sse/shared/codearts/api.js";
 import { updateProviderCredentials } from "@/sse/services/tokenRefresh";
+import { refreshCodebuddyToken, refreshCodebuddyIntlToken } from "open-sse/services/tokenRefresh/providers.js";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { capabilitiesFromServiceKind, getCapabilitiesForModel, aggregateComboCapabilities } from "open-sse/providers/capabilities.js";
 import { getThinkingLevels } from "open-sse/providers/thinkingLevels.js";
@@ -33,6 +34,7 @@ import { getThinkingLevels } from "open-sse/providers/thinkingLevels.js";
 // credentials carry the provider id so qoderModels picks the right region's
 // catalog endpoint.
 async function resolveQoderLiveModels(conn, provider) {
+  const proxyOptions = await resolveConnectionProxyConfig(conn.providerSpecificData || {});
   const result = await resolveQoderModels({
     provider,
     accessToken: conn.accessToken,
@@ -42,7 +44,8 @@ async function resolveQoderLiveModels(conn, provider) {
     refreshToken: conn.refreshToken,
     email: conn.email,
     displayName: conn.displayName,
-    providerSpecificData: conn.providerSpecificData || {}
+    providerSpecificData: conn.providerSpecificData || {},
+    proxyOptions,
   });
   // Visible + hidden (enable:false) catalog keys — chat routes all of them.
   const models = routableQoderModels(result);
@@ -56,7 +59,25 @@ async function resolveQoderLiveModels(conn, provider) {
 // yet are advertised while a background pass proves them. The service also publishes the
 // catalog into the live capability overlay, so the chat path uses the same numbers.
 async function resolveCodeBuddyLiveModels(providerId, conn) {
-  const result = await resolveCodeBuddyModels({ providerId, accessToken: conn.accessToken || conn.apiKey });
+  const proxyOptions = await resolveConnectionProxyConfig(conn.providerSpecificData || {});
+  const { proxyAwareFetch } = await import("open-sse/utils/proxyFetch.js");
+  const fetchFn = (url, options) => proxyAwareFetch(url, options, proxyOptions);
+  const run = (token) => resolveCodeBuddyModels({ providerId, accessToken: token, fetchFn });
+  let result = await run(conn.accessToken || conn.apiKey);
+  if (!result.models.length && /HTTP 40[13]/.test(result.warning || "")) {
+    const refresh = providerId === "codebuddy-cn" ? refreshCodebuddyToken : refreshCodebuddyIntlToken;
+    const refreshed = await refresh(conn.refreshToken, console, proxyOptions).catch(() => null);
+    if (refreshed?.accessToken) {
+      await updateProviderCredentials(conn.id, {
+        accessToken: refreshed.accessToken,
+        refreshToken: refreshed.refreshToken || conn.refreshToken,
+        expiresIn: refreshed.expiresIn,
+      });
+      conn.accessToken = refreshed.accessToken;
+      if (refreshed.refreshToken) conn.refreshToken = refreshed.refreshToken;
+      result = await run(refreshed.accessToken);
+    }
+  }
   return result.models.length ? { models: result.models } : null;
 }
 

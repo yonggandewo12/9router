@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { PROVIDER_MODELS, getModelSupportedFormats, getModelTargetFormat } from "../../open-sse/config/providerModels.js";
 import { PROVIDERS } from "../../open-sse/config/providers.js";
 import { resolveTransport } from "../../open-sse/services/provider.js";
+import { OpenCodeGoExecutor } from "../../open-sse/executors/opencode-go.js";
 
 // Chat-only models (no /messages, no /responses support on opencode-go)
 const CHAT_ONLY = ["glm-5.3", "glm-5.2", "glm-5.1", "glm-5", "kimi-k2.7-code", "kimi-k2.6", "kimi-k2.5", "kimi-k3", "kimi-k3.1-pro",
@@ -63,6 +64,20 @@ describe("OpenCode Go family fallback (unknown/passthrough ids)", () => {
   it("curated entries win over the family regex", () => {
     expect(getModelSupportedFormats("opencode-go", "deepseek-flash")).toEqual(["openai"]);
     expect(getModelSupportedFormats("opencode-go", "deepseek-v4-pro")).toEqual(["openai", "claude", "openai-responses"]);
+  });
+});
+
+describe("OpenCode Go Responses tool boundary", () => {
+  it("truncates the forced tool name exactly like the declaration", () => {
+    const longName = `tool_${"x".repeat(200)}`;
+    const out = new OpenCodeGoExecutor().transformRequest("grok-4.7", {
+      model: "grok-4.7",
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
+      tools: [{ type: "function", name: longName, parameters: { type: "object", properties: {} } }],
+      tool_choice: { type: "function", name: longName },
+    }, true, {});
+    expect(out.tools[0].name).toHaveLength(128);
+    expect(out.tool_choice.name).toBe(out.tools[0].name);
   });
 });
 

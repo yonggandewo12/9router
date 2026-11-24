@@ -351,6 +351,7 @@ async function probePending(providerId, store, pending, { token, baseUrl, header
     if (probe.answered) {
       store.set(model.id, { usable: true, reason: "", at: Date.now() });
       reportedDead.get(providerId)?.delete(model.id);
+      clearReasoningRequired(providerId, model.id);
     } else if (probe.code === "11150") {
       // 11150 is not a retirement: the id rejects a request that carries no
       // reasoning_effort. Retry once with "low" — the level probed safe on glm-5.1 and
@@ -411,6 +412,13 @@ function markReasoningRequired(providerId, modelId) {
   reasoningRequired.set(providerId, set);
 }
 
+function clearReasoningRequired(providerId, modelId) {
+  const set = reasoningRequired.get(providerId);
+  if (!set) return;
+  set.delete(modelId);
+  if (!set.size) reasoningRequired.delete(providerId);
+}
+
 /**
  * The floor both CodeBuddy executors apply on the way out: some ids 400 with code 11150
  * unless the request carries a reasoning_effort, so a client that asked for nothing would
@@ -468,7 +476,7 @@ export async function resolveCodeBuddyModels(options = {}) {
   // stops two tabs each paying for a pass; the probe itself is shared across modes through
   // `verifying`, so a poll that started it does not make the waiter pay twice.
   const mode = options.forceRefresh ? "force" : options.wait ? "wait" : "poll";
-  const key = `${providerId}|${options.accessToken || ""}|${mode}`;
+  const key = `${accountKey(providerId, options.accessToken)}|${mode}`;
   const running = inFlight.get(key);
   if (running) return running;
   const task = resolveCatalog(options).finally(() => inFlight.delete(key));

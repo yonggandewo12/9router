@@ -315,6 +315,7 @@ export async function getQoderUsage(accessToken, proxyOptions = null, providerId
           Authorization: `Bearer ${accessToken}`,
           Accept: "application/json",
         },
+        signal: AbortSignal.timeout(10_000),
       },
       proxyOptions,
     );

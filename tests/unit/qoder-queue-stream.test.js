@@ -13,7 +13,8 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
-import { QoderExecutor } from "../../open-sse/executors/qoder.js";
+import { QoderExecutor, __test__ } from "../../open-sse/executors/qoder.js";
+const { wrapQoderSSE } = __test__;
 
 const frame = (body, statusCodeValue = 200) =>
   `data: ${JSON.stringify({ statusCodeValue, body: JSON.stringify(body) })}\n\n`;
@@ -66,6 +67,31 @@ function reconstruct(consumed, reader, status = 200) {
     { status, headers: { "Content-Type": "text/event-stream" } },
   );
 }
+
+describe("Qoder SSE backpressure", () => {
+  it("does not drain the upstream before the downstream consumer reads", async () => {
+    let reads = 0;
+    let index = 0;
+    const chunks = Array.from({ length: 5 }, (_, i) =>
+      frame({ choices: [{ delta: { content: `chunk-${i}` } }] }),
+    );
+    const upstream = new Response(new ReadableStream({
+      pull(controller) {
+        reads++;
+        if (index >= chunks.length) controller.close();
+        else controller.enqueue(new TextEncoder().encode(chunks[index++]));
+      },
+    }), { status: 200, headers: { "Content-Type": "text/event-stream" } });
+
+    const wrapped = await wrapQoderSSE(upstream, "auto");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(reads).toBeLessThan(chunks.length);
+
+    const text = await wrapped.text();
+    expect(text).toContain("chunk-0");
+    expect(text).toContain("chunk-4");
+  });
+});
 
 describe("reconstructed queue stream", () => {
   it("closes once even when the consumer stops at the terminal frame", async () => {

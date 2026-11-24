@@ -25,6 +25,7 @@ export const CODEARTS_USER_AGENT = "codearts/26.9.3";
 // STS endpoint is region-scoped; cn-north-4 is what the CLI hardcodes.
 const TOKEN_PATH = "/v1/oauth2/tokens";
 const FALLBACK_TTL_MS = 60 * 60 * 1000;
+const AUTH_REQUEST_TIMEOUT_MS = 20_000;
 
 function b64urlJson(value) {
   return Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
@@ -123,6 +124,7 @@ async function postTokens(params, keyPair, { extraHeaders = null, proxyOptions =
       ...(extraHeaders || {}),
     },
     body: new URLSearchParams(params).toString(),
+    signal: AbortSignal.timeout(AUTH_REQUEST_TIMEOUT_MS),
   }, proxyOptions);
   const text = await res.text().catch(() => "");
   let payload = null;
@@ -208,6 +210,7 @@ export async function exchangeSecretForCredentials({ ticketId, secret, keyPair =
     const res = await proxyAwareFetch(url, {
       method: "GET",
       headers: { Accept: "application/json", "User-Agent": CODEARTS_USER_AGENT },
+      signal: AbortSignal.timeout(AUTH_REQUEST_TIMEOUT_MS),
     }, proxyOptions).catch((error) => { lastStatus = 0; console.log(`[CodeArts] ticket poll ${attempt}/${attempts} failed: ${error?.message || error}`); return null; });
     if (!res) continue;
     lastStatus = res.status;

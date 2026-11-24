@@ -38,6 +38,7 @@ export async function getOpenCodeZenUsage(apiKey = null, proxyOptions = null) {
           Authorization: `Bearer ${apiKey.trim()}`,
           Accept: "application/json",
         },
+        signal: AbortSignal.timeout(10_000),
       },
       proxyOptions,
     );

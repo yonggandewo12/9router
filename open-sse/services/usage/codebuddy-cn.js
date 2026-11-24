@@ -60,6 +60,7 @@ async function getCodeBuddyUsage(providerId, accessToken, apiKey, providerSpecif
         Accept: "application/json",
       },
       body: "{}",
+      signal: AbortSignal.timeout(10_000),
     }, proxyOptions);
 
     if (response.status === 401 || response.status === 403) {

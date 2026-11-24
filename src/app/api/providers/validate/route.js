@@ -15,6 +15,7 @@ import {
   isNousApiKeyAccepted,
 } from "open-sse/services/nous.js";
 import { normalizeProviderId } from "@/lib/providerNormalization";
+import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { hasWebIdentityProbe, fetchWebIdentity } from "open-sse/services/webIdentity.js";
 
 // Probe a webSearch/webFetch provider using its searchConfig/fetchConfig.
@@ -659,8 +660,9 @@ export async function POST(request) {
           // PAT (pt-...) needs the job-token exchange before it can sign
           // anything — the generic OpenAI-compat probe below can't validate it.
           try {
-            const resolved = await resolveQoderCredentials({ provider, apiKey, providerSpecificData }, null, AbortSignal.timeout(8000));
-            const result = await resolveQoderModels(resolved, { forceRefresh: true });
+            const proxyOptions = await resolveConnectionProxyConfig(providerSpecificData || {});
+            const resolved = await resolveQoderCredentials({ provider, apiKey, providerSpecificData }, proxyOptions, AbortSignal.timeout(8000));
+            const result = await resolveQoderModels(resolved, { forceRefresh: true, proxyOptions });
             isValid = !!result?.models?.length;
           } catch (err) {
             isValid = false;
