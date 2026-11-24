@@ -1,3 +1,24 @@
+# v0.6.40 (2026-11-24)
+
+Post-review fixes on top of v0.6.39 / upstream v0.5.123. Closes proxy/cache/resource bugs across CodeBuddy, Qoder, OpenCode, CodeArts and DevEco, and stops destroying legitimate long CodeBuddy CN system prompts.
+
+## Fixes
+
+- **CodeBuddy `/v1/models` now honors the connection proxy and refreshes expired tokens**: catalog GETs and model probes use `proxyAwareFetch`; a 401/403 performs one proxied token refresh, persists the rotated credentials and retries. The dashboard path already did this; the SDK-facing path now matches it.
+- **Qoder catalog and PAT validation now honor connection proxies**: dashboard, `/v1/models` and key validation pass the resolved proxy through PAT exchange, userinfo and catalog discovery. Dashboard refreshes bypass the catalog cache only on explicit `?forceRefresh=1`, not on every page open.
+- **Qoder PAT/catalog request storms are bounded**: concurrent PAT exchanges share one in-flight job-token + userinfo lookup, exchanges have a 10s deadline, PAT cache keys are hashed, expired job/catalog entries are pruned, and concurrent forced catalog refreshes join one fresh request.
+- **Qoder queue retries release refused responses**: the unread queued body is cancelled before status polling, sleeping or replaying. Both the reconstructed stream and SSE wrapper are pull-driven, so a slow downstream client no longer causes the whole generation to be buffered in memory.
+- **OpenCode Go/Zen hot paths**: a native `x-opencode-session` short-circuits request-body session inspection; Responses `tool_choice` names are truncated exactly like their tool declarations.
+- **CodeBuddy dynamic reasoning requirements self-clear**: when a later bare probe succeeds without `reasoning_effort`, the previously learned requirement is removed instead of forcing reasoning forever.
+- **Auth and usage calls have deadlines**: CodeArts/DevEco auth and control-plane requests, plus Qoder/CodeBuddy/OpenCode usage requests, now abort instead of hanging indefinitely.
+- **Provider baseline realigned**: qwencloud's Claude transport now records `anthropicVersion` and `claude-adaptive` thinking, closing the one-field `verify-providers.mjs` drift carried by v0.6.39.
+- **CodeBuddy CN preserves long system/developer prompts**: live probes showed prompt length is not the WAF signal — plain 1.5k/2.5k/5.2k prompts and typed blocks passed, while CLI identity markers repeatedly returned 400/11128. The executor now replaces only high-confidence identity phrases, preserves project rules, and retries once with a neutral prompt only after the known 11128 identity refusal. Error-body inspection is capped at 2s and the refused response is always released.
+
+## Verification
+
+- Live CodeBuddy CN through the real executor: long plain, short marker, long marker and typed marker all returned 200; project rules survived and no identity marker reached the wire.
+- Mutation checks: disabling sanitization failed 2 regression tests; disabling the 11128 fallback failed 1.
+- Full suite: 5457 passing / 0 failing (515 files); production build and changed-file lint pass.
 # v0.6.39 (2026-11-24)
 
 Upstream v0.5.123 merged in (34 upstream commits, 23 hand-resolved conflicts), then three rounds of deep review over the merged tree. The fork keeps its own pipelines, package names and 0.6.x version line; upstream's 0.5.x app version stays independent of it.
