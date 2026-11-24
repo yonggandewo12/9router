@@ -3,6 +3,95 @@ import { refreshCodebuddyToken } from "../services/tokenRefresh/providers.js";
 import { applyReasoningFloor, recordRetirement } from "../services/codebuddyModels.js";
 
 const PROVIDER_ID = "codebuddy-cn";
+const NEUTRAL_PROMPT = "You are a helpful AI assistant that helps with software engineering tasks.";
+const IDENTITY_REJECTION_PEEK_MS = 2000;
+const SYSTEM_ROLES = new Set(["system", "developer"]);
+
+// Tencent rejects CLI identity markers with 400/11128; replace only the phrase, preserving project rules.
+const AGENT_IDENTITY_REPLACEMENTS = [
+  [/you are claude code(?:\s*[,，]?\s*an(?:thropic|xthxropic)'?s\s+official\s+cli(?:\s+for\s+claude)?)?/gi, "You are an AI coding assistant."],
+  [/claude.?code[^.!?\n]{0,160}\bofficial\b[^.!?\n]{0,80}\bcli\b/gi, "the coding assistant"],
+  [/an(?:thropic|xthxropic)[^.!?\n]{0,120}\bofficial\b[^.!?\n]{0,80}\bcli\b/gi, "the coding assistant"],
+  [/you are\s+(?:cursor|windsurf|cline|aider|continue|copilot|cody)\b/gi, "You are an AI coding assistant"],
+  [/you are an?\s+(?:ai\s+)?(?:coding\s+|code\s+)?agent\b/gi, "You are an AI coding assistant"],
+  [/you are .{0,30}(?:powerful )?ai agent/gi, "You are an AI coding assistant"],
+  [/cc_entrypoint\s*=\s*(?:cli|vscode|jetbrains|gui)/gi, "client=generic"],
+  [/claude.?code[^.!?\n]{0,120}\bissues\b/gi, "the issue tracker"],
+  [/give feedback[^.!?\n]{0,120}\bclaude.?code\b/gi, "provide feedback"],
+  [/orchestration capabilities/gi, "task coordination capabilities"],
+  [/OhMyOpenCode/gi, "the coding assistant"],
+  [/<\/?(?:agent-identity|Role|Behavior_Instructions)>/gi, ""],
+];
+
+function sanitizePromptText(text) {
+  let out = text;
+  for (const [pattern, replacement] of AGENT_IDENTITY_REPLACEMENTS) out = out.replace(pattern, replacement);
+  return out;
+}
+
+export function sanitizeCodeBuddySystemPrompt(content) {
+  if (typeof content === "string") return sanitizePromptText(content);
+  if (Array.isArray(content)) {
+    let changed = false;
+    const blocks = content.map((block) => {
+      if (!block || typeof block !== "object" || typeof block.text !== "string") return block;
+      const text = sanitizePromptText(block.text);
+      if (text === block.text) return block;
+      changed = true;
+      return { ...block, text };
+    });
+    return changed ? blocks : content;
+  }
+  return content;
+}
+
+function isIdentityRejection(bodyText) {
+  if (!bodyText) return false;
+  try {
+    const data = JSON.parse(bodyText);
+    const message = String(data?.msg || data?.message || data?.error?.message || "");
+    return String(data?.code ?? "") === "11128"
+      && /unapproved channel|illegal api invocation|content filter|sensitive content|prompt injection/i.test(message);
+  } catch {
+    return false;
+  }
+}
+
+async function hasIdentityRejection(response) {
+  const clone = response.clone();
+  let timer = null;
+  let settled = false;
+  try {
+    const text = await Promise.race([
+      clone.text(),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("identity rejection peek timeout")), IDENTITY_REJECTION_PEEK_MS); }),
+    ]);
+    settled = true;
+    return isIdentityRejection(text);
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+    if (!settled) await clone.body?.cancel?.().catch?.(() => {});
+  }
+}
+
+function neutralSystemFallback(body) {
+  if (!Array.isArray(body?.messages)) return { body, changed: false };
+  let changed = false;
+  const messages = body.messages.map((message) => {
+    if (!SYSTEM_ROLES.has(message?.role)) return message;
+    const sanitized = sanitizeCodeBuddySystemPrompt(message.content);
+    const neutral = typeof message.content === "string"
+      ? NEUTRAL_PROMPT
+      : Array.isArray(message.content)
+        ? [{ type: "text", text: NEUTRAL_PROMPT }]
+        : message.content;
+    if (JSON.stringify(sanitized) !== JSON.stringify(neutral)) changed = true;
+    return { ...message, content: neutral };
+  });
+  return { body: changed ? { ...body, messages } : body, changed };
+}
 
 /**
  * CodeBuddyExecutor — talks to https://copilot.tencent.com/v2/chat/completions
@@ -29,36 +118,29 @@ export class CodeBuddyExecutor extends DefaultExecutor {
     return refreshCodebuddyToken(credentials.refreshToken, log, proxyOptions);
   }
 
+  async execute(args) {
+    const result = await super.execute(args);
+    if (result?.response?.status !== 400) return result;
+    if (!(await hasIdentityRejection(result.response))) return result;
+    const fallback = neutralSystemFallback(args?.body);
+    if (!fallback.changed) return result;
+    try {
+      return await super.execute({ ...args, body: fallback.body });
+    } finally {
+      await result.response.body?.cancel?.().catch?.(() => {});
+    }
+  }
+
   transformRequest(model, body, stream, credentials) {
     const transformed = super.transformRequest(model, body, stream, credentials);
     transformed.stream = true;
 
-    // Tencent's content filter flags CLI agent system prompts ("You are Claude
-    // Code, Anthropic's official CLI...") as prompt injection / sensitive content
-    // and rejects the whole request. Detect agent system prompts (length catch-all
-    // + identity-marker regex) and replace them with a neutral one, while leaving
-    // legitimate user system prompts untouched. content may be a string or typed
-    // blocks ([{type:"text",text}]) depending on the incoming client format, so
-    // flatten before matching and preserve the original shape on replacement.
-    const NEUTRAL_PROMPT = "You are a helpful AI assistant that helps with software engineering tasks.";
-    const AGENT_PATTERN = /you are claude code|claude.?code.+official.+cli|anthropic.+official.+cli|anxthxropic.+official.+cli|you are (?:cursor|windsurf|cline|aider|continue|copilot|cody)|you are an? (?:ai )?(?:coding |code )?agent|cc_entrypoint\s*=\s*(?:cli|vscode|jetbrains|gui)|claude.?code.+issues|give feedback.+claude.?code|you are .{0,30}(?:powerful )?ai agent|orchestration capabilities|OhMyOpenCode|<agent-identity>|<Role>|<Behavior_Instructions>/i;
-    const flatten = (content) =>
-      typeof content === "string"
-        ? content
-        : Array.isArray(content)
-          ? content.map((b) => (b && typeof b.text === "string" ? b.text : "")).join("\n")
-          : "";
+    // Tencent rejects CLI identity markers with 400/11128; sanitize only those phrases.
     if (Array.isArray(transformed.messages)) {
       transformed.messages = transformed.messages.map((message) => {
-        if (!message || message.role !== "system") return message;
-        const text = flatten(message.content);
-        if (!text) return message;
-        if (text.length > 2000 || AGENT_PATTERN.test(text)) {
-          return typeof message.content === "string"
-            ? { ...message, content: NEUTRAL_PROMPT }
-            : { ...message, content: [{ type: "text", text: NEUTRAL_PROMPT }] };
-        }
-        return message;
+        if (!SYSTEM_ROLES.has(message?.role)) return message;
+        const content = sanitizeCodeBuddySystemPrompt(message.content);
+        return content === message.content ? message : { ...message, content };
       });
     }
 
