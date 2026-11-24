@@ -1,3 +1,40 @@
+# v0.6.39 (2026-11-24)
+
+Upstream v0.5.123 merged in (34 upstream commits, 23 hand-resolved conflicts), then three rounds of deep review over the merged tree. The fork keeps its own pipelines, package names and 0.6.x version line; upstream's 0.5.x app version stays independent of it.
+
+## Fixes
+
+- **A region taken from unschema'd provider data could move the host that receives the credential** (`open-sse/services/kiroModels.js`, `open-sse/services/tokenRefresh/providers.js`, `open-sse/executors/kiro.js`). The Kiro catalog host and the IDC token endpoint were built from `providerSpecificData.region`; a region carrying a path or fragment (`x.attacker.tld/#`) re-pointed the request at a foreign host while the bearer token / client secret went with it. The region is validated against `AWS_REGION_PATTERN` before it is interpolated, and a non-string value falls back to `us-east-1` instead of throwing.
+- **The fresh-socket retry behind a proxy reused the pooled connection** (`open-sse/utils/proxyFetch.js`). `forceFreshSocket` reached the dispatcher options but not the cache key, so the pooled and the "fresh" request resolved to the same agent — the retry escaped the very socket it was escaping, and the fork's 60s reuse plus the stale-socket recovery stopped working behind a proxy. The key separates pooled from fresh dispatchers now, and the fresh agent drops the keep-alive window.
+- **The TLS fallback warning echoed the whole URL** (`open-sse/utils/proxyFetch.js`). The Gemini lanes carry the API key in the query string, and the "retrying with insecure TLS: <url>" line printed it into stdout. Only the host is logged.
+- **Codex GPT 6.2 advertised a 1.05M window it does not have** (`open-sse/providers/capabilities.js`). The generic `gpt-6.*` pattern won over the new 6.2 rows, so a 3.9x over-estimate reached the upstream as a 400. 6.2 Sol/Astra are 272K, the `[1m]` variants 872K.
+- **Two `auto` reasoning lanes were switched off** (`open-sse/providers/capabilities.js`). The Alibaba Token Plan `qwencloud` / `alitp-intl` `auto` rows lost reasoning, the 1M window and the qwen thinking format.
+- **SenseNova CN lost its flagship row, and intl offered levels the upstream rejects** (`open-sse/providers/capabilities.js`, `open-sse/providers/thinkingLevels.js`). `sensenova-6.8-flash` (CN: 1M, reasoning) is back, and the intl provider offers exactly the served levels (`none/low/medium/high/max`) instead of `minimal`/`xhigh`, which the intl endpoint rejects.
+- **Duplicate `gpt-6.1-sol` row in the codex table** (`open-sse/providers/capabilities.js`).
+- **Two auto-import routes handed host CLI credentials to the LAN** (`src/dashboardGuard.js`). `commandcode` and `xiaomi-mimo` read a credential file from the host and put the live `apiKey` (plus MiMo's `passToken`) in the response body, but sat outside `LOCAL_ONLY_PATHS` while their four siblings were inside it — and the daemon binds `0.0.0.0` by default, so in the documented `requireLogin=false` mode any LAN peer could POST and collect the keys. Both are loopback-only now.
+- **The database export trusted the CLI-token header's presence** (`src/app/api/settings/database/route.js`). Any `x-9r-cli-token` value skipped the password re-auth for a full DB export/import. The header is compared against the same machineId-derived token the guard itself checks.
+- **Merge alignment** (`open-sse/providers/registry/nvidia.js`, `open-sse/handlers/systemoneCore.js`, `open-sse/providers/capabilities.js`, `tests/`): NVIDIA's 8 embedding models follow the fork's bare-id plus `upstreamModelId` convention, the retired `nv-embedqa-e5-v5` is gone, Cloudflare's System One `{model}` placeholder carries the full model path, and the mistral rows upstream lists without publishing them are registered as known-dead rows instead of being published.
+
+## Upstream v0.5.123 (merged)
+
+- Antigravity: Gemini 4 Hydrogen tiers, the 2.33.0 agent identity inside `systemInstruction`, the corrected model ids and thinking tiers, the seven fake-429 prompt lines removed, and the per-account model catalog.
+- Kiro: the CreateResponse fallback on 429, the IDE 1.4.154 client identity on every call, and the region-scoped bearer.
+- New lanes: OpenDesign Go, DeepRelay and Synthetic quota tracking; Codex GPT 6.2 Sol / Astra; ElevenLabs live TTS plus `scribe_v3` STT; the 8 NVIDIA NIM embedding models with `input_type`; the Token Saver REA toggle.
+- Cloudflare: the retired Workers AI models dropped, the System One `clef` family added, the `result` envelope unwrapped, and the proxy-pool worker uploaded as a hand-built multipart body.
+- Also upstream: the translator billing-header strip, the Alibaba Token Plan transports and models, the Mistral delta and Kimi K3.1 fixes, the OpenCode Go probe header, the Qoder image-upload signature, the usage number formatting and the i18n leftovers.
+
+## Verified, no change
+
+- The fork's keep-alive split: 60s/600s reuse plus the upstream recovery net, with `UPSTREAM_KEEPALIVE_TIMEOUT_MS=4000` as the escape hatch.
+- The fork's registry conventions (bare ids plus `upstreamModelId`, `/v1/models` prefix stripping, provider > model > pattern capability priority) and the three fork-only pipelines.
+
+## Regression tests
+
+- Full suite: 550 files, 5840 cases, 0 failing (14 expected-fail per baseline).
+- 12 new guards in `tests/unit/review-hardening.test.js`, each mutation-verified: reverting the fix it protects turns the run red.
+- Build green (155 pages), lint clean, and a `no-undef` / `no-dupe-keys` / `no-redeclare` scan over all 146 changed JS files reports no real defect.
+- Upstream<->fork two-way line reconciliation over the merge: every missing upstream line (58) and every dropped fork line (11) traces to a deliberate replacement — no upstream fix lost, no fork fix eaten.
+
 # v0.6.38 (2026-11-22)
 
 End-to-end deep review of the CodeBuddy pair (CN + intl), with CodeArts/DevEco re-verified on top of v0.6.37. One defect fixed, the live behaviors behind the review confirmed.
